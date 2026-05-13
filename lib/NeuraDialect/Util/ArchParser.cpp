@@ -15,8 +15,11 @@ ArchParser::ArchParser(const std::string &architecture_spec_file)
 
 mlir::FailureOr<Architecture> ArchParser::getArchitecture() {
   // Default values for architecture specification file.
-  constexpr int kMultiCgraDefaultRows = 1;
-  constexpr int kMultiCgraDefaultColumns = 1;
+  // Uses 4x4 to match the hardcoded constants in allocation_utils.h
+  // (kCgraGridRows / kCgraGridCols) so that passes reading the
+  // architecture automatically get the same grid dimensions.
+  constexpr int kMultiCgraDefaultRows = 4;
+  constexpr int kMultiCgraDefaultColumns = 4;
   constexpr int kPerCgraDefaultRows = 4;
   constexpr int kPerCgraDefaultColumns = 4;
   constexpr int kDefaultMaxCtrlMemItems = 20;
