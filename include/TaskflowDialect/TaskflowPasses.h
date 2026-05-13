@@ -24,7 +24,8 @@ void registerLinalgToAffineConversionPassPipeline();
 #include "TaskflowDialect/TaskflowPasses.h.inc"
 std::unique_ptr<mlir::Pass> createConstructHyperblockFromTaskPass();
 std::unique_ptr<mlir::Pass> createClassifyCountersPass();
-std::unique_ptr<mlir::Pass> createOrchestrateTaskOnCgraPass();
+std::unique_ptr<mlir::Pass> createAllocateCgraToTaskPass();
+std::unique_ptr<mlir::Pass> createMapTaskOnCgraPass();
 std::unique_ptr<mlir::Pass> createFuseTaskPass();
 
 //=========================================================//

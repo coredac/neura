@@ -241,7 +241,7 @@ public:
       // If the task already has profiling attributes (e.g., from fusion),
       // skip expensive speculative lowering and use those directly.
       bool has_precomputed =
-          task->hasAttr("compiled_ii") && task->hasAttr("profile_info");
+          task->hasAttr("compiled_ii") && task->hasAttr("steps");
       if (!has_precomputed) {
         // Speculative lowering to Neura to get real metrics.
         profileTask(node.get(), task, skip_mapper);
@@ -255,9 +255,9 @@ public:
       }
 
       // Overrides with explicit attributes if present.
-      if (auto profile = task->getAttrOfType<DictionaryAttr>("profile_info"))
-        if (auto dur = dyn_cast_or_null<IntegerAttr>(profile.get("duration")))
-          node->steps = dur.getInt();
+      if (auto attr = task->getAttrOfType<IntegerAttr>("steps")) {
+        node->steps = attr.getInt();
+      }
       if (auto attr = task->getAttrOfType<IntegerAttr>("compiled_ii")) {
         node->ii = attr.getInt();
       }
@@ -867,11 +867,11 @@ public:
       // Check if incrementing cgra_count is feasible on the 4×4 grid.
       // TODO: This currently only checks the capacity (total CGRA count).
       // Ideally, we should invoke a global placement pass (aka
-      // OrchestrateTaskOnCgraPass) here to verify if the speculatively increased CGRA
+      // MapTaskOnCgraPass) here to verify if the speculatively increased CGRA
       // count and its proposed shape actually fit on the 4x4 grid alongside
       // other previously allocated tasks.
       //
-      // Currently, OrchestrateTaskOnCgraPass does not support multi-CGRA task
+      // Currently, MapTaskOnCgraPass does not support multi-CGRA task
       // placement. Once it does, we should call it here; if global placement
       // fails for the "best" shape, we should backtrack and try alternative
       // shapes before saturating the node.
@@ -1550,18 +1550,11 @@ private:
       TaskGraphNode fused_node(/*id=*/0, fused_task);
       fused_node.trip_count = fused_trip;
       profile_fn(&fused_node, fused_task);
-      {
-        OpBuilder b(fused_task);
-        MLIRContext *ctx = fused_task->getContext();
-        SmallVector<NamedAttribute, 1> profile_attrs;
-        profile_attrs.push_back(NamedAttribute(
-            StringAttr::get(ctx, "duration"),
-            b.getI32IntegerAttr(fused_node.steps)));
-        fused_task->setAttr("profile_info",
-                            DictionaryAttr::get(ctx, profile_attrs));
-        fused_task->setAttr("compiled_ii",
-                            b.getI64IntegerAttr(fused_node.ii));
-      }
+      fused_task->setAttr(
+          "steps", OpBuilder(fused_task).getI64IntegerAttr(fused_node.steps));
+      fused_task->setAttr(
+          "compiled_ii",
+          OpBuilder(fused_task).getI64IntegerAttr(fused_node.ii));
     }
 
     // Step 7: Replaces uses of original tasks' results.
@@ -1779,13 +1772,7 @@ struct ResourceAwareTaskOptimizationPass
             node->op->setAttr("compiled_ii", b.getI32IntegerAttr(node->ii));
           }
           if (node->steps != kUnprofiled) {
-            SmallVector<NamedAttribute, 1> profile_attrs;
-            profile_attrs.push_back(NamedAttribute(
-                StringAttr::get(b.getContext(), "duration"),
-                b.getI32IntegerAttr(node->steps)));
-            node->op->setAttr(
-                "profile_info",
-                DictionaryAttr::get(b.getContext(), profile_attrs));
+            node->op->setAttr("steps", b.getI32IntegerAttr(node->steps));
           }
           if (node->trip_count > 0) {
             node->op->setAttr("trip_count",
@@ -1827,15 +1814,7 @@ struct ResourceAwareTaskOptimizationPass
           node->op->setAttr("cgra_count",
                             b.getI32IntegerAttr(node->cgra_count));
           node->op->setAttr("compiled_ii", b.getI32IntegerAttr(node->ii));
-          {
-            SmallVector<NamedAttribute, 1> profile_attrs;
-            profile_attrs.push_back(NamedAttribute(
-                StringAttr::get(b.getContext(), "duration"),
-                b.getI32IntegerAttr(node->steps)));
-            node->op->setAttr(
-                "profile_info",
-                DictionaryAttr::get(b.getContext(), profile_attrs));
-          }
+          node->op->setAttr("steps", b.getI32IntegerAttr(node->steps));
           node->op->setAttr("trip_count",
                             b.getI32IntegerAttr(node->trip_count));
           // Writes cgra_shape attribute: simple "NxM" bounding-box string.

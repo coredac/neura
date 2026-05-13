@@ -1,6 +1,6 @@
 //===- allocation_utils.h - Shared CGRA allocation utilities --------------===//
 //
-// Shared utility types and functions used by OrchestrateTaskOnCgraPass and
+// Shared utility types and functions used by AllocateCgraToTaskPass and
 // ResourceAwareTaskOptimizationPass for 2D multi-CGRA grid placement
 // feasibility checks and task-to-CGRA mapping.
 //

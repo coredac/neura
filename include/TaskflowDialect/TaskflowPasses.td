@@ -63,42 +63,26 @@ def ClassifyCounters : Pass<"classify-counters", "ModuleOp"> {
   let constructor = "taskflow::createClassifyCountersPass()";
 }
 
-def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
-  let summary = "Orchestrates Taskflow tasks onto a 2D multi-CGRA grid "
-                "(spatial or spatial-temporal)";
+def AllocateCgraToTask : Pass<"allocate-cgra-to-task", "func::FuncOp"> {
+  let summary = "Maps Taskflow tasks onto a 2D multi-CGRA grid array";
   let description = [{
-    Maps Taskflow tasks onto a 2D multi-CGRA grid using a
-    routing-critical-path-first placement strategy combined with either a
-    purely spatial or a spatial-temporal orchestration mode.
-
-    Placement: Tasks with the longest downstream dependency chains are placed
-    first so that their successors can land on adjacent CGRAs, minimising
-    inter-task communication distance.  Tasks with direct SSA dependencies
-    are placed on adjacent CGRAs to enable direct data forwarding.  Irregular
-    multi-CGRA shapes (rectangular, L, T) are supported via the cgra_shape
-    attribute set by the upstream ResourceAwareTaskOptimization pass.
-
-    spatial:
-      Each CGRA is assigned to at most one task.  Asserts when the number of
-      tasks exceeds the grid size.
-
-    spatial-temporal (default):
-      Adds a time_slot dimension to every CGRA assignment.  An ASAP schedule
-      is computed from SSA and memory dependencies (RAW, WAW, WAR); tasks with
-      no data dependencies share the same time slot (spatial parallelism);
-      tasks that would over-subscribe the grid — including independent tasks
-      when all CGRAs are occupied — are scheduled at a later time slot on the
-      same physical CGRAs (temporal reuse).
+    This pass maps Taskflow tasks onto a 2D multi-CGRA grid array.
+    Tasks with direct SSA dependencies (producer-consumer pairs) are placed
+    on adjacent CGRAs to enable direct data forwarding without going through
+    the network.
 
     Uses a default 4x4 CGRA grid.
   }];
-  let options = [Option<
-      "orchestrationMode", "orchestration-mode", "std::string",
-      /*default=*/"\"spatial-temporal\"",
-      "Task orchestration mode: 'spatial' (one task per CGRA, asserts if "
-      "tasks exceed the grid size) or 'spatial-temporal' (default, "
-      "time-multiplexes CGRAs so task count is not bounded by grid size).">];
-  let constructor = "taskflow::createOrchestrateTaskOnCgraPass()";
+  let constructor = "taskflow::createAllocateCgraToTaskPass()";
+}
+
+def MapTaskOnCgra : Pass<"map-task-on-cgra", "func::FuncOp"> {
+  let summary = "Maps Taskflow tasks onto a CGRA using heuristic mapping";
+  let description = [{
+    This pass maps Taskflow hyperblock operations onto CGRA tiles using the
+    heuristic mapping algorithm (ALAP scheduling + backtracking placement).
+  }];
+  let constructor = "taskflow::createMapTaskOnCgraPass()";
 }
 
 def FuseTask : Pass<"fuse-task", "func::FuncOp"> {

@@ -1,28 +1,8 @@
 //===- RoutingCriticalPathAllocation.cpp - Routing-critical-path-first ----===//
 //
 // Implements the RoutingCriticalPathAllocation strategy.  The core algorithm
-// lives in the TaskOrchestrator class (internal to this file);
-// runAllocation() instantiates it and delegates to TaskOrchestrator::place().
-//
-// Supports two orchestration modes (controlled by OrchestrationMode):
-//   Spatial         — places each task on a unique CGRA; asserts if tasks
-//                     exceed the grid size.
-//   SpatialTemporal — adds a time-slot dimension (ASAP scheduling with
-//                     memory-dependency ordering) so that CGRAs can be
-//                     reused across context slots.
-//
-// Output attributes written on each taskflow.task op:
-//   task_orchestration_info — spatial-temporal placement result:
-//     cgra_positions      = [{col, context_id, row}, ...]
-//     read_sram_locations = [{col, row}, ...]
-//     write_sram_locations= [{col, row}, ...]
-//   profile_info — task execution profile (written if not already present):
-//     duration = N   (time slots; default 1 when no profiling data exists)
-//
-// The context_id is the logical execution-context index of this task on a
-// given CGRA tile: the first task assigned to a tile gets context_id 0, the
-// next gets 1, etc. (ordered by internal scheduling start_time).  This maps
-// directly to the hardware context-memory index.
+// lives in the TaskMapper class (internal to this file); runAllocation()
+// instantiates it and delegates to TaskMapper::place().
 //
 //===----------------------------------------------------------------------===//
 
@@ -53,25 +33,12 @@ using namespace mlir::taskflow;
 namespace {
 
 //===----------------------------------------------------------------------===//
-// CGRA Grid Position (spatial + temporal)
+// CGRA Grid Position
 //===----------------------------------------------------------------------===//
-/// Represents a spatial-temporal allocation for a task on the 2D CGRA grid.
-///
-/// A task assigned to (row, col) occupies that CGRA for the half-open interval
-/// [start_time, start_time + duration).  Two tasks may share the same CGRA as
-/// long as their intervals do not overlap, enabling time-multiplexed reuse.
-///
-/// start_time and duration are internal scheduling quantities; they are not
-/// written to the IR directly.  Instead the output attribute uses context_id —
-/// the 0-based index of this task in the sorted list of tasks assigned to the
-/// same (row, col) CGRA tile (sorted by start_time ascending).  context_id
-/// maps directly to the hardware context-memory index.
+/// Represents a position on the 2D CGRA grid.
 struct CgraPosition {
   int row;
   int col;
-  int start_time = 0; // Internal scheduling; not emitted to IR.
-  int duration = 1;   // Read from profile_info; not emitted to IR.
-  int context_id = 0; // Emitted to IR as task_orchestration_info.
 
   bool operator==(const CgraPosition &other) const {
     return row == other.row && col == other.col;
@@ -100,8 +67,7 @@ struct TaskPlacement {
 
   /// Returns the primary (first) CGRA position.
   CgraPosition primary() const {
-    return cgra_positions.empty() ? CgraPosition{-1, -1, 0, 0}
-                                  : cgra_positions[0];
+    return cgra_positions.empty() ? CgraPosition{-1, -1} : cgra_positions[0];
   }
 
   /// Returns the number of CGRAs assigned to this task.
@@ -137,29 +103,15 @@ struct TaskNode {
   // Edges based on original (pre-streaming-fusion) memory accesses.
   SmallVector<MemoryNode *> read_memrefs;  // MemoryNodes this task reads.
   SmallVector<MemoryNode *> write_memrefs; // MemoryNodes this task writes.
-  // Explicit taskflow dependency edges between tasks, including value inputs
-  // and dependency read/write token inputs.
-  SmallVector<TaskNode *> ssa_users;    // Tasks that depend on this task.
-  SmallVector<TaskNode *> ssa_operands; // Tasks this task depends on.
+  // SSA value edges between tasks.
+  SmallVector<TaskNode *> ssa_users; // Tasks that consume this task's output.
+  SmallVector<TaskNode *>
+      ssa_operands; // Tasks whose output this task consumes.
 
   // Placement result.
   SmallVector<CgraPosition> placement;
 
   TaskNode(size_t id, TaskflowTaskOp op) : id(id), op(op) {}
-
-  /// Returns the task's execution duration in time slots.
-  ///
-  /// Reads from profile_info.duration if present (written by
-  /// ResourceAwareTaskOptimizationPass after profiling).
-  /// Defaults to 1 when no profiling data is available.
-  int getDuration() const {
-    if (auto profile = op->getAttrOfType<DictionaryAttr>("profile_info")) {
-      if (auto dur = dyn_cast_or_null<IntegerAttr>(profile.get("duration"))) {
-        return std::max(1, static_cast<int>(dur.getInt()));
-      }
-    }
-    return 1;
-  }
 };
 
 /// Represents a MemRef node in the dependency graph.
@@ -170,7 +122,7 @@ struct MemoryNode {
   SmallVector<TaskNode *> readers; // Tasks that read this memref.
   SmallVector<TaskNode *> writers; // Tasks that write this memref.
 
-  // SRAM assignment result, populated by TaskOrchestrator::assignAllSrams().
+  // SRAM assignment result — populated by TaskMapper::assignAllSrams().
   std::optional<CgraPosition> assigned_sram_pos;
 
   MemoryNode(Value memref) : memref(memref) {}
@@ -210,16 +162,17 @@ public:
       }
     }
 
-    // Phase 3: Build explicit task dependency edges. Keep scalar/value SSA
-    // dependencies visible through value_inputs, and also scan all operands to
-    // catch taskflow dependency_read_in/dependency_write_in token edges.
+    // Phase 3: Build SSA edges (inter-task value dependencies).
+    // A consumer task directly uses a value produced by a producer task.
     for (auto &consumer_node : task_nodes) {
-      for (Value value_input : consumer_node->op.getValueInputs()) {
-        addProducerDependency(value_input, consumer_node.get());
-      }
-
-      for (Value operand : consumer_node->op->getOperands()) {
-        addProducerDependency(operand, consumer_node.get());
+      // Iterates all operands to be safe (not only getValueInputs()).
+      for (Value operand : consumer_node->op.getValueInputs()) {
+        if (auto producer_op = operand.getDefiningOp<TaskflowTaskOp>()) {
+          if (auto *producer_node = op_to_node[producer_op]) {
+            producer_node->ssa_users.push_back(consumer_node.get());
+            consumer_node->ssa_operands.push_back(producer_node);
+          }
+        }
       }
     }
   }
@@ -229,38 +182,17 @@ private:
     if (memref_to_node.count(memref)) {
       return memref_to_node[memref];
     }
+
     auto node = std::make_unique<MemoryNode>(memref);
     MemoryNode *ptr = node.get();
     memref_to_node[memref] = ptr;
     memory_nodes.push_back(std::move(node));
     return ptr;
   }
-
-  void addProducerDependency(Value operand, TaskNode *consumer) {
-    if (auto producer_op = operand.getDefiningOp<TaskflowTaskOp>()) {
-      if (auto *producer = op_to_node[producer_op]) {
-        addDependencyEdge(producer, consumer);
-      }
-    }
-  }
-
-  void addDependencyEdge(TaskNode *producer, TaskNode *consumer) {
-    if (producer == consumer) {
-      return;
-    }
-    if (!llvm::is_contained(producer->ssa_users, consumer)) {
-      producer->ssa_users.push_back(consumer);
-    }
-    if (!llvm::is_contained(consumer->ssa_operands, producer)) {
-      consumer->ssa_operands.push_back(producer);
-    }
-  }
 };
 
 //===----------------------------------------------------------------------===//
-// Task Orchestrator
-//===----------------------------------------------------------------------===//
-/// Orchestrates a task-memory graph onto a 2D multi-CGRA grid using
+/// Maps a task-memory graph onto a 2D multi-CGRA grid using
 /// routing-critical-path-first ordering.
 ///
 /// Uses a two-phase fixed-point iteration:
@@ -268,21 +200,17 @@ private:
 ///            processing tasks in routing-critical-path-first order.
 ///   Phase 2: Assign each MemRef to the nearest SRAM given task positions.
 /// Iterates until SRAM assignments converge.
-///
-/// In SpatialTemporal mode, ASAP scheduling is applied via
-/// computeEarliestStartTime() so that each task starts as soon as all explicit
-/// taskflow dependencies have completed.
-class TaskOrchestrator {
+class TaskMapper {
 public:
-  TaskOrchestrator(int grid_rows, int grid_cols, OrchestrationMode mode)
-      : grid_rows_(grid_rows), grid_cols_(grid_cols), mode_(mode) {
-    this->cgra_occupancy_.resize(grid_rows_);
-    for (auto &row : this->cgra_occupancy_) {
-      row.resize(grid_cols_);
+  TaskMapper(int grid_rows, int grid_cols)
+      : grid_rows_(grid_rows), grid_cols_(grid_cols) {
+    occupied_.resize(grid_rows_);
+    for (auto &row : occupied_) {
+      row.resize(grid_cols_, false);
     }
   }
 
-  /// Orchestrates all tasks and performs iterative SRAM assignment for `func`.
+  /// Places all tasks and performs iterative SRAM assignment for `func`.
   void place(func::FuncOp func) {
     SmallVector<TaskflowTaskOp> tasks;
     func.walk([&](TaskflowTaskOp task) { tasks.push_back(task); });
@@ -301,25 +229,31 @@ public:
       return;
     }
 
-    // Dependency depth = longest path from this node to any sink in the
-    // dependency graph.  Tasks with higher depth have longer downstream chains;
-    // placing them first gives successors the best chance of landing adjacent.
+    // Computes dependency depth for each task.
+    // Dependency depth = longest path from this node to any sink node in the
+    // dependency graph (via SSA or memory edges).  Tasks with higher depth
+    // have longer dependent chains after them; placing them first gives their
+    // successors the best chance of landing on adjacent grid cells.
     computeDependencyDepth(graph);
 
     // Sorts tasks by dependency depth (routing-critical-path-first).
     SmallVector<TaskNode *> sorted_tasks;
-    for (auto &node : graph.task_nodes) {
+    for (auto &node : graph.task_nodes)
       sorted_tasks.push_back(node.get());
-    }
+
     std::stable_sort(sorted_tasks.begin(), sorted_tasks.end(),
                      [](TaskNode *a, TaskNode *b) {
                        return a->dependency_depth > b->dependency_depth;
                      });
 
-    // Fixed-point iteration: placement scoring depends on SRAM positions, and
-    // SRAM assignment depends on task positions.  Converges when SRAMs are
-    // stable.  On iteration 0 SRAMs are unset, so placement is driven purely
-    // by SSA proximity.
+    // Fixed-point iteration: task placement scoring depends on SRAM
+    // positions (memory proximity), and SRAM assignment depends on task
+    // positions (centroid of accessing tasks).  Each iteration re-places
+    // all tasks using the latest SRAM assignments, then re-assigns SRAMs.
+    // On iteration 0, all SRAM positions are unset (no initial random
+    // distribution), so the first task placement is driven purely by SSA
+    // proximity; SRAM influence is introduced from iteration 1 onwards.
+    // Converges when SRAM assignments stabilise (no change between iters).
     constexpr int kMaxIterations = 10;
 
     for (int iter = 0; iter < kMaxIterations; ++iter) {
@@ -327,7 +261,7 @@ public:
         resetTaskPlacements(graph);
       }
 
-      // Phase 1: Place tasks.
+      // Phase 1: Place tasks (scoring uses current SRAM assignments).
       for (TaskNode *task_node : sorted_tasks) {
         int cgra_count = 1;
         if (auto attr =
@@ -343,60 +277,29 @@ public:
                "validated by the upstream resource-aware optimization pass "
                "or manually assigned resource binding attributes");
 
+        // Commits placement and marks occupied grid cells.
         for (const auto &pos : placement.cgra_positions) {
           task_node->placement.push_back(pos);
         }
 
         for (const auto &pos : placement.cgra_positions) {
-          if (pos_in_bounds(pos)) {
-            markOccupied(pos.row, pos.col, pos.start_time, pos.duration);
+          if (pos.row >= 0 && pos.row < grid_rows_ && pos.col >= 0 &&
+              pos.col < grid_cols_) {
+            occupied_[pos.row][pos.col] = true;
           }
         }
       }
 
-      // Phase 2: Assign SRAMs.
+      // Phase 2: Assign SRAMs (assuming fixed task positions).
+      // If nothing moved, task scores won't change -> convergence reached.
       bool sram_moved = assignAllSrams(graph);
+
       if (iter > 0 && !sram_moved) {
         break;
       }
     }
 
-    // Compute context_id for each task at each assigned CGRA cell.
-    // For every physical CGRA (row, col), sort all tasks assigned to it by
-    // their internal start_time, then assign context_id = 0, 1, 2, ...
-    // This maps directly to the hardware context-memory index.
-    using TaskInterval = std::pair<int, TaskNode *>; // (start_time, node)
-    std::vector<std::vector<SmallVector<TaskInterval, 4>>> cell_tasks(
-        grid_rows_, std::vector<SmallVector<TaskInterval, 4>>(grid_cols_));
-
-    for (auto &task_node : graph.task_nodes) {
-      for (CgraPosition &pos : task_node->placement) {
-        if (pos_in_bounds(pos)) {
-          cell_tasks[pos.row][pos.col].push_back(
-              {pos.start_time, task_node.get()});
-        }
-      }
-    }
-
-    for (int r = 0; r < grid_rows_; ++r) {
-      for (int c = 0; c < grid_cols_; ++c) {
-        auto &tasks_at_cell = cell_tasks[r][c];
-        std::stable_sort(tasks_at_cell.begin(), tasks_at_cell.end(),
-                         [](const TaskInterval &a, const TaskInterval &b) {
-                           return a.first < b.first;
-                         });
-        for (int ctx = 0; ctx < static_cast<int>(tasks_at_cell.size()); ++ctx) {
-          TaskNode *tn = tasks_at_cell[ctx].second;
-          for (CgraPosition &pos : tn->placement) {
-            if (pos.row == r && pos.col == c) {
-              pos.context_id = ctx;
-            }
-          }
-        }
-      }
-    }
-
-    // Write output attributes.
+    // Annotates result: writes task_allocation_info attribute to each task op.
     OpBuilder builder(func.getContext());
     for (auto &task_node : graph.task_nodes) {
       if (task_node->placement.empty()) {
@@ -406,20 +309,15 @@ public:
       SmallVector<NamedAttribute, 4> mapping_attrs;
 
       // 1. CGRA positions.
-      // Keys are in alphabetical order as required by DictionaryAttr:
-      // col < context_id < row.
       SmallVector<Attribute> pos_attrs;
       for (const auto &pos : task_node->placement) {
-        SmallVector<NamedAttribute, 3> coord_attrs;
-        coord_attrs.push_back(
-            NamedAttribute(StringAttr::get(func.getContext(), "col"),
-                           builder.getI32IntegerAttr(pos.col)));
-        coord_attrs.push_back(
-            NamedAttribute(StringAttr::get(func.getContext(), "context_id"),
-                           builder.getI32IntegerAttr(pos.context_id)));
+        SmallVector<NamedAttribute, 2> coord_attrs;
         coord_attrs.push_back(
             NamedAttribute(StringAttr::get(func.getContext(), "row"),
                            builder.getI32IntegerAttr(pos.row)));
+        coord_attrs.push_back(
+            NamedAttribute(StringAttr::get(func.getContext(), "col"),
+                           builder.getI32IntegerAttr(pos.col)));
         pos_attrs.push_back(
             DictionaryAttr::get(func.getContext(), coord_attrs));
       }
@@ -427,17 +325,17 @@ public:
           NamedAttribute(StringAttr::get(func.getContext(), "cgra_positions"),
                          builder.getArrayAttr(pos_attrs)));
 
-      // 2. Reads SRAM locations.
+      // 2. Read SRAM locations.
       SmallVector<Attribute> read_sram_attrs;
       for (MemoryNode *mem : task_node->read_memrefs) {
         if (mem->assigned_sram_pos) {
           SmallVector<NamedAttribute, 2> sram_coord;
           sram_coord.push_back(NamedAttribute(
-              StringAttr::get(func.getContext(), "col"),
-              builder.getI32IntegerAttr(mem->assigned_sram_pos->col)));
-          sram_coord.push_back(NamedAttribute(
               StringAttr::get(func.getContext(), "row"),
               builder.getI32IntegerAttr(mem->assigned_sram_pos->row)));
+          sram_coord.push_back(NamedAttribute(
+              StringAttr::get(func.getContext(), "col"),
+              builder.getI32IntegerAttr(mem->assigned_sram_pos->col)));
           read_sram_attrs.push_back(
               DictionaryAttr::get(func.getContext(), sram_coord));
         }
@@ -446,17 +344,18 @@ public:
           StringAttr::get(func.getContext(), "read_sram_locations"),
           builder.getArrayAttr(read_sram_attrs)));
 
-      // 3. Writes SRAM locations.
+      // 3. Write SRAM locations.
       SmallVector<Attribute> write_sram_attrs;
       for (MemoryNode *mem : task_node->write_memrefs) {
         if (mem->assigned_sram_pos) {
           SmallVector<NamedAttribute, 2> sram_coord;
           sram_coord.push_back(NamedAttribute(
-              StringAttr::get(func.getContext(), "col"),
-              builder.getI32IntegerAttr(mem->assigned_sram_pos->col)));
-          sram_coord.push_back(NamedAttribute(
               StringAttr::get(func.getContext(), "row"),
               builder.getI32IntegerAttr(mem->assigned_sram_pos->row)));
+          sram_coord.push_back(NamedAttribute(
+              StringAttr::get(func.getContext(), "col"),
+              builder.getI32IntegerAttr(mem->assigned_sram_pos->col)));
+
           write_sram_attrs.push_back(
               DictionaryAttr::get(func.getContext(), sram_coord));
         }
@@ -465,91 +364,39 @@ public:
           StringAttr::get(func.getContext(), "write_sram_locations"),
           builder.getArrayAttr(write_sram_attrs)));
 
+      // Sets task_allocation_info attribute on the task op.
       task_node->op->setAttr(
-          "task_orchestration_info",
+          "task_allocation_info",
           DictionaryAttr::get(func.getContext(), mapping_attrs));
 
-      // Write profile_info = {duration: N} if not already present so that
-      // downstream passes can read the task duration without re-computing it.
-      if (!task_node->op->hasAttr("profile_info")) {
-        SmallVector<NamedAttribute, 1> profile_attrs;
-        profile_attrs.push_back(
-            NamedAttribute(StringAttr::get(func.getContext(), "duration"),
-                           builder.getI32IntegerAttr(task_node->getDuration())));
-        task_node->op->setAttr("profile_info",
-                               DictionaryAttr::get(func.getContext(),
-                                                   profile_attrs));
-      }
-
-      // Removes upstream resource-binding attributes that have been consumed.
+      // Removes upstream resource-binding attributes that have now been
+      // consumed by allocation. Downstream passes should read the
+      // task_allocation_info attribute instead.
       task_node->op->removeAttr("cgra_count");
       task_node->op->removeAttr("cgra_shape");
     }
   }
 
 private:
-  bool pos_in_bounds(const CgraPosition &pos) const {
-    return pos.row >= 0 && pos.row < this->grid_rows_ && pos.col >= 0 &&
-           pos.col < this->grid_cols_;
-  }
-
-  /// Returns true if CGRA (row, col) is occupied during
-  /// [start_time, start_time + duration).
-  ///
-  /// Spatial mode: occupied once any task is assigned (permanently taken).
-  /// SpatialTemporal mode: occupied if any existing interval overlaps.
-  bool isOccupied(int row, int col, int start_time, int duration) const {
-    if (mode_ == OrchestrationMode::Spatial) {
-      return !cgra_occupancy_[row][col].empty();
-    }
-    for (auto [occupied_start, occupied_end] : cgra_occupancy_[row][col]) {
-      if (start_time < occupied_end &&
-          start_time + duration > occupied_start) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  void markOccupied(int row, int col, int start_time, int duration) {
-    cgra_occupancy_[row][col].push_back({start_time, start_time + duration});
-  }
-
+  /// Clears all task placements and resets the occupied-cell grid.
   void resetTaskPlacements(TaskMemoryGraph &graph) {
     for (auto &task : graph.task_nodes) {
       task->placement.clear();
     }
-    for (auto &row : this->cgra_occupancy_) {
-      for (auto &col_intervals : row) {
-        col_intervals.clear();
-      }
+    // Clears grid.
+    for (int r = 0; r < grid_rows_; ++r) {
+      std::fill(occupied_[r].begin(), occupied_[r].end(), false);
     }
   }
 
-  /// Computes the earliest feasible start time for `task_node` such that all
-  /// explicit taskflow dependencies have completed.
-  int computeEarliestStartTime(const TaskNode *task_node) const {
-    int min_time = 0;
-
-    auto updateFromPlacement = [&](const TaskNode *other) {
-      if (other != task_node && !other->placement.empty()) {
-        const CgraPosition &pos = other->placement[0];
-        min_time = std::max(min_time, pos.start_time + pos.duration);
-      }
-    };
-
-    for (const TaskNode *pred : task_node->ssa_operands) {
-      updateFromPlacement(pred);
-    }
-    return min_time;
-  }
-
-  /// Assigns each MemoryNode to the SRAM at the centroid of all accessing
-  /// CGRAs.  Returns true if any assignment changed (convergence criterion).
+  /// Assigns each MemoryNode to the SRAM at the centroid of all CGRAs that
+  /// access it (readers + writers).  Returns true if any assignment changed,
+  /// which is used as the convergence criterion for the outer iteration loop.
   bool assignAllSrams(TaskMemoryGraph &graph) {
     bool changed = false;
     for (auto &mem_node : graph.memory_nodes) {
       int total_row = 0, total_col = 0, count = 0;
+      // Computes centroid of all tasks that read this memory.
       for (TaskNode *reader : mem_node->readers) {
         for (const CgraPosition &pos : reader->placement) {
           total_row += pos.row;
@@ -557,6 +404,7 @@ private:
           count++;
         }
       }
+      // Computes centroid of all tasks that write this memory.
       for (TaskNode *writer : mem_node->writers) {
         for (const CgraPosition &pos : writer->placement) {
           total_row += pos.row;
@@ -567,9 +415,10 @@ private:
 
       std::optional<CgraPosition> new_sram_pos;
       if (count > 0) {
+        // Rounds to the nearest integer (round-half-up).
         int avg_row = (total_row + count / 2) / count;
         int avg_col = (total_col + count / 2) / count;
-        new_sram_pos = CgraPosition{avg_row, avg_col, 0, 0};
+        new_sram_pos = CgraPosition{avg_row, avg_col};
       }
 
       if (mem_node->assigned_sram_pos != new_sram_pos) {
@@ -582,11 +431,21 @@ private:
 
   // Finds the best placement for `task_node` on the 2D multi-CGRA grid.
   //
-  // In SpatialTemporal mode an outer time loop applies ASAP scheduling:
-  // the earliest feasible start time is computed from dependency constraints,
-  // then incremented by task_duration until a valid grid position is found.
+  // The `cgra_shape` attribute set by the upstream
+  // ResourceAwareTaskOptimization pass determines which base shape to use. This
+  // function enumerates all rotations of that shape and picks the
+  // highest-scoring free grid position across all rotations.
+  //
+  // If no `cgra_shape` attribute is present (e.g. cgra_count == 1 or the task
+  // was not processed by the resource-binding pass), falls back to enumerating
+  // all rectangular factorizations of cgra_count, then a polyomino DFS.
+  //
+  // Returns an empty TaskPlacement only if no valid position exists on the grid
+  // (should not happen if cgra_count was validated upstream).
   TaskPlacement findBestPlacement(TaskNode *task_node, int cgra_count,
                                   TaskMemoryGraph &graph) {
+    // Reads the pre-determined base shape from the upstream pass.
+    // getAllPlacementShapes() enumerates all valid rectangular factorizations.
     SmallVector<CgraShape> shapes_to_try;
     if (auto attr = task_node->op->getAttrOfType<StringAttr>("cgra_shape")) {
       StringRef cgra_shape_str = attr.getValue();
@@ -595,76 +454,58 @@ private:
         shapes_to_try = rotationsOf(base);
       }
     }
+
+    // Fallback: no cgra_shape attribute, enumerates all valid shapes.
     if (shapes_to_try.empty()) {
       shapes_to_try = getAllPlacementShapes(cgra_count);
     }
 
-    int task_duration = task_node->getDuration();
+    int best_score = INT_MIN;
+    TaskPlacement best_placement;
 
-    int t_start = (mode_ == OrchestrationMode::SpatialTemporal)
-                      ? computeEarliestStartTime(task_node)
-                      : 0;
-    int t_max = (mode_ == OrchestrationMode::SpatialTemporal)
-                    ? t_start + grid_rows_ * grid_cols_ * task_duration
-                    : 0;
-
-    for (int t = t_start; t <= t_max; t += task_duration) {
-      int best_score = INT_MIN;
-      TaskPlacement best_at_t;
-
-      for (const CgraShape &shape : shapes_to_try) {
-        SmallVector<std::pair<int, int>> shape_offsets;
-        if (shape.is_rectangular) {
-          for (int r = 0; r < shape.rows; ++r) {
-            for (int c = 0; c < shape.cols; ++c) {
-              shape_offsets.push_back({c, r});
-            }
-          }
-        } else {
-          shape_offsets = SmallVector<std::pair<int, int>>(
-              shape.cgra_positions.begin(), shape.cgra_positions.end());
-        }
-
-        for (int origin_row = 0; origin_row < grid_rows_; ++origin_row) {
-          for (int origin_col = 0; origin_col < grid_cols_; ++origin_col) {
-            bool valid = true;
-            TaskPlacement candidate;
-            for (auto &[col_off, row_off] : shape_offsets) {
-              int abs_row = origin_row + row_off;
-              int abs_col = origin_col + col_off;
-              if (abs_row < 0 || abs_row >= grid_rows_ || abs_col < 0 ||
-                  abs_col >= grid_cols_ ||
-                  isOccupied(abs_row, abs_col, t, task_duration)) {
-                valid = false;
-                break;
-              }
-              candidate.cgra_positions.push_back(
-                  {abs_row, abs_col, t, task_duration, 0});
-            }
-            if (!valid) {
-              continue;
-            }
-            int score = computeScore(task_node, candidate, graph);
-            if (score > best_score) {
-              best_score = score;
-              best_at_t = candidate;
-            }
-          }
-        }
+    for (const CgraShape &shape : shapes_to_try) {
+      SmallVector<std::pair<int, int>> shape_offsets;
+      if (shape.is_rectangular) {
+        for (int r = 0; r < shape.rows; ++r)
+          for (int c = 0; c < shape.cols; ++c)
+            shape_offsets.push_back({c, r});
+      } else {
+        shape_offsets = SmallVector<std::pair<int, int>>(
+            shape.cgra_positions.begin(), shape.cgra_positions.end());
       }
 
-      if (!best_at_t.cgra_positions.empty()) {
-        return best_at_t;
-      }
-
-      if (mode_ == OrchestrationMode::Spatial) {
-        break;
+      for (int origin_row = 0; origin_row < grid_rows_; ++origin_row) {
+        for (int origin_col = 0; origin_col < grid_cols_; ++origin_col) {
+          // Checks that every cell of the rectangle is within bounds and free.
+          bool valid = true;
+          TaskPlacement candidate;
+          for (auto &[col_off, row_off] : shape_offsets) {
+            int abs_row = origin_row + row_off;
+            int abs_col = origin_col + col_off;
+            if (abs_row < 0 || abs_row >= grid_rows_ || abs_col < 0 ||
+                abs_col >= grid_cols_ || occupied_[abs_row][abs_col]) {
+              valid = false;
+              break;
+            }
+            candidate.cgra_positions.push_back({abs_row, abs_col});
+          }
+          if (!valid) {
+            continue;
+          }
+          // Scores the candidate by proximity to dependent tasks and SRAMs.
+          int score = computeScore(task_node, candidate, graph);
+          if (score > best_score) {
+            best_score = score;
+            best_placement = candidate;
+          }
+        }
       }
     }
-
-    return TaskPlacement{};
+    return best_placement;
   }
 
+  // Parses a `cgra_shape` IR attribute string into a base CgraShape.
+  // Accepts "NxM" (rectangular) and "NxM[(c0,r0)(c1,r1)...]" (non-rectangular).
   CgraShape parseCgraShapeToBase(StringRef cgra_shape, int cgra_count) {
     size_t bracket_pos = cgra_shape.find('[');
     auto [rows_str, rest] = cgra_shape.split('x');
@@ -672,10 +513,12 @@ private:
     rows_str.getAsInteger(10, rows);
 
     if (bracket_pos == StringRef::npos) {
+      // Rectangular: "NxM"
       rest.getAsInteger(10, cols);
       return CgraShape{rows, cols, /*is_rectangular=*/true, {}};
     }
 
+    // Non-rectangular: "NxM[(c0,r0)(c1,r1)...]"
     StringRef cols_str = rest.take_until([](char c) { return c == '['; });
     cols_str.getAsInteger(10, cols);
 
@@ -684,13 +527,11 @@ private:
     size_t pos = 0;
     while (pos < positions_str.size()) {
       size_t open = positions_str.find('(', pos);
-      if (open == StringRef::npos) {
+      if (open == StringRef::npos)
         break;
-      }
       size_t close = positions_str.find(')', open);
-      if (close == StringRef::npos) {
+      if (close == StringRef::npos)
         break;
-      }
       StringRef pair_str = positions_str.slice(open + 1, close);
       auto [col_str, row_str] = pair_str.split(',');
       int col_off = 0, row_off = 0;
@@ -699,25 +540,31 @@ private:
       positions.push_back({col_off, row_off});
       pos = close + 1;
     }
-    return CgraShape{rows, cols, /*is_rectangular=*/false, std::move(positions)};
+    return CgraShape{rows, cols, /*is_rectangular=*/false,
+                     std::move(positions)};
   }
 
+  // Generates all unique rotations of `base` as CgraShapes.
+  // Rectangular shapes produce both orientations (rows×cols and cols×rows).
+  // Non-rectangular shapes produce up to four 90° rotations, deduplicated.
   SmallVector<CgraShape> rotationsOf(const CgraShape &base) {
     SmallVector<CgraShape> result;
 
     if (base.is_rectangular) {
       result.push_back(base);
-      if (base.rows != base.cols) {
+      if (base.rows != base.cols)
         result.push_back(CgraShape{base.cols, base.rows, true, {}});
-      }
       return result;
     }
 
+    // Non-rectangular: generate 4 × 90° CW rotations, deduplicate by hash.
+    // Rotation formula in (col, row) space: (col, row) -> (row, -col).
     llvm::DenseSet<int64_t> seen_hashes;
     auto current_positions = SmallVector<std::pair<int, int>>(
         base.cgra_positions.begin(), base.cgra_positions.end());
 
     for (int rotation_count = 0; rotation_count < 4; ++rotation_count) {
+      // Normalises to non-negative offsets starting from (0, 0).
       int min_col = INT_MAX, min_row = INT_MAX;
       for (auto &[col, row] : current_positions) {
         min_col = std::min(min_col, col);
@@ -725,20 +572,18 @@ private:
       }
 
       SmallVector<std::pair<int, int>> normalised_positions;
-      for (auto &[col, row] : current_positions) {
+      for (auto &[col, row] : current_positions)
         normalised_positions.push_back({col - min_col, row - min_row});
-      }
 
+      // Hashes to deduplicate.
       auto sorted_positions = normalised_positions;
       llvm::sort(sorted_positions,
-                 [](const std::pair<int, int> &a, const std::pair<int, int> &b) {
-                   return a < b;
-                 });
+                 [](const std::pair<int, int> &a,
+                    const std::pair<int, int> &b) { return a < b; });
 
       int64_t position_hash = 0;
-      for (auto &[col, row] : sorted_positions) {
+      for (auto &[col, row] : sorted_positions)
         position_hash = position_hash * 131 + col * 17 + row;
-      }
 
       if (seen_hashes.insert(position_hash).second) {
         int max_col = 0, max_row = 0;
@@ -750,10 +595,10 @@ private:
             CgraShape{max_row + 1, max_col + 1, false, normalised_positions});
       }
 
+      // Applies 90° CW rotation: (col, row) -> (row, -col).
       SmallVector<std::pair<int, int>> rotated_positions;
-      for (auto &[col, row] : current_positions) {
+      for (auto &[col, row] : current_positions)
         rotated_positions.push_back({row, -col});
-      }
       current_positions = rotated_positions;
     }
     return result;
@@ -761,13 +606,11 @@ private:
 
   /// Computes the placement score for `task_node` at `placement`.
   ///
-  /// Score = α·SSA_Dist + β·Mem_Dist - γ·Context_Reuse.
+  /// Score = α·SSA_Dist + β·Mem_Dist.
   ///   SSA_Dist : sum of distances to already-placed SSA predecessors and
   ///              successors (negative; penalises far-away neighbours).
   ///   Mem_Dist : sum of distances to assigned SRAMs for read/write memrefs
   ///              (negative; memory proximity is weighted more heavily).
-  ///   Context_Reuse : penalty for reusing a CGRA that already has another
-  ///                   task in a different context.
   ///
   /// Higher score is better; 0 means all neighbours are co-located.
   int computeScore(TaskNode *task_node, const TaskPlacement &placement,
@@ -775,9 +618,9 @@ private:
     // Weight constants (tunable).
     constexpr int kAlpha = 10; // SSA proximity weight.
     constexpr int kBeta = 50;  // Memory proximity weight (high priority).
-    constexpr int kGamma = 1000; // Context switch cost is higher than NoC.
 
-    int ssa_score = 0, mem_score = 0, context_reuse_penalty = 0;
+    int ssa_score = 0;
+    int mem_score = 0;
 
     auto minDistToPlacement =
         [&](const SmallVector<CgraPosition> &other) -> int {
@@ -802,12 +645,14 @@ private:
     for (TaskNode *producer : task_node->ssa_operands) {
       if (!producer->placement.empty()) {
         // Uses negative distance: closer = higher score.
-        ssa_score -= minDistToPlacement(producer->placement);
+        int dist = minDistToPlacement(producer->placement);
+        ssa_score -= dist;
       }
     }
     for (TaskNode *consumer : task_node->ssa_users) {
       if (!consumer->placement.empty()) {
-        ssa_score -= minDistToPlacement(consumer->placement);
+        int dist = minDistToPlacement(consumer->placement);
+        ssa_score -= dist;
       }
     }
 
@@ -815,51 +660,46 @@ private:
     // For read memrefs (data sources).
     for (MemoryNode *mem : task_node->read_memrefs) {
       if (mem->assigned_sram_pos) {
-        mem_score -= minDistToTarget(*mem->assigned_sram_pos);
+        int dist = minDistToTarget(*mem->assigned_sram_pos);
+        mem_score -= dist;
       }
     }
     // For write memrefs: if the SRAM is already assigned (e.g. read by a
     // previous task), we want to be close to it too.
     for (MemoryNode *mem : task_node->write_memrefs) {
       if (mem->assigned_sram_pos) {
-        mem_score -= minDistToTarget(*mem->assigned_sram_pos);
+        int dist = minDistToTarget(*mem->assigned_sram_pos);
+        mem_score -= dist;
       }
     }
 
-    if (mode_ == OrchestrationMode::SpatialTemporal) {
-      for (const CgraPosition &pos : placement.cgra_positions) {
-        if (!cgra_occupancy_[pos.row][pos.col].empty()) {
-          ++context_reuse_penalty;
-        }
-      }
-    }
-
-    return kAlpha * ssa_score + kBeta * mem_score -
-           kGamma * context_reuse_penalty;
+    return kAlpha * ssa_score + kBeta * mem_score;
   }
 
   /// Computes dependency depth for every task in the graph.
   ///
   /// Routing Critical Path: the longest chain of dependent tasks in the
-  /// task graph, where each edge represents an explicit taskflow dependency.
-  /// This is the allocation analogue of the critical path in scheduling: the
-  /// chain of tasks that constrains the minimum total inter-CGRA communication
+  /// task graph, where each edge represents either an SSA value dependency or
+  /// a memory dependency (RAW, WAR, WAW) between tasks.  This is the
+  /// allocation analogue of the critical path in scheduling: the chain of
+  /// tasks that constrains the minimum total inter-CGRA communication
   /// distance.
   ///
   /// How we identify it: for every task node we compute the "dependency
   /// depth": the longest path (in edges) from that node to any sink in the
-  /// graph, traversing explicit producer -> consumer edges. The task with the
-  /// greatest depth lies at the head of the routing critical path.
+  /// graph, traversing SSA edges (producer -> consumer) and all memory
+  /// dependency edges.  The task with the greatest depth lies at the head
+  /// of the routing critical path.
   ///
-  /// Why it matters: tasks on the routing critical path have the most
-  /// downstream dependents.  Placing them first (routing-critical-path-first
-  /// ordering) ensures that:
+  /// Why it matters: tasks on the routing critical path
+  /// have the most downstream dependents.  Placing them first
+  /// (routing-critical-path-first ordering) ensures that:
   ///   1. They receive priority access to good grid positions.
   ///   2. Their dependent tasks can later be placed adjacent, minimising
   ///      inter-task communication distance on the critical path.
   void computeDependencyDepth(TaskMemoryGraph &graph) {
     DenseMap<TaskNode *, int> depth_cache;
-    DenseSet<TaskNode *> visiting;
+    DenseSet<TaskNode *> visiting; // Tracks nodes on the current DFS path.
     for (auto &node : graph.task_nodes) {
       node->dependency_depth =
           calculateDepth(node.get(), depth_cache, visiting);
@@ -868,9 +708,20 @@ private:
 
   /// Recursively calculates dependency depth for a single task (memoised).
   ///
-  /// Traverses explicit taskflow dependency edges. These edges include scalar
-  /// value dependencies and memory dependency tokens, so RAW/WAR/WAW ordering
-  /// follows the actual SSA chain in the IR.
+  /// Traverses both SSA edges and all three kinds of memory dependencies:
+  ///   - RAW (Read-After-Write): a writer's reader depends on the write.
+  ///   - WAR (Write-After-Read): a reader's subsequent writer depends on
+  ///     the read completing first.
+  ///   - WAW (Write-After-Write): two writers to the same memref must be
+  ///     ordered.
+  ///
+  /// This pass must remain modular and not assume any upstream pass (e.g.
+  /// streaming-fusion) has already transformed certain dependency patterns;
+  /// therefore all memory dependency types are considered.
+  ///
+  /// Memory dependency edges can form cycles (e.g. RAW A→B and WAR B→A for
+  /// the same memref).  The `visiting` set detects back-edges and breaks
+  /// cycles by treating them as depth 0.
   int calculateDepth(TaskNode *node, DenseMap<TaskNode *, int> &depth_cache,
                      DenseSet<TaskNode *> &visiting) {
     if (depth_cache.count(node)) {
@@ -883,10 +734,52 @@ private:
     }
 
     int max_child_depth = 0;
-
+    // SSA dependencies: tasks that consume this task's output values.
     for (TaskNode *child : node->ssa_users) {
       max_child_depth = std::max(
           max_child_depth, calculateDepth(child, depth_cache, visiting) + 1);
+    }
+
+    // Memory dependencies — all three types:
+    //
+    // RAW (Read-After-Write): this task writes a memref, downstream tasks
+    // read the same memref and depend on this write.
+    for (MemoryNode *mem : node->write_memrefs) {
+      for (TaskNode *reader : mem->readers) {
+        if (reader != node) {
+          max_child_depth =
+              std::max(max_child_depth,
+                       calculateDepth(reader, depth_cache, visiting) + 1);
+        }
+      }
+    }
+
+    // WAR (Write-After-Read): this task reads a memref, downstream tasks
+    // that write the same memref must wait for the read to complete.
+    for (MemoryNode *mem : node->read_memrefs) {
+      for (TaskNode *writer : mem->writers) {
+        if (writer != node) {
+          max_child_depth =
+              std::max(max_child_depth,
+                       calculateDepth(writer, depth_cache, visiting) + 1);
+        }
+      }
+    }
+
+    // WAW (Write-After-Write): this task writes a memref, other tasks that
+    // also write to the same memref have an ordering dependency.
+    // Example:
+    //   %out0 = task0 write_memref(%mem0) origin_write_memref(%mem0)
+    //   %out1 = task1 write_memref(%out0) origin_write_memref(%mem0)
+    // task1 can only execute after task0 because both write to %mem0.
+    for (MemoryNode *mem : node->write_memrefs) {
+      for (TaskNode *other_writer : mem->writers) {
+        if (other_writer != node) {
+          max_child_depth =
+              std::max(max_child_depth,
+                       calculateDepth(other_writer, depth_cache, visiting) + 1);
+        }
+      }
     }
 
     visiting.erase(node);
@@ -895,11 +788,7 @@ private:
 
   int grid_rows_;
   int grid_cols_;
-  OrchestrationMode mode_;
-  // Per-CGRA occupancy intervals: cgra_occupancy_[row][col] holds a list of
-  // (start, end_exclusive) pairs representing occupied time windows.
-  // In Spatial mode, non-empty means the CGRA is fully occupied.
-  std::vector<std::vector<SmallVector<std::pair<int, int>, 4>>> cgra_occupancy_;
+  std::vector<std::vector<bool>> occupied_;
 };
 
 } // namespace
@@ -912,8 +801,8 @@ namespace mlir {
 namespace taskflow {
 
 bool RoutingCriticalPathAllocation::runAllocation(func::FuncOp func) {
-  TaskOrchestrator orchestrator(grid_rows_, grid_cols_, mode_);
-  orchestrator.place(func);
+  TaskMapper mapper(grid_rows_, grid_cols_);
+  mapper.place(func);
   return true;
 }
 
