@@ -90,7 +90,8 @@ def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
       when all CGRAs are occupied — are scheduled at a later time slot on the
       same physical CGRAs (temporal reuse).
 
-    Uses a default 4x4 CGRA grid.
+    Uses multi-CGRA dimensions from --architecture-spec. If no architecture
+    spec is provided, the architecture parser supplies a default 4x4 grid.
   }];
   let options = [Option<
       "orchestrationMode", "orchestration-mode", "std::string",

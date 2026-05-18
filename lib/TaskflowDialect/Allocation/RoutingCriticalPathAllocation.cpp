@@ -323,8 +323,8 @@ public:
     constexpr int kMaxIterations = 10;
 
     // Stores the total number of tasks so findBestPlacement can compute a
-    // sufficient time horizon even on very small grids where grid_area ≪
-    // task_count (e.g. 5 tasks on a 1×1 grid).
+    // sufficient time horizon even on very small grids where grid_area <<
+    // task_count (e.g. 5 tasks on a 1x1 grid).
     total_task_count_ = static_cast<int>(sorted_tasks.size());
 
     for (int iter = 0; iter < kMaxIterations; ++iter) {
@@ -610,8 +610,8 @@ private:
                       ? computeEarliestStartTime(task_node)
                       : 0;
     // Time horizon: at minimum every task gets one sequential slot per cell.
-    // For large grids task_count ≪ grid_area, grid_area is enough.
-    // For small grids (e.g. 1×1 with 5 tasks) task_count dominates.
+    // For large grids task_count << grid_area, grid_area is enough.
+    // For small grids (e.g. 1x1 with 5 tasks) task_count dominates.
     int max_time_slots = std::max(grid_rows_ * grid_cols_, total_task_count_);
     int t_max = (mode_ == OrchestrationMode::SpatialTemporal)
                     ? t_start + max_time_slots * task_duration
