@@ -43,22 +43,25 @@
 // RUN: --convert-affine-to-taskflow \
 // RUN: --construct-hyperblock-from-task \
 // RUN: --orchestrate-task-on-cgra \
-// RUN: -o %t.placement.mlir
-// RUN: FileCheck %s --input-file=%t.placement.mlir --check-prefixes=PLACEMENT
+// RUN: --architecture-spec=%S/../../../arch_spec/architecture_4x4.yaml \
+// RUN: -o %t.placement_4x4.mlir
+// RUN: FileCheck %s --input-file=%t.placement_4x4.mlir --check-prefixes=PLACEMENT
 
 // RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
 // RUN: --convert-affine-to-taskflow \
 // RUN: --construct-hyperblock-from-task \
 // RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
-// RUN: -o %t.map_spatial_temporal.mlir
-// RUN: FileCheck %s --input-file=%t.map_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-4x4
+// RUN: --architecture-spec=%S/../../../arch_spec/architecture_4x4.yaml \
+// RUN: -o %t.map_4x4_spatial_temporal.mlir
+// RUN: FileCheck %s --input-file=%t.map_4x4_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-4x4
 
 // RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
 // RUN: --convert-affine-to-taskflow \
 // RUN: --construct-hyperblock-from-task \
 // RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial' \
-// RUN: -o %t.map_spatial.mlir
-// RUN: FileCheck %s --input-file=%t.map_spatial.mlir --check-prefixes=MAP-SPATIAL
+// RUN: --architecture-spec=%S/../../../arch_spec/architecture_4x4.yaml \
+// RUN: -o %t.map_4x4_spatial.mlir
+// RUN: FileCheck %s --input-file=%t.map_4x4_spatial.mlir --check-prefixes=MAP-SPATIAL
 
 module {
   // Example: Parallel nested loops scenario
@@ -439,4 +442,3 @@ module {
 // RESOPT-NEXT:     return
 // RESOPT-NEXT:   }
 // RESOPT-NEXT: }
-

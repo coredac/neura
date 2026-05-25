@@ -1,0 +1,45 @@
+architecture:
+  name: "NeuraMultiCgra"
+  version: "1.0"
+
+multi_cgra_defaults:
+  base_topology: "mesh"
+  rows: 4
+  columns: 4
+
+per_cgra_defaults:
+  rows: 4
+  columns: 4
+  ctrl_mem_items: 20
+  base_topology: "mesh"
+
+tile_defaults:
+  num_registers: 32
+  fu_types: ["add", "mul", "div", "fadd", "fmul", "fdiv", "logic", "cmp", "sel", "type_conv", "vfmul", "fadd_fadd", "fmul_fadd", "grant", "loop_control", "phi", "constant", "mem", "return", "mem_indexed", "alloca", "shift", "counter", "extract_predicate"]
+
+link_defaults:
+  latency: 1
+  bandwidth: 32
+
+link_overrides:
+
+tile_overrides:
+
+extensions:
+  crossbar: false
+
+simulator:
+  execution_model: "serial"
+
+  logging:
+    enabled: true
+    file: "output.log"
+
+  driver:
+    name: "Driver"
+    frequency: "1GHz"
+
+  device:
+    name: "Device"
+    frequency: "1GHz"
+    bind_to_architecture: true
