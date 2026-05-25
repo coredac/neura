@@ -9,8 +9,9 @@
 // The three tasks form a linear chain: Task_0 → Task_1 → Task_2.
 
 // RUN: mlir-neura-opt %s --orchestrate-task-on-cgra \
-// RUN:   -o %t.allocated.mlir
-// RUN: FileCheck %s --input-file=%t.allocated.mlir
+// RUN:   --architecture-spec=%S/../../../arch_spec/architecture_4x4.yaml \
+// RUN:   -o %t.allocated_4x4.mlir
+// RUN: FileCheck %s --input-file=%t.allocated_4x4.mlir
 
 module {
   func.func @resource_binding_chain(
