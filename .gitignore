@@ -6,6 +6,8 @@ build/
 /test/**/*.yaml
 !arch_spec_example.yaml
 !architecture.yaml
+!architecture_4x4.yaml
+!architecture_1x2.yaml
 !architecture_with_counter.yaml
 /test/**/*.asm
 /test/**/*.json

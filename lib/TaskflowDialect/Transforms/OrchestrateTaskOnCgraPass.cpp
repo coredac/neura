@@ -13,6 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "NeuraDialect/Architecture/Architecture.h"
 #include "TaskflowDialect/Allocation/RoutingCriticalPathAllocation.h"
 #include "TaskflowDialect/TaskflowPasses.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -50,7 +51,10 @@ struct OrchestrateTaskOnCgraPass
     OrchestrationMode mode = (orchestrationMode.getValue() == "spatial")
                                  ? OrchestrationMode::Spatial
                                  : OrchestrationMode::SpatialTemporal;
-    RoutingCriticalPathAllocation strategy(kCgraGridRows, kCgraGridCols, mode);
+    const neura::Architecture &architecture = neura::getArchitecture();
+    RoutingCriticalPathAllocation strategy(architecture.getMultiCgraRows(),
+                                           architecture.getMultiCgraColumns(),
+                                           mode);
     strategy.runAllocation(getOperation());
   }
 };

@@ -15,6 +15,8 @@ ArchParser::ArchParser(const std::string &architecture_spec_file)
 
 mlir::FailureOr<Architecture> ArchParser::getArchitecture() {
   // Default values for architecture specification file.
+  // By default Neura assumes a single CGRA unless a multi-CGRA architecture
+  // specification is provided explicitly.
   constexpr int kMultiCgraDefaultRows = 1;
   constexpr int kMultiCgraDefaultColumns = 1;
   constexpr int kPerCgraDefaultRows = 4;

@@ -322,6 +322,12 @@ public:
     // by SSA proximity.
     constexpr int kMaxIterations = 10;
 
+    // Stores the total number of tasks so findBestPlacement can compute a
+    // sufficient time horizon even on very small grids where the multi-CGRA
+    // grid area (grid_rows_ * grid_cols_) is much smaller than task_count
+    // (e.g. 5 tasks on a 1x1 grid).
+    total_task_count_ = static_cast<int>(sorted_tasks.size());
+
     for (int iter = 0; iter < kMaxIterations; ++iter) {
       if (iter > 0) {
         resetTaskPlacements(graph);
@@ -604,8 +610,14 @@ private:
     int t_start = (mode_ == OrchestrationMode::SpatialTemporal)
                       ? computeEarliestStartTime(task_node)
                       : 0;
+    // Time horizon: at minimum every task gets one sequential slot per cell.
+    // grid_area is the number of CGRA cells in the multi-CGRA grid.
+    // For large grids task_count << grid_area, grid_area is enough.
+    // For small grids (e.g. 1x1 with 5 tasks) task_count dominates.
+    int grid_area = grid_rows_ * grid_cols_;
+    int max_time_slots = std::max(grid_area, total_task_count_);
     int t_max = (mode_ == OrchestrationMode::SpatialTemporal)
-                    ? t_start + grid_rows_ * grid_cols_ * task_duration
+                    ? t_start + max_time_slots * task_duration
                     : 0;
 
     for (int t = t_start; t <= t_max; t += task_duration) {
@@ -896,6 +908,7 @@ private:
   int grid_rows_;
   int grid_cols_;
   OrchestrationMode mode_;
+  int total_task_count_ = 0;
   // Per-CGRA occupancy intervals: cgra_occupancy_[row][col] holds a list of
   // (start, end_exclusive) pairs representing occupied time windows.
   // In Spatial mode, non-empty means the CGRA is fully occupied.
