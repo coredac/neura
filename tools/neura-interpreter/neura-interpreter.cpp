@@ -9,7 +9,9 @@
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -4038,8 +4040,8 @@ int main(int argc, char **argv) {
 
   // Initializes MLIR context and dialects.
   DialectRegistry registry;
-  registry
-      .insert<neura::NeuraDialect, func::FuncDialect, arith::ArithDialect>();
+  registry.insert<neura::NeuraDialect, func::FuncDialect, arith::ArithDialect,
+                  mlir::DLTIDialect, mlir::LLVM::LLVMDialect>();
 
   MLIRContext context;
   context.appendDialectRegistry(registry);
