@@ -39,15 +39,34 @@
 // RUN: -o %t.hyperblock.mlir
 // RUN: FileCheck %s --input-file=%t.hyperblock.mlir --check-prefixes=HYPERBLOCK
 
+
 // RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
-// RUN: --convert-affine-to-taskflow \
-// RUN: --construct-hyperblock-from-task \
 // RUN: --convert-affine-to-taskflow \
 // RUN: --construct-hyperblock-from-task \
 // RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
 // RUN: --architecture-spec=%S/../../../arch_spec/architecture_4x4.yaml \
 // RUN: -o %t.map_4x4_spatial_temporal.mlir
 // RUN: FileCheck %s --input-file=%t.map_4x4_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-4x4
+
+// SMALL-GRID-1x1: Tests spatial-temporal mapping on a 1x1 CGRA grid.
+// SMALL-GRID-1x1: With only 1 CGRA, 2 tasks must time-multiplex.
+// RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
+// RUN: --convert-affine-to-taskflow \
+// RUN: --construct-hyperblock-from-task \
+// RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
+// RUN: --architecture-spec=%S/../../../arch_spec/architecture_with_counter.yaml \
+// RUN: -o %t.map_1x1_spatial_temporal.mlir
+// RUN: FileCheck %s --input-file=%t.map_1x1_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-1x1
+
+// SMALL-GRID-1x2: Tests spatial-temporal mapping on a 1x2 CGRA grid.
+// SMALL-GRID-1x2: 2 CGRAs for 2 tasks — fits spatially but still exercises small grid.
+// RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
+// RUN: --convert-affine-to-taskflow \
+// RUN: --construct-hyperblock-from-task \
+// RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
+// RUN: --architecture-spec=%S/../../../arch_spec/architecture_1x2.yaml \
+// RUN: -o %t.map_1x2_spatial_temporal.mlir
+// RUN: FileCheck %s --input-file=%t.map_1x2_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-1x2
 
 // RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
 // RUN: --convert-affine-to-taskflow \
@@ -157,10 +176,7 @@ module {
 // HYPERBLOCK-NEXT:       %c8 = arith.constant 8 : index
 // HYPERBLOCK-NEXT:       %c1 = arith.constant 1 : index
 // HYPERBLOCK-NEXT:       %0 = taskflow.counter from %c0 to %c8 step %c1 : index
-// HYPERBLOCK-NEXT:       %c0_2 = arith.constant 0 : index
-// HYPERBLOCK-NEXT:       %c8_3 = arith.constant 8 : index
-// HYPERBLOCK-NEXT:       %c1_4 = arith.constant 1 : index
-// HYPERBLOCK-NEXT:       %1 = taskflow.counter parent(%0 : index) from %c0_2 to %c8_3 step %c1_4 : index
+// HYPERBLOCK-NEXT:       %1 = taskflow.counter parent(%0 : index) from %c0 to %c8 step %c1 : index
 // HYPERBLOCK-NEXT:       "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
 // HYPERBLOCK-NEXT:       ^bb0(%arg8: index, %arg9: index):
 // HYPERBLOCK-NEXT:         %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
@@ -175,193 +191,159 @@ module {
 // HYPERBLOCK-NEXT:   }
 // HYPERBLOCK-NEXT: }
 
-// MAP-SPATIAL-TEMPORAL-4x4: module {
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:   func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     %dependency_read_out, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<16xf32>) dependency_write_in(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>, memref<16xf32>) {
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c0 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c16 = arith.constant 16 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c1 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %0 = taskflow.counter from %c0 to %c16 step %c1 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       "taskflow.hyperblock"(%0) <{operandSegmentSizes = array<i32: 1, 0>}> ({
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       ^bb0(%arg8: index):
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         %1 = memref.load %arg6[%arg8] : memref<16xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         %2 = arith.mulf %1, %arg7 : f32
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         memref.store %2, %arg6[%arg8] : memref<16xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         taskflow.hyperblock.yield
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       taskflow.yield reads(%arg6 : memref<16xf32>) writes(%arg6 : memref<16xf32>)
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     %dependency_read_out_0:2, %dependency_write_out_1 = taskflow.task @Task_1 dependency_read_in(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) dependency_write_in(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) {
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c0 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c8 = arith.constant 8 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c1 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %0 = taskflow.counter from %c0 to %c8 step %c1 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c0_2 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c8_3 = arith.constant 8 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c1_4 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %1 = taskflow.counter parent(%0 : index) from %c0_2 to %c8_3 step %c1_4 : index
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       ^bb0(%arg8: index, %arg9: index):
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         %3 = memref.load %arg6[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         %4 = arith.mulf %2, %3 : f32
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:         taskflow.hyperblock.yield
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       }) : (index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       taskflow.yield reads(%arg5, %arg6 : memref<8x8xf32>, memref<8x8xf32>) writes(%arg7 : memref<8x8xf32>)
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     return
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:   }
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT: }
 
+// MAP-SPATIAL-TEMPORAL-4x4:      module {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:  func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_read_out, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<16xf32>) dependency_write_in(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>, memref<16xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c16 = arith.constant 16 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %0 = taskflow.counter from %c0 to %c16 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      "taskflow.hyperblock"(%0) <{operandSegmentSizes = array<i32: 1, 0>}> ({
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      ^bb0(%arg8: index):
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        %1 = memref.load %arg6[%arg8] : memref<16xf32>
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        %2 = arith.mulf %1, %arg7 : f32
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %2, %arg6[%arg8] : memref<16xf32>
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index) -> ()
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield reads(%arg6 : memref<16xf32>) writes(%arg6 : memref<16xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_read_out_0:2, %dependency_write_out_1 = taskflow.task @Task_1 dependency_read_in(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) dependency_write_in(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c8 = arith.constant 8 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %0 = taskflow.counter from %c0 to %c8 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %1 = taskflow.counter parent(%0 : index) from %c0 to %c8 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      ^bb0(%arg8: index, %arg9: index):
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        %3 = memref.load %arg6[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        %4 = arith.mulf %2, %3 : f32
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index) -> ()
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield reads(%arg5, %arg6 : memref<8x8xf32>, memref<8x8xf32>) writes(%arg7 : memref<8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    return
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:  }
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:}
 
+// MAP-SPATIAL-TEMPORAL-1x1:      module {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:  func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_read_out, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<16xf32>) dependency_write_in(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>, memref<16xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c16 = arith.constant 16 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %0 = taskflow.counter from %c0 to %c16 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      "taskflow.hyperblock"(%0) <{operandSegmentSizes = array<i32: 1, 0>}> ({
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      ^bb0(%arg8: index):
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        %1 = memref.load %arg6[%arg8] : memref<16xf32>
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        %2 = arith.mulf %1, %arg7 : f32
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %2, %arg6[%arg8] : memref<16xf32>
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index) -> ()
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield reads(%arg6 : memref<16xf32>) writes(%arg6 : memref<16xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_read_out_0:2, %dependency_write_out_1 = taskflow.task @Task_1 dependency_read_in(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) dependency_write_in(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c8 = arith.constant 8 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %0 = taskflow.counter from %c0 to %c8 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %1 = taskflow.counter parent(%0 : index) from %c0 to %c8 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      ^bb0(%arg8: index, %arg9: index):
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        %3 = memref.load %arg6[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        %4 = arith.mulf %2, %3 : f32
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index) -> ()
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield reads(%arg5, %arg6 : memref<8x8xf32>, memref<8x8xf32>) writes(%arg7 : memref<8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    return
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:  }
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:}
 
-// MAP-SPATIAL: module {
-// MAP-SPATIAL-NEXT:   func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// MAP-SPATIAL-NEXT:     %dependency_read_out, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<16xf32>) dependency_write_in(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>, memref<16xf32>) {
-// MAP-SPATIAL-NEXT:     ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
-// MAP-SPATIAL-NEXT:       %c0 = arith.constant 0 : index
-// MAP-SPATIAL-NEXT:       %c16 = arith.constant 16 : index
-// MAP-SPATIAL-NEXT:       %c1 = arith.constant 1 : index
-// MAP-SPATIAL-NEXT:       %0 = taskflow.counter from %c0 to %c16 step %c1 : index
-// MAP-SPATIAL-NEXT:       "taskflow.hyperblock"(%0) <{operandSegmentSizes = array<i32: 1, 0>}> ({
-// MAP-SPATIAL-NEXT:       ^bb0(%arg8: index):
-// MAP-SPATIAL-NEXT:         %1 = memref.load %arg6[%arg8] : memref<16xf32>
-// MAP-SPATIAL-NEXT:         %2 = arith.mulf %1, %arg7 : f32
-// MAP-SPATIAL-NEXT:         memref.store %2, %arg6[%arg8] : memref<16xf32>
-// MAP-SPATIAL-NEXT:         taskflow.hyperblock.yield
-// MAP-SPATIAL-NEXT:       }) : (index) -> ()
-// MAP-SPATIAL-NEXT:       taskflow.yield reads(%arg6 : memref<16xf32>) writes(%arg6 : memref<16xf32>)
-// MAP-SPATIAL-NEXT:     }
-// MAP-SPATIAL-NEXT:     %dependency_read_out_0:2, %dependency_write_out_1 = taskflow.task @Task_1 dependency_read_in(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) dependency_write_in(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) {
-// MAP-SPATIAL-NEXT:     ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
-// MAP-SPATIAL-NEXT:       %c0 = arith.constant 0 : index
-// MAP-SPATIAL-NEXT:       %c8 = arith.constant 8 : index
-// MAP-SPATIAL-NEXT:       %c1 = arith.constant 1 : index
-// MAP-SPATIAL-NEXT:       %0 = taskflow.counter from %c0 to %c8 step %c1 : index
-// MAP-SPATIAL-NEXT:       %c0_2 = arith.constant 0 : index
-// MAP-SPATIAL-NEXT:       %c8_3 = arith.constant 8 : index
-// MAP-SPATIAL-NEXT:       %c1_4 = arith.constant 1 : index
-// MAP-SPATIAL-NEXT:       %1 = taskflow.counter parent(%0 : index) from %c0_2 to %c8_3 step %c1_4 : index
-// MAP-SPATIAL-NEXT:       "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
-// MAP-SPATIAL-NEXT:       ^bb0(%arg8: index, %arg9: index):
-// MAP-SPATIAL-NEXT:         %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-NEXT:         %3 = memref.load %arg6[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-NEXT:         %4 = arith.mulf %2, %3 : f32
-// MAP-SPATIAL-NEXT:         memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-NEXT:         taskflow.hyperblock.yield
-// MAP-SPATIAL-NEXT:       }) : (index, index) -> ()
-// MAP-SPATIAL-NEXT:       taskflow.yield reads(%arg5, %arg6 : memref<8x8xf32>, memref<8x8xf32>) writes(%arg7 : memref<8x8xf32>)
-// MAP-SPATIAL-NEXT:     }
-// MAP-SPATIAL-NEXT:     return
-// MAP-SPATIAL-NEXT:   }
-// MAP-SPATIAL-NEXT: }
+// MAP-SPATIAL-TEMPORAL-1x2:      module {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:  func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_read_out, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<16xf32>) dependency_write_in(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>, memref<16xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c16 = arith.constant 16 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %0 = taskflow.counter from %c0 to %c16 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      "taskflow.hyperblock"(%0) <{operandSegmentSizes = array<i32: 1, 0>}> ({
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      ^bb0(%arg8: index):
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        %1 = memref.load %arg6[%arg8] : memref<16xf32>
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        %2 = arith.mulf %1, %arg7 : f32
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %2, %arg6[%arg8] : memref<16xf32>
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index) -> ()
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield reads(%arg6 : memref<16xf32>) writes(%arg6 : memref<16xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_read_out_0:2, %dependency_write_out_1 = taskflow.task @Task_1 dependency_read_in(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) dependency_write_in(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c8 = arith.constant 8 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %0 = taskflow.counter from %c0 to %c8 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %1 = taskflow.counter parent(%0 : index) from %c0 to %c8 step %c1 : index
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      ^bb0(%arg8: index, %arg9: index):
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        %3 = memref.load %arg6[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        %4 = arith.mulf %2, %3 : f32
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index) -> ()
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield reads(%arg5, %arg6 : memref<8x8xf32>, memref<8x8xf32>) writes(%arg7 : memref<8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    return
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:  }
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:}
 
+// MAP-SPATIAL:      module {
+// MAP-SPATIAL-NEXT:  func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
+// MAP-SPATIAL-NEXT:    %dependency_read_out, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<16xf32>) dependency_write_in(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>, memref<16xf32>) {
+// MAP-SPATIAL-NEXT:    ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
+// MAP-SPATIAL-NEXT:      %c0 = arith.constant 0 : index
+// MAP-SPATIAL-NEXT:      %c16 = arith.constant 16 : index
+// MAP-SPATIAL-NEXT:      %c1 = arith.constant 1 : index
+// MAP-SPATIAL-NEXT:      %0 = taskflow.counter from %c0 to %c16 step %c1 : index
+// MAP-SPATIAL-NEXT:      "taskflow.hyperblock"(%0) <{operandSegmentSizes = array<i32: 1, 0>}> ({
+// MAP-SPATIAL-NEXT:      ^bb0(%arg8: index):
+// MAP-SPATIAL-NEXT:        %1 = memref.load %arg6[%arg8] : memref<16xf32>
+// MAP-SPATIAL-NEXT:        %2 = arith.mulf %1, %arg7 : f32
+// MAP-SPATIAL-NEXT:        memref.store %2, %arg6[%arg8] : memref<16xf32>
+// MAP-SPATIAL-NEXT:        taskflow.hyperblock.yield
+// MAP-SPATIAL-NEXT:      }) : (index) -> ()
+// MAP-SPATIAL-NEXT:      taskflow.yield reads(%arg6 : memref<16xf32>) writes(%arg6 : memref<16xf32>)
+// MAP-SPATIAL-NEXT:    }
+// MAP-SPATIAL-NEXT:    %dependency_read_out_0:2, %dependency_write_out_1 = taskflow.task @Task_1 dependency_read_in(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) dependency_write_in(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) {
+// MAP-SPATIAL-NEXT:    ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
+// MAP-SPATIAL-NEXT:      %c0 = arith.constant 0 : index
+// MAP-SPATIAL-NEXT:      %c8 = arith.constant 8 : index
+// MAP-SPATIAL-NEXT:      %c1 = arith.constant 1 : index
+// MAP-SPATIAL-NEXT:      %0 = taskflow.counter from %c0 to %c8 step %c1 : index
+// MAP-SPATIAL-NEXT:      %1 = taskflow.counter parent(%0 : index) from %c0 to %c8 step %c1 : index
+// MAP-SPATIAL-NEXT:      "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
+// MAP-SPATIAL-NEXT:      ^bb0(%arg8: index, %arg9: index):
+// MAP-SPATIAL-NEXT:        %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-NEXT:        %3 = memref.load %arg6[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-NEXT:        %4 = arith.mulf %2, %3 : f32
+// MAP-SPATIAL-NEXT:        memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
+// MAP-SPATIAL-NEXT:        taskflow.hyperblock.yield
+// MAP-SPATIAL-NEXT:      }) : (index, index) -> ()
+// MAP-SPATIAL-NEXT:      taskflow.yield reads(%arg5, %arg6 : memref<8x8xf32>, memref<8x8xf32>) writes(%arg7 : memref<8x8xf32>)
+// MAP-SPATIAL-NEXT:    }
+// MAP-SPATIAL-NEXT:    return
+// MAP-SPATIAL-NEXT:  }
+// MAP-SPATIAL-NEXT:}
 
-
-// SMALL-GRID-1x1: Tests spatial-temporal mapping on a 1x1 CGRA grid.
-// SMALL-GRID-1x1: With only 1 CGRA, 2 tasks must time-multiplex.
-// RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
-// RUN: --convert-affine-to-taskflow \
-// RUN: --construct-hyperblock-from-task \
-// RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
-// RUN: --architecture-spec=%S/../../../arch_spec/architecture_with_counter.yaml \
-// RUN: -o %t.map_1x1_spatial_temporal.mlir
-// RUN: FileCheck %s --input-file=%t.map_1x1_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-1x1
-
-// SMALL-GRID-1x2: Tests spatial-temporal mapping on a 1x2 CGRA grid.
-// SMALL-GRID-1x2: 2 CGRAs for 2 tasks — fits spatially but still exercises small grid.
-// RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
-// RUN: --convert-affine-to-taskflow \
-// RUN: --construct-hyperblock-from-task \
-// RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
-// RUN: --architecture-spec=%S/../../../arch_spec/architecture_1x2.yaml \
-// RUN: -o %t.map_1x2_spatial_temporal.mlir
-// RUN: FileCheck %s --input-file=%t.map_1x2_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-1x2
-
-// MAP-SPATIAL-TEMPORAL-1x1: module {
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:   func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     %dependency_read_out, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<16xf32>) dependency_write_in(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>, memref<16xf32>) {
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c0 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c16 = arith.constant 16 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c1 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %0 = taskflow.counter from %c0 to %c16 step %c1 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       "taskflow.hyperblock"(%0) <{operandSegmentSizes = array<i32: 1, 0>}> ({
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       ^bb0(%arg8: index):
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         %1 = memref.load %arg6[%arg8] : memref<16xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         %2 = arith.mulf %1, %arg7 : f32
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         memref.store %2, %arg6[%arg8] : memref<16xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         taskflow.hyperblock.yield
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       taskflow.yield reads(%arg6 : memref<16xf32>) writes(%arg6 : memref<16xf32>)
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     %dependency_read_out_0:2, %dependency_write_out_1 = taskflow.task @Task_1 dependency_read_in(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) dependency_write_in(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) {
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c0 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c8 = arith.constant 8 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c1 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %0 = taskflow.counter from %c0 to %c8 step %c1 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c0_2 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c8_3 = arith.constant 8 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c1_4 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %1 = taskflow.counter parent(%0 : index) from %c0_2 to %c8_3 step %c1_4 : index
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       ^bb0(%arg8: index, %arg9: index):
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         %3 = memref.load %arg6[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         %4 = arith.mulf %2, %3 : f32
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:         taskflow.hyperblock.yield
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       }) : (index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       taskflow.yield reads(%arg5, %arg6 : memref<8x8xf32>, memref<8x8xf32>) writes(%arg7 : memref<8x8xf32>)
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     return
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:   }
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT: }
-
-// MAP-SPATIAL-TEMPORAL-1x2: module {
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:   func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     %dependency_read_out, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<16xf32>) dependency_write_in(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>, memref<16xf32>) {
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c0 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c16 = arith.constant 16 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c1 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %0 = taskflow.counter from %c0 to %c16 step %c1 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       "taskflow.hyperblock"(%0) <{operandSegmentSizes = array<i32: 1, 0>}> ({
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       ^bb0(%arg8: index):
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         %1 = memref.load %arg6[%arg8] : memref<16xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         %2 = arith.mulf %1, %arg7 : f32
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         memref.store %2, %arg6[%arg8] : memref<16xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         taskflow.hyperblock.yield
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       taskflow.yield reads(%arg6 : memref<16xf32>) writes(%arg6 : memref<16xf32>)
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     %dependency_read_out_0:2, %dependency_write_out_1 = taskflow.task @Task_1 dependency_read_in(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) dependency_write_in(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) {
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c0 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c8 = arith.constant 8 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c1 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %0 = taskflow.counter from %c0 to %c8 step %c1 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c0_2 = arith.constant 0 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c8_3 = arith.constant 8 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c1_4 = arith.constant 1 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %1 = taskflow.counter parent(%0 : index) from %c0_2 to %c8_3 step %c1_4 : index
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       "taskflow.hyperblock"(%0, %1) <{operandSegmentSizes = array<i32: 2, 0>}> ({
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       ^bb0(%arg8: index, %arg9: index):
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         %2 = memref.load %arg5[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         %3 = memref.load %arg6[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         %4 = arith.mulf %2, %3 : f32
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:         taskflow.hyperblock.yield
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       }) : (index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       taskflow.yield reads(%arg5, %arg6 : memref<8x8xf32>, memref<8x8xf32>) writes(%arg7 : memref<8x8xf32>)
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     return
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:   }
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT: }
 
 // RESOPT:      module {
 // RESOPT-NEXT:   func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
@@ -395,8 +377,5 @@ module {
 // RESOPT-NEXT:     return
 // RESOPT-NEXT:   }
 // RESOPT-NEXT: }
-
-
-
 
 
