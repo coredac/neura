@@ -103,12 +103,19 @@ struct CounterInfo {
 };
 
 // Resolves an affine bound (lower or upper) to an SSA value.
+// const_cache maps integer values to already-created arith.constant ops so
+// that multiple loops with the same constant bound (e.g. 0, 64, 1) share a
+// single definition instead of producing redundant constants.
 static Value resolveAffineBound(OpBuilder &builder, Location loc, AffineMap map,
-                                ValueRange operands) {
+                                ValueRange operands,
+                                DenseMap<int64_t, Value> &const_cache) {
   // Constant: affine_map<() -> (C)>
   if (map.isSingleConstant()) {
-    return builder.create<arith::ConstantIndexOp>(
-        loc, map.getSingleConstantResult());
+    int64_t val = map.getSingleConstantResult();
+    auto [it, inserted] = const_cache.try_emplace(val, Value{});
+    if (inserted)
+      it->second = builder.create<arith::ConstantIndexOp>(loc, val);
+    return it->second;
   }
 
   // Simple symbol passthrough: affine_map<(d0) -> (d0)>
@@ -132,6 +139,9 @@ createCounterChain(OpBuilder &builder, Location loc,
                    const PerfectLoopBand &band) {
   SmallVector<CounterInfo> counters;
   Value parent_counter = nullptr;
+  // Cache of integer value → arith.constant op, shared across all loop levels
+  // so that identical constants (0, 1, 64, …) are emitted only once.
+  DenseMap<int64_t, Value> const_cache;
 
   for (affine::AffineForOp loop : band.loops) {
     CounterInfo info;
@@ -139,11 +149,16 @@ createCounterChain(OpBuilder &builder, Location loc,
 
     // Gets loop bounds.
     Value lb = resolveAffineBound(builder, loc, loop.getLowerBoundMap(),
-                                  loop.getLowerBoundOperands());
+                                  loop.getLowerBoundOperands(), const_cache);
     Value up = resolveAffineBound(builder, loc, loop.getUpperBoundMap(),
-                                  loop.getUpperBoundOperands());
-    Value step =
-        builder.create<arith::ConstantIndexOp>(loc, loop.getStepAsInt());
+                                  loop.getUpperBoundOperands(), const_cache);
+
+    // Step is always a compile-time constant; reuse from cache.
+    int64_t step_val = loop.getStepAsInt();
+    auto [step_it, step_inserted] = const_cache.try_emplace(step_val, Value{});
+    if (step_inserted)
+      step_it->second = builder.create<arith::ConstantIndexOp>(loc, step_val);
+    Value step = step_it->second;
 
     // Creates counter.
 
@@ -154,7 +169,8 @@ createCounterChain(OpBuilder &builder, Location loc,
         /*lower_bound*/ lb,
         /*upper_bound*/ up,
         /*step*/ step,
-        /*counter_type*/ StringAttr{},
+        /*counter_hierarchy*/ StringAttr{},
+        /*counter_dynamism*/ StringAttr{},
         /*counter_id*/ IntegerAttr{});
 
     info.counter_index = counter_op.getCounterIndex();

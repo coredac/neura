@@ -27,7 +27,7 @@ void mlir::taskflow::registerTaskflowConversionPassPipeline() {
       [](OpPassManager &pm) {
         pm.addPass(mlir::createConvertAffineToTaskflowPass());
         pm.addPass(mlir::taskflow::createConstructHyperblockFromTaskPass());
-        pm.addPass(mlir::taskflow::createClassifyCountersPass());
+        pm.addPass(mlir::taskflow::createClassifyTaskAndCounterPass());
         pm.addPass(mlir::createConvertTaskflowToNeuraPass());
       });
 }

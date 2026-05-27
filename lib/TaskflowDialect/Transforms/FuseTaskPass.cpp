@@ -835,7 +835,7 @@ computeRealMetrics(ModuleOp test_module,
   // Phase 1: converts taskflow ops to neura kernels.
   {
     PassManager pm(cloned.getContext());
-    pm.addPass(taskflow::createClassifyCountersPass());
+    pm.addPass(taskflow::createClassifyTaskAndCounterPass());
     pm.addPass(createConvertTaskflowToNeuraPass());
     pm.enableVerifier(false);
     if (failed(pm.run(cloned))) {

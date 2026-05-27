@@ -396,10 +396,11 @@ struct InternalizeCounterPattern : public OpRewritePattern<neura::KernelOp> {
       Value ub = resolveBoundValue(source_counter.getUpperBound());
       Value step = resolveBoundValue(source_counter.getStep());
 
-      // Creates neura.counter op.
+      // Creates neura.counter op, forwarding hierarchy and dynamism attrs.
       neura::CounterOp new_counter_op = rewriter.create<neura::CounterOp>(
           source_counter.getLoc(), old_counter_arg.getType(), lb, ub, step,
-          source_counter.getCounterTypeAttr(),
+          source_counter.getCounterHierarchyAttr(),
+          source_counter.getCounterDynamismAttr(),
           source_counter.getCounterIdAttr());
       mapping.map(old_counter_arg, new_counter_op.getCurrentIndex());
     }

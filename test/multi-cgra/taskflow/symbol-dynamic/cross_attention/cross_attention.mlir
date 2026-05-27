@@ -13,7 +13,7 @@
 // RUN: mlir-neura-opt %t.taskflow.mlir \
 // RUN:   --construct-hyperblock-from-task \
 // RUN:   --cse \
-// RUN:   --classify-counters \
+// RUN:   --classify-task-and-counter \
 // RUN:   --convert-taskflow-to-neura \
 // RUN:   -o %t.neura.mlir
 // RUN: FileCheck --input-file=%t.neura.mlir %s --check-prefix=NEURA
@@ -51,22 +51,22 @@
 // TASKFLOW-NEXT:       taskflow.yield reads(%arg2, %arg3, %arg5 : memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>) writes(%arg5 : memref<?x64xf32>)
 // TASKFLOW-NEXT:     }
 
-// NEURA:          %dependency_read_out_7:3, %dependency_write_out_8 = taskflow.task @Task_3 dependency_read_in(%arg0, %dependency_write_out, %dependency_write_out_6 : memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>) dependency_write_in(%dependency_write_out_6 : memref<?x64xf32>) value_inputs(%dim : index) [original_read_memrefs(%arg0, %alloc, %alloc_4 : memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>), original_write_memrefs(%alloc_4 : memref<?x64xf32>)] : (memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>, memref<?x64xf32>, index) -> (memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>, memref<?x64xf32>) {
+// NEURA:      %dependency_read_out_7:3, %dependency_write_out_8 = taskflow.task @Task_3 dependency_read_in(%arg0, %dependency_write_out, %dependency_write_out_6 : memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>) dependency_write_in(%dependency_write_out_6 : memref<?x64xf32>) value_inputs(%dim : index) [original_read_memrefs(%arg0, %alloc, %alloc_4 : memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>), original_write_memrefs(%alloc_4 : memref<?x64xf32>)] {task_type = "symbol_dynamic"} : (memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>, memref<?x64xf32>, index) -> (memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>, memref<?x64xf32>) {
 // NEURA-NEXT:     ^bb0(%arg2: memref<?x64xf32>, %arg3: memref<64x64xf32>, %arg4: memref<?x64xf32>, %arg5: memref<?x64xf32>, %arg6: index):
 // NEURA-NEXT:       %c64 = arith.constant 64 : index
 // NEURA-NEXT:       %c0_58 = arith.constant 0 : index
 // NEURA-NEXT:       %c1 = arith.constant 1 : index
-// NEURA-NEXT:       %4 = taskflow.counter from %c0_58 to %arg6 step %c1 attributes {counter_id = 0 : i32, counter_type = "root"} : index
-// NEURA-NEXT:       %5 = taskflow.counter parent(%4 : index) from %c0_58 to %c64 step %c1 attributes {counter_id = 1 : i32, counter_type = "relay"} : index
-// NEURA-NEXT:       %6 = taskflow.counter parent(%5 : index) from %c0_58 to %c64 step %c1 attributes {counter_id = 2 : i32, counter_type = "leaf"} : index
+// NEURA-NEXT:       %4 = taskflow.counter from %c0_58 to %arg6 step %c1 attributes {counter_dynamism = "symbol_dynamic", counter_hierarchy = "root", counter_id = 0 : i32} : index
+// NEURA-NEXT:       %5 = taskflow.counter parent(%4 : index) from %c0_58 to %c64 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "relay", counter_id = 1 : i32} : index
+// NEURA-NEXT:       %6 = taskflow.counter parent(%5 : index) from %c0_58 to %c64 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 2 : i32} : index
 // NEURA-NEXT:       neura.kernel inputs(%arg2, %arg3, %arg5, %arg6 : memref<?x64xf32>, memref<64x64xf32>, memref<?x64xf32>, index) {
 // NEURA-NEXT:       ^bb0(%arg7: memref<?x64xf32>, %arg8: memref<64x64xf32>, %arg9: memref<?x64xf32>, %arg10: index):
 // NEURA-NEXT:         %c64_59 = arith.constant 64 : index
 // NEURA-NEXT:         %c0_60 = arith.constant 0 : index
 // NEURA-NEXT:         %c1_61 = arith.constant 1 : index
-// NEURA-NEXT:         %7 = neura.counter from %c0_60 : index to %arg10 : index step %c1_61 : index attributes {counter_id = 0 : i32, counter_type = "root"} -> index
-// NEURA-NEXT:         %8 = neura.counter from %c0_60 : index to %c64_59 : index step %c1_61 : index attributes {counter_id = 1 : i32, counter_type = "relay"} -> index
-// NEURA-NEXT:         %9 = neura.counter from %c0_60 : index to %c64_59 : index step %c1_61 : index attributes {counter_id = 2 : i32, counter_type = "leaf"} -> index
+// NEURA-NEXT:         %7 = neura.counter from %c0_60 : index to %arg10 : index step %c1_61 : index attributes {counter_dynamism = "symbol_dynamic", counter_hierarchy = "root", counter_id = 0 : i32} -> index
+// NEURA-NEXT:         %8 = neura.counter from %c0_60 : index to %c64_59 : index step %c1_61 : index attributes {counter_dynamism = "static", counter_hierarchy = "relay", counter_id = 1 : i32} -> index
+// NEURA-NEXT:         %9 = neura.counter from %c0_60 : index to %c64_59 : index step %c1_61 : index attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 2 : i32} -> index
 // NEURA-NEXT:         %10 = memref.load %arg7[%7, %9] : memref<?x64xf32>
 // NEURA-NEXT:         %11 = memref.load %arg8[%9, %8] : memref<64x64xf32>
 // NEURA-NEXT:         %12 = memref.load %arg9[%7, %8] : memref<?x64xf32>
