@@ -93,12 +93,16 @@ static BoundKind classifyOuterValue(Value v) {
   }
   Operation *def = v.getDefiningOp();
   if (!def) {
-    return BoundKind::IrregularDynamic;
+    assert(false && "unexpected value with no defining op and not a block arg");
   }
   if (isa<arith::ConstantOp, arith::ConstantIndexOp>(def)) {
     return BoundKind::Static;
   }
-  if (isa<memref::DimOp>(def)) {
+  // Any op at the function body scope (memref.dim, preceding taskflow.task
+  // results, arith on func args, etc.) is fully determined before this task
+  // launches.
+  if (def->getParentRegion() &&
+      isa<func::FuncOp>(def->getParentRegion()->getParentOp())) {
     return BoundKind::SymbolDynamic;
   }
   return BoundKind::IrregularDynamic;
