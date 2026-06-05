@@ -150,7 +150,7 @@ module attributes {} {
 // KERNEL:      module {
 // KERNEL-NEXT:   func.func @_Z6kernelPiS_(%arg0: memref<?xi32>, %arg1: memref<?xi32>) attributes {llvm.linkage = #llvm.linkage<external>} {
 // KERNEL-NEXT:     %c0_i32 = arith.constant 0 : i32
-// KERNEL-NEXT:     %dependency_read_out:2, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0, %arg1 : memref<?xi32>, memref<?xi32>) dependency_write_in(%arg1 : memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg1 : memref<?xi32>, memref<?xi32>), original_write_memrefs(%arg1 : memref<?xi32>)] {task_type = "static"} : (memref<?xi32>, memref<?xi32>, memref<?xi32>, i32) -> (memref<?xi32>, memref<?xi32>, memref<?xi32>) {
+// KERNEL-NEXT:     %dependency_read_out:2, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0, %arg1 : memref<?xi32>, memref<?xi32>) dependency_write_in(%arg1 : memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg1 : memref<?xi32>, memref<?xi32>), original_write_memrefs(%arg1 : memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, memref<?xi32>, i32) -> (memref<?xi32>, memref<?xi32>, memref<?xi32>) {
 // KERNEL-NEXT:     ^bb0(%arg2: memref<?xi32>, %arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // KERNEL-NEXT:       %c0 = arith.constant 0 : index
 // KERNEL-NEXT:       %c32 = arith.constant 32 : index
@@ -184,7 +184,7 @@ module attributes {} {
 // NEURA:      module {
 // NEURA-NEXT:   func.func @_Z6kernelPiS_(%arg0: memref<?xi32>, %arg1: memref<?xi32>) attributes {llvm.linkage = #llvm.linkage<external>} {
 // NEURA-NEXT:     %c0_i32 = arith.constant 0 : i32
-// NEURA-NEXT:     %dependency_read_out:2, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0, %arg1 : memref<?xi32>, memref<?xi32>) dependency_write_in(%arg1 : memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg1 : memref<?xi32>, memref<?xi32>), original_write_memrefs(%arg1 : memref<?xi32>)] {task_type = "static"} : (memref<?xi32>, memref<?xi32>, memref<?xi32>, i32) -> (memref<?xi32>, memref<?xi32>, memref<?xi32>) {
+// NEURA-NEXT:     %dependency_read_out:2, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0, %arg1 : memref<?xi32>, memref<?xi32>) dependency_write_in(%arg1 : memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg1 : memref<?xi32>, memref<?xi32>), original_write_memrefs(%arg1 : memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, memref<?xi32>, i32) -> (memref<?xi32>, memref<?xi32>, memref<?xi32>) {
 // NEURA-NEXT:     ^bb0(%arg2: memref<?xi32>, %arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // NEURA-NEXT:       %c0 = arith.constant 0 : index
 // NEURA-NEXT:       %c32 = arith.constant 32 : index
@@ -221,7 +221,7 @@ module attributes {} {
 // DATAFLOW:      module {
 // DATAFLOW-NEXT:   func.func @_Z6kernelPiS_(%arg0: memref<?xi32>, %arg1: memref<?xi32>) attributes {llvm.linkage = #llvm.linkage<external>} {
 // DATAFLOW-NEXT:     %c0_i32 = arith.constant 0 : i32
-// DATAFLOW-NEXT:     %dependency_read_out:2, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0, %arg1 : memref<?xi32>, memref<?xi32>) dependency_write_in(%arg1 : memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg1 : memref<?xi32>, memref<?xi32>), original_write_memrefs(%arg1 : memref<?xi32>)] {task_type = "static"} : (memref<?xi32>, memref<?xi32>, memref<?xi32>, i32) -> (memref<?xi32>, memref<?xi32>, memref<?xi32>) {
+// DATAFLOW-NEXT:     %dependency_read_out:2, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0, %arg1 : memref<?xi32>, memref<?xi32>) dependency_write_in(%arg1 : memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg1 : memref<?xi32>, memref<?xi32>), original_write_memrefs(%arg1 : memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, memref<?xi32>, i32) -> (memref<?xi32>, memref<?xi32>, memref<?xi32>) {
 // DATAFLOW-NEXT:     ^bb0(%arg2: memref<?xi32>, %arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // DATAFLOW-NEXT:       %c0 = arith.constant 0 : index
 // DATAFLOW-NEXT:       %c32 = arith.constant 32 : index
@@ -252,7 +252,7 @@ module attributes {} {
 // MAPPED:      module {
 // MAPPED-NEXT:   func.func @_Z6kernelPiS_(%arg0: memref<?xi32>, %arg1: memref<?xi32>) attributes {llvm.linkage = #llvm.linkage<external>} {
 // MAPPED-NEXT:     %c0_i32 = arith.constant 0 : i32
-// MAPPED-NEXT:     %dependency_read_out:2, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0, %arg1 : memref<?xi32>, memref<?xi32>) dependency_write_in(%arg1 : memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg1 : memref<?xi32>, memref<?xi32>), original_write_memrefs(%arg1 : memref<?xi32>)] {task_type = "static"} : (memref<?xi32>, memref<?xi32>, memref<?xi32>, i32) -> (memref<?xi32>, memref<?xi32>, memref<?xi32>) {
+// MAPPED-NEXT:     %dependency_read_out:2, %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0, %arg1 : memref<?xi32>, memref<?xi32>) dependency_write_in(%arg1 : memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg1 : memref<?xi32>, memref<?xi32>), original_write_memrefs(%arg1 : memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, memref<?xi32>, i32) -> (memref<?xi32>, memref<?xi32>, memref<?xi32>) {
 // MAPPED-NEXT:     ^bb0(%arg2: memref<?xi32>, %arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // MAPPED-NEXT:       %c0 = arith.constant 0 : index
 // MAPPED-NEXT:       %c32 = arith.constant 32 : index

@@ -788,7 +788,7 @@ module attributes {} {
 // RESOPT-NEXT:       %4 = taskflow.counter parent(%3 : index) from %c0_2 to %c8 step %c1_3 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
 // RESOPT-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>) values(%2 : i32)
 // RESOPT-NEXT:     }
-// RESOPT-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 2 : i32, profile_info = {duration = 7 : i32}, task_type = "static", trip_count = 32 : i32} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// RESOPT-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 2 : i32, profile_info = {duration = 7 : i32}, trip_count = 32 : i32} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
 // RESOPT-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // RESOPT-NEXT:       %c8 = arith.constant 8 : index
 // RESOPT-NEXT:       %c0 = arith.constant 0 : index
