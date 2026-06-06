@@ -20,6 +20,8 @@
 //   task_type = "runtime_managed" only when the task should be managed by the
 //   AMOEBA runtime: it has at least one regular-dynamic counter and its
 //   hyperblock bodies do not carry loop-carried dependences.
+//   dlp_eligibility = "replicable" when the task can be replicated for
+//   data-level parallelism.
 //
 // Classification rules for a bound value inside the task body:
 //   arith.constant                             → static
@@ -225,7 +227,7 @@ static bool taskMatchesPattern(TaskflowTaskOp task_op, TaskPattern pattern) {
   llvm_unreachable("unknown TaskPattern");
 }
 
-static bool taskCanBeRuntimeManaged(TaskflowTaskOp task_op) {
+static bool taskHasDlpCapability(TaskflowTaskOp task_op) {
   return taskContainsHyperblock(task_op) &&
          !taskMatchesPattern(task_op, TaskPattern::LoopCarriedDependence);
 }
@@ -309,7 +311,27 @@ static LogicalResult classifyCounters(TaskflowTaskOp task_op) {
 }
 
 //===----------------------------------------------------------------------===//
-// Runtime-managed task classification
+// DLP-capability task tagging
+//===----------------------------------------------------------------------===//
+
+static bool taskHasDlpEligibility(TaskflowTaskOp task_op, StringRef value) {
+  auto attr = task_op->getAttrOfType<StringAttr>("dlp_eligibility");
+  return attr && attr.getValue() == value;
+}
+
+static void identifyDlpCapability(TaskflowTaskOp task_op) {
+  // Re-running this pass should not preserve task-level tags from an older
+  // classification result.
+  task_op->removeAttr("dlp_eligibility");
+
+  if (taskHasDlpCapability(task_op)) {
+    OpBuilder builder(task_op.getContext());
+    task_op->setAttr("dlp_eligibility", builder.getStringAttr("replicable"));
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Runtime-managed task tagging
 //===----------------------------------------------------------------------===//
 
 static bool taskHasRegularDynamicCounter(TaskflowTaskOp task_op) {
@@ -329,7 +351,7 @@ static void identifyRuntimeManagedTask(TaskflowTaskOp task_op) {
   task_op->removeAttr("task_type");
 
   if (taskHasRegularDynamicCounter(task_op) &&
-      taskCanBeRuntimeManaged(task_op)) {
+      taskHasDlpEligibility(task_op, "replicable")) {
     OpBuilder builder(task_op.getContext());
     task_op->setAttr("task_type", builder.getStringAttr("runtime_managed"));
   }
@@ -362,6 +384,8 @@ struct ClassifyTaskAndCounterPass
       return;
     }
 
+    module.walk(
+        [&](TaskflowTaskOp task_op) { identifyDlpCapability(task_op); });
     module.walk(
         [&](TaskflowTaskOp task_op) { identifyRuntimeManagedTask(task_op); });
   }

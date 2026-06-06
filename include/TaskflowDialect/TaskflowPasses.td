@@ -68,9 +68,13 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
       counter_id – unique integer index within the task (0-based)
 
     Per task:
+      dlp_eligibility = "replicable" when the task has hyperblocks without
+      loop-carried dependence and can be considered for data-level parallel
+      replication.
+
       task_type = "runtime_managed" only when the task has at least one
-      regular_dynamic counter and every contained hyperblock has no
-      loop-carried dependence. Non-runtime-managed tasks are left unmarked.
+      regular_dynamic counter and is DLP-replicable.
+      Non-runtime-managed tasks are left unmarked.
   }];
   let constructor = "taskflow::createClassifyTaskAndCounterPass()";
   let dependentDialects = ["mlir::affine::AffineDialect",
