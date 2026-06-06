@@ -10,6 +10,7 @@
 #include "mlir/IR/Value.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Support/LLVM.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
@@ -30,6 +31,49 @@ struct DirectDominatingLiveIn {
   // The block where the live-in value is used.
   Block *using_block;
 };
+
+bool canReachBlock(Block *from, Block *to) {
+  if (from == to) {
+    return true;
+  }
+
+  SmallVector<Block *> worklist;
+  llvm::DenseSet<Block *> visited;
+  worklist.push_back(from);
+
+  while (!worklist.empty()) {
+    Block *block = worklist.pop_back_val();
+    if (!visited.insert(block).second) {
+      continue;
+    }
+
+    for (Block *succ : block->getSuccessors()) {
+      if (succ == to) {
+        return true;
+      }
+      worklist.push_back(succ);
+    }
+  }
+
+  return false;
+}
+
+bool hasBackEdgeOnPath(Block *from, Block *to, DominanceInfo &dom_info) {
+  Region *region = from->getParent();
+  for (Block &block : region->getBlocks()) {
+    if (!canReachBlock(from, &block) || !canReachBlock(&block, to)) {
+      continue;
+    }
+
+    for (Block *succ : block.getSuccessors()) {
+      if (succ == &block || dom_info.dominates(succ, &block)) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
 
 // Checks if two blocks form a single-source-single-sink pattern with
 // conditional control flow between them.
@@ -191,6 +235,10 @@ bool isSingleSourceSingleSinkPattern(Block *defining_block, Block *using_block,
     return false;
   }
 
+  if (hasBackEdgeOnPath(defining_block, using_block, dom_info)) {
+    return false;
+  }
+
   // 8. Key Constraint: Verifies that BOTH branches eventually reach using_block
   // WITHOUT creating a loop back to conditional_branch_block or earlier.
   assert(conditional_branch_block &&
@@ -333,6 +381,10 @@ bool isDirectUnconditionalPattern(Block *defining_block, Block *using_block,
 
   // 3. Using block must post-dominate defining block.
   if (!post_dom_info.postDominates(using_block, defining_block)) {
+    return false;
+  }
+
+  if (hasBackEdgeOnPath(defining_block, using_block, dom_info)) {
     return false;
   }
 
