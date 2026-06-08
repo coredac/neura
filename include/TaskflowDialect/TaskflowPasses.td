@@ -60,10 +60,10 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
         "relay"  : middle loop   (has parent and children)
         "leaf"   : innermost loop (no children; also single-loop tasks)
 
-      counter_dynamism – AMOEBA drive-pattern class:
-        "static"            : all bounds are compile-time constants
-        "regular_dynamic"   : bounds are known before the task launches
-        "irregular_dynamic" : bounds are produced during task execution
+      counter_dynamism – AMOEBA bound class:
+        "constant_bound" : all bounds are compile-time constants
+        "symbol_bound"   : bounds are known before the task launches
+        "dynamic_bound"  : bounds are produced during task execution
 
       counter_id – unique integer index within the task (0-based)
 
@@ -73,7 +73,7 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
       replication.
 
       task_type = "runtime_managed" only when the task has at least one
-      regular_dynamic counter and is DLP-replicable.
+      symbol_bound counter and is DLP-replicable.
       Non-runtime-managed tasks are left unmarked.
   }];
   let constructor = "taskflow::createClassifyTaskAndCounterPass()";

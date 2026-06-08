@@ -155,13 +155,13 @@ module attributes {} {
 // KERNEL-NEXT:       %c0 = arith.constant 0 : index
 // KERNEL-NEXT:       %c32 = arith.constant 32 : index
 // KERNEL-NEXT:       %c1 = arith.constant 1 : index
-// KERNEL-NEXT:       %0 = taskflow.counter from %c0 to %c32 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
+// KERNEL-NEXT:       %0 = taskflow.counter from %c0 to %c32 step %c1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
 // KERNEL-NEXT:       neura.kernel inputs(%arg2, %arg5, %arg4 : memref<?xi32>, i32, memref<?xi32>) {
 // KERNEL-NEXT:       ^bb0(%arg6: memref<?xi32>, %arg7: i32, %arg8: memref<?xi32>):
 // KERNEL-NEXT:         %c0_0 = arith.constant 0 : index
 // KERNEL-NEXT:         %c32_1 = arith.constant 32 : index
 // KERNEL-NEXT:         %c1_2 = arith.constant 1 : index
-// KERNEL-NEXT:         %1 = neura.counter from %c0_0 : index to %c32_1 : index step %c1_2 : index attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32} -> index
+// KERNEL-NEXT:         %1 = neura.counter from %c0_0 : index to %c32_1 : index step %c1_2 : index attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32} -> index
 // KERNEL-NEXT:         %2 = memref.load %arg6[%1] : memref<?xi32>
 // KERNEL-NEXT:         %3 = arith.cmpi sgt, %2, %arg7 : i32
 // KERNEL-NEXT:         scf.if %3 {
@@ -189,13 +189,13 @@ module attributes {} {
 // NEURA-NEXT:       %c0 = arith.constant 0 : index
 // NEURA-NEXT:       %c32 = arith.constant 32 : index
 // NEURA-NEXT:       %c1 = arith.constant 1 : index
-// NEURA-NEXT:       %0 = taskflow.counter from %c0 to %c32 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
+// NEURA-NEXT:       %0 = taskflow.counter from %c0 to %c32 step %c1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
 // NEURA-NEXT:       neura.kernel inputs(%arg2, %arg5, %arg4 : memref<?xi32>, i32, memref<?xi32>) attributes {accelerator = "neura"} {
 // NEURA-NEXT:       ^bb0(%arg6: memref<?xi32>, %arg7: i32, %arg8: memref<?xi32>):
 // NEURA-NEXT:         %1 = "neura.constant"() <{value = 0 : index}> : () -> index
 // NEURA-NEXT:         %2 = "neura.constant"() <{value = 32 : index}> : () -> index
 // NEURA-NEXT:         %3 = "neura.constant"() <{value = 1 : index}> : () -> index
-// NEURA-NEXT:         %4 = neura.counter from %1 : index to %2 : index step %3 : index attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32} -> index
+// NEURA-NEXT:         %4 = neura.counter from %1 : index to %2 : index step %3 : index attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32} -> index
 // NEURA-NEXT:         %5 = neura.load_indexed %arg6[%4 : index] memref<?xi32> : i32
 // NEURA-NEXT:         %6 = "neura.icmp"(%5, %arg7) <{cmpType = "sgt"}> : (i32, i32) -> i1
 // NEURA-NEXT:         neura.cond_br %6 : i1 then to ^bb1 else to ^bb2
@@ -226,10 +226,10 @@ module attributes {} {
 // DATAFLOW-NEXT:       %c0 = arith.constant 0 : index
 // DATAFLOW-NEXT:       %c32 = arith.constant 32 : index
 // DATAFLOW-NEXT:       %c1 = arith.constant 1 : index
-// DATAFLOW-NEXT:       %0 = taskflow.counter from %c0 to %c32 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
+// DATAFLOW-NEXT:       %0 = taskflow.counter from %c0 to %c32 step %c1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
 // DATAFLOW-NEXT:       neura.kernel inputs(%arg2, %arg5, %arg4 : memref<?xi32>, i32, memref<?xi32>) attributes {accelerator = "neura", dataflow_mode = "predicate"} {
 // DATAFLOW-NEXT:       ^bb0(%arg6: memref<?xi32>, %arg7: i32, %arg8: memref<?xi32>):
-// DATAFLOW-NEXT:         %1 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 32 : index} -> !neura.data<index, i1>
+// DATAFLOW-NEXT:         %1 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 32 : index} -> !neura.data<index, i1>
 // DATAFLOW-NEXT:         %2 = neura.load_indexed [%1 : !neura.data<index, i1>]  {lhs_value = "%input0"} : !neura.data<i32, i1>
 // DATAFLOW-NEXT:         %3 = "neura.icmp"(%2) <{cmpType = "sgt"}> {rhs_value = "%input1"} : (!neura.data<i32, i1>) -> !neura.data<i1, i1>
 // DATAFLOW-NEXT:         %4 = neura.grant_predicate %1, %3 : !neura.data<index, i1>, !neura.data<i1, i1> -> !neura.data<index, i1>
@@ -257,10 +257,10 @@ module attributes {} {
 // MAPPED-NEXT:       %c0 = arith.constant 0 : index
 // MAPPED-NEXT:       %c32 = arith.constant 32 : index
 // MAPPED-NEXT:       %c1 = arith.constant 1 : index
-// MAPPED-NEXT:       %0 = taskflow.counter from %c0 to %c32 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
+// MAPPED-NEXT:       %0 = taskflow.counter from %c0 to %c32 step %c1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
 // MAPPED-NEXT:       neura.kernel inputs(%arg2, %arg5, %arg4 : memref<?xi32>, i32, memref<?xi32>) attributes {accelerator = "neura", dataflow_mode = "predicate", mapping_info = {compiled_ii = 2 : i32, mapping_mode = "spatial-temporal", mapping_strategy = "heuristic", rec_mii = 1 : i32, res_mii = 1 : i32, x_tiles = 4 : i32, y_tiles = 4 : i32}} {
 // MAPPED-NEXT:       ^bb0(%arg6: memref<?xi32>, %arg7: i32, %arg8: memref<?xi32>):
-// MAPPED-NEXT:         %1 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32, dfg_id = 0 : i32, lower_bound_value = 0 : index, mapping_locs = [{id = 5 : i32, index_per_ii = 0 : i32, invalid_iterations = 0 : i32, resource = "tile", time_step = 0 : i32, x = 1 : i32, y = 1 : i32}], step_value = 1 : index, upper_bound_value = 32 : index} -> !neura.data<index, i1>
+// MAPPED-NEXT:         %1 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32, dfg_id = 0 : i32, lower_bound_value = 0 : index, mapping_locs = [{id = 5 : i32, index_per_ii = 0 : i32, invalid_iterations = 0 : i32, resource = "tile", time_step = 0 : i32, x = 1 : i32, y = 1 : i32}], step_value = 1 : index, upper_bound_value = 32 : index} -> !neura.data<index, i1>
 // MAPPED-NEXT:         %2 = "neura.data_mov"(%1) {dfg_id = 2 : i32, mapping_locs = [{id = 160 : i32, index_per_ii = 0 : i32, invalid_iterations = 0 : i32, per_tile_register_id = 0 : i32, resource = "register", time_step = 0 : i32}]} : (!neura.data<index, i1>) -> !neura.data<index, i1>
 // MAPPED-NEXT:         %3 = neura.load_indexed [%2 : !neura.data<index, i1>]  {dfg_id = 5 : i32, lhs_value = "%input0", mapping_locs = [{id = 5 : i32, index_per_ii = 1 : i32, invalid_iterations = 0 : i32, resource = "tile", time_step = 1 : i32, x = 1 : i32, y = 1 : i32}]} : !neura.data<i32, i1>
 // MAPPED-NEXT:         %4 = "neura.data_mov"(%3) {dfg_id = 6 : i32, mapping_locs = [{id = 15 : i32, index_per_ii = 1 : i32, invalid_iterations = 0 : i32, resource = "link", time_step = 1 : i32}]} : (!neura.data<i32, i1>) -> !neura.data<i32, i1>

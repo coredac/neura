@@ -757,13 +757,13 @@ module attributes {} {
 // RESOPT-NEXT:       %c0 = arith.constant 0 : index
 // RESOPT-NEXT:       %c5 = arith.constant 5 : index
 // RESOPT-NEXT:       %c1 = arith.constant 1 : index
-// RESOPT-NEXT:       %1 = taskflow.counter from %c0 to %c5 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
+// RESOPT-NEXT:       %1 = taskflow.counter from %c0 to %c5 step %c1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
 // RESOPT-NEXT:       %2 = neura.kernel inputs(%arg2, %arg0 : i32, memref<4x8xi32>) iter_args_init(%arg1 : i32) attributes {accelerator = "neura", dataflow_mode = "predicate"} {
 // RESOPT-NEXT:       ^bb0(%arg3: i32, %arg4: memref<4x8xi32>, %arg5: i32):
 // RESOPT-NEXT:         %5 = "neura.grant_once"() <{constant_value = "%iter_arg_init0"}> : () -> !neura.data<i32, i1>
 // RESOPT-NEXT:         %6 = neura.reserve : !neura.data<i32, i1>
 // RESOPT-NEXT:         %7 = neura.phi_start %5, %6 : !neura.data<i32, i1>, !neura.data<i32, i1> -> !neura.data<i32, i1>
-// RESOPT-NEXT:         %8 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 5 : index} -> !neura.data<index, i1>
+// RESOPT-NEXT:         %8 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 5 : index} -> !neura.data<index, i1>
 // RESOPT-NEXT:         %9 = "neura.cast"(%8) <{cast_type = "index_to_int"}> : (!neura.data<index, i1>) -> !neura.data<i32, i1>
 // RESOPT-NEXT:         %10 = "neura.add"(%7, %9) : (!neura.data<i32, i1>, !neura.data<i32, i1>) -> !neura.data<i32, i1>
 // RESOPT-NEXT:         neura.ctrl_mov %10 -> %6 : !neura.data<i32, i1> !neura.data<i32, i1>
@@ -771,8 +771,8 @@ module attributes {} {
 // RESOPT-NEXT:         %12 = "neura.not"(%11) : (!neura.data<i1, i1>) -> !neura.data<i1, i1>
 // RESOPT-NEXT:         %13 = neura.grant_predicate %7, %12 : !neura.data<i32, i1>, !neura.data<i1, i1> -> !neura.data<i32, i1>
 // RESOPT-NEXT:         neura.return_value %13 : !neura.data<i32, i1>
-// RESOPT-NEXT:         %14 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "root", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 4 : index} -> !neura.data<index, i1>
-// RESOPT-NEXT:         %15 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 1 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 8 : index} -> !neura.data<index, i1>
+// RESOPT-NEXT:         %14 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "root", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 4 : index} -> !neura.data<index, i1>
+// RESOPT-NEXT:         %15 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 1 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 8 : index} -> !neura.data<index, i1>
 // RESOPT-NEXT:         %16 = "neura.cast"(%14) <{cast_type = "index_to_int"}> : (!neura.data<index, i1>) -> !neura.data<i32, i1>
 // RESOPT-NEXT:         %17 = "neura.mul"(%16) {rhs_value = "%input0"} : (!neura.data<i32, i1>) -> !neura.data<i32, i1>
 // RESOPT-NEXT:         %18 = "neura.cast"(%15) <{cast_type = "index_to_int"}> : (!neura.data<index, i1>) -> !neura.data<i32, i1>
@@ -784,8 +784,8 @@ module attributes {} {
 // RESOPT-NEXT:       %c0_2 = arith.constant 0 : index
 // RESOPT-NEXT:       %c4 = arith.constant 4 : index
 // RESOPT-NEXT:       %c1_3 = arith.constant 1 : index
-// RESOPT-NEXT:       %3 = taskflow.counter from %c0_2 to %c4 step %c1_3 attributes {counter_dynamism = "static", counter_hierarchy = "root", counter_id = 0 : i32} : index
-// RESOPT-NEXT:       %4 = taskflow.counter parent(%3 : index) from %c0_2 to %c8 step %c1_3 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
+// RESOPT-NEXT:       %3 = taskflow.counter from %c0_2 to %c4 step %c1_3 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "root", counter_id = 0 : i32} : index
+// RESOPT-NEXT:       %4 = taskflow.counter parent(%3 : index) from %c0_2 to %c8 step %c1_3 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
 // RESOPT-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>) values(%2 : i32)
 // RESOPT-NEXT:     }
 // RESOPT-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 2 : i32, dlp_eligibility = "replicable", profile_info = {duration = 7 : i32}, trip_count = 32 : i32} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
@@ -794,12 +794,12 @@ module attributes {} {
 // RESOPT-NEXT:       %c0 = arith.constant 0 : index
 // RESOPT-NEXT:       %c4 = arith.constant 4 : index
 // RESOPT-NEXT:       %c1 = arith.constant 1 : index
-// RESOPT-NEXT:       %1 = taskflow.counter from %c0 to %c4 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "root", counter_id = 0 : i32} : index
-// RESOPT-NEXT:       %2 = taskflow.counter parent(%1 : index) from %c0 to %c8 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
+// RESOPT-NEXT:       %1 = taskflow.counter from %c0 to %c4 step %c1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "root", counter_id = 0 : i32} : index
+// RESOPT-NEXT:       %2 = taskflow.counter parent(%1 : index) from %c0 to %c8 step %c1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
 // RESOPT-NEXT:       neura.kernel inputs(%arg0, %arg3, %arg1, %arg4 : memref<4x8xi32>, i32, memref<i32>, i32) attributes {accelerator = "neura", dataflow_mode = "predicate"} {
 // RESOPT-NEXT:       ^bb0(%arg5: memref<4x8xi32>, %arg6: i32, %arg7: memref<i32>, %arg8: i32):
-// RESOPT-NEXT:         %3 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "root", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 4 : index} -> !neura.data<index, i1>
-// RESOPT-NEXT:         %4 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 1 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 8 : index} -> !neura.data<index, i1>
+// RESOPT-NEXT:         %3 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "root", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 4 : index} -> !neura.data<index, i1>
+// RESOPT-NEXT:         %4 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 1 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 8 : index} -> !neura.data<index, i1>
 // RESOPT-NEXT:         %5 = neura.load_indexed [%3, %4 : !neura.data<index, i1>, !neura.data<index, i1>]  {lhs_value = "%input0"} : !neura.data<i32, i1>
 // RESOPT-NEXT:         %6 = "neura.add"(%5) {rhs_value = "%input1"} : (!neura.data<i32, i1>) -> !neura.data<i32, i1>
 // RESOPT-NEXT:         %7 = "neura.add"(%3) {rhs_value = -3 : index} : (!neura.data<index, i1>) -> !neura.data<index, i1>

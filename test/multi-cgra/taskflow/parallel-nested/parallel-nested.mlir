@@ -352,15 +352,15 @@ module {
 // RESOPT-NEXT:       %c0 = arith.constant 0 : index
 // RESOPT-NEXT:       %c16 = arith.constant 16 : index
 // RESOPT-NEXT:       %c1 = arith.constant 1 : index
-// RESOPT-NEXT:       %0 = taskflow.counter from %c0 to %c16 step %c1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
+// RESOPT-NEXT:       %0 = taskflow.counter from %c0 to %c16 step %c1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32} : index
 // RESOPT-NEXT:       neura.kernel inputs(%arg8, %arg10, %arg6, %arg7, %arg9 : memref<16xf32>, f32, memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) attributes {accelerator = "neura", dataflow_mode = "predicate"} {
 // RESOPT-NEXT:       ^bb0(%arg11: memref<16xf32>, %arg12: f32, %arg13: memref<8x8xf32>, %arg14: memref<8x8xf32>, %arg15: memref<8x8xf32>):
-// RESOPT-NEXT:         %3 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 16 : index} -> !neura.data<index, i1>
+// RESOPT-NEXT:         %3 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 16 : index} -> !neura.data<index, i1>
 // RESOPT-NEXT:         %4 = neura.load_indexed [%3 : !neura.data<index, i1>]  {lhs_value = "%input0"} : !neura.data<f32, i1>
 // RESOPT-NEXT:         %5 = "neura.fmul"(%4) {rhs_value = "%input1"} : (!neura.data<f32, i1>) -> !neura.data<f32, i1>
 // RESOPT-NEXT:         neura.store_indexed %5 to [%3 : !neura.data<index, i1>]  {rhs_value = "%input0"} : !neura.data<f32, i1>
-// RESOPT-NEXT:         %6 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "root", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 8 : index} -> !neura.data<index, i1>
-// RESOPT-NEXT:         %7 = neura.counter attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 1 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 8 : index} -> !neura.data<index, i1>
+// RESOPT-NEXT:         %6 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "root", counter_id = 0 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 8 : index} -> !neura.data<index, i1>
+// RESOPT-NEXT:         %7 = neura.counter attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 1 : i32, lower_bound_value = 0 : index, step_value = 1 : index, upper_bound_value = 8 : index} -> !neura.data<index, i1>
 // RESOPT-NEXT:         %8 = neura.load_indexed [%6, %7 : !neura.data<index, i1>, !neura.data<index, i1>]  {lhs_value = "%input0"} : !neura.data<f32, i1>
 // RESOPT-NEXT:         %9 = neura.load_indexed [%6, %7 : !neura.data<index, i1>, !neura.data<index, i1>]  {lhs_value = "%input1"} : !neura.data<f32, i1>
 // RESOPT-NEXT:         %10 = "neura.fmul"(%8, %9) : (!neura.data<f32, i1>, !neura.data<f32, i1>) -> !neura.data<f32, i1>
@@ -370,8 +370,8 @@ module {
 // RESOPT-NEXT:       %c0_0 = arith.constant 0 : index
 // RESOPT-NEXT:       %c8 = arith.constant 8 : index
 // RESOPT-NEXT:       %c1_1 = arith.constant 1 : index
-// RESOPT-NEXT:       %1 = taskflow.counter from %c0_0 to %c8 step %c1_1 attributes {counter_dynamism = "static", counter_hierarchy = "root", counter_id = 0 : i32} : index
-// RESOPT-NEXT:       %2 = taskflow.counter parent(%1 : index) from %c0_0 to %c8 step %c1_1 attributes {counter_dynamism = "static", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
+// RESOPT-NEXT:       %1 = taskflow.counter from %c0_0 to %c8 step %c1_1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "root", counter_id = 0 : i32} : index
+// RESOPT-NEXT:       %2 = taskflow.counter parent(%1 : index) from %c0_0 to %c8 step %c1_1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
 // RESOPT-NEXT:       taskflow.yield reads(%arg5, %arg6, %arg7 : memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>) writes(%arg8, %arg9 : memref<16xf32>, memref<8x8xf32>)
 // RESOPT-NEXT:     }
 // RESOPT-NEXT:     return
