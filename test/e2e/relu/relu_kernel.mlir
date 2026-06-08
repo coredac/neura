@@ -30,6 +30,9 @@
 // RUN: FileCheck %s --input-file=tmp-generated-instructions.yaml --check-prefix=YAML
 // RUN: FileCheck %s --input-file=tmp-generated-instructions.asm --check-prefix=ASM
 //
+// WIP: https://github.com/coredac/neura/issues/5
+// RN: neura-interpreter %t-mapping.mlir >> %t-dumped_output.txt
+//
 // Check the mapped MLIR contains key operations with full statements.
 // RUN: FileCheck %s --input-file=%t-mapping.mlir -check-prefix=MAPPING
 
