@@ -58,9 +58,15 @@ bool canReachBlock(Block *from, Block *to) {
   return false;
 }
 
-bool hasBackEdgeOnPath(Block *from, Block *to, DominanceInfo &dom_info) {
+bool hasBackEdgeBeforeTarget(Block *from, Block *to, DominanceInfo &dom_info) {
   Region *region = from->getParent();
   for (Block &block : region->getBlocks()) {
+    // A back edge that leaves the use block is after this live-in is consumed.
+    // Rejecting it is too conservative for loop latch / merge blocks.
+    if (&block == to) {
+      continue;
+    }
+
     if (!canReachBlock(from, &block) || !canReachBlock(&block, to)) {
       continue;
     }
@@ -235,7 +241,7 @@ bool isSingleSourceSingleSinkPattern(Block *defining_block, Block *using_block,
     return false;
   }
 
-  if (hasBackEdgeOnPath(defining_block, using_block, dom_info)) {
+  if (hasBackEdgeBeforeTarget(defining_block, using_block, dom_info)) {
     return false;
   }
 
@@ -384,7 +390,7 @@ bool isDirectUnconditionalPattern(Block *defining_block, Block *using_block,
     return false;
   }
 
-  if (hasBackEdgeOnPath(defining_block, using_block, dom_info)) {
+  if (hasBackEdgeBeforeTarget(defining_block, using_block, dom_info)) {
     return false;
   }
 
