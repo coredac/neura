@@ -68,7 +68,7 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
       counter_id – unique integer index within the task (0-based)
 
     Per task:
-      dlp_eligibility = "replicable" when the task has hyperblocks without
+      dlp_replicable = true when the task has hyperblocks without
       loop-carried dependence and can be considered for data-level parallel
       replication.
 
