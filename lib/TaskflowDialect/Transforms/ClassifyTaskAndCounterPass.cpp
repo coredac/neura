@@ -17,8 +17,8 @@
 //   counter_id         – unique integer index within the task (0-based)
 //
 // Per taskflow.task:
-//   task_type = "runtime_managed" only when the task should be managed by the
-//   AMOEBA runtime: it has at least one symbol-bound counter and its
+//   runtime_managable = true when the task can be managed by the AMOEBA
+//   runtime: it has at least one symbol-bound counter and its
 //   hyperblock bodies do not carry loop-carried dependences.
 //   dlp_replicable = true when the task can be replicated for data-level
 //   parallelism.
@@ -331,7 +331,7 @@ static void identifyDlpCapability(TaskflowTaskOp task_op) {
 }
 
 //===----------------------------------------------------------------------===//
-// Runtime-managed task tagging
+// Runtime-managable task tagging
 //===----------------------------------------------------------------------===//
 
 static bool taskHasSymbolBoundCounter(TaskflowTaskOp task_op) {
@@ -345,14 +345,15 @@ static bool taskHasSymbolBoundCounter(TaskflowTaskOp task_op) {
   return result.wasInterrupted();
 }
 
-static void identifyRuntimeManagedTask(TaskflowTaskOp task_op) {
-  // Re-running this pass should not preserve task_type values from an older
+static void identifyRuntimeManagableTask(TaskflowTaskOp task_op) {
+  // Re-running this pass should not preserve task-level tags from an older
   // classification result.
   task_op->removeAttr("task_type");
+  task_op->removeAttr("runtime_managable");
 
   if (taskHasSymbolBoundCounter(task_op) && taskIsDlpReplicable(task_op)) {
     OpBuilder builder(task_op.getContext());
-    task_op->setAttr("task_type", builder.getStringAttr("runtime_managed"));
+    task_op->setAttr("runtime_managable", builder.getBoolAttr(true));
   }
 }
 
@@ -366,7 +367,7 @@ struct ClassifyTaskAndCounterPass
 
   StringRef getArgument() const override { return "classify-task-and-counter"; }
   StringRef getDescription() const override {
-    return "Classify taskflow counters and mark runtime-managed tasks.";
+    return "Classify taskflow counters and mark runtime-managable tasks.";
   }
 
   void runOnOperation() override {
@@ -386,7 +387,7 @@ struct ClassifyTaskAndCounterPass
     module.walk(
         [&](TaskflowTaskOp task_op) { identifyDlpCapability(task_op); });
     module.walk(
-        [&](TaskflowTaskOp task_op) { identifyRuntimeManagedTask(task_op); });
+        [&](TaskflowTaskOp task_op) { identifyRuntimeManagableTask(task_op); });
   }
 };
 

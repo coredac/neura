@@ -50,7 +50,8 @@ def ConstructHyperblockFromTask
 }
 
 def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
-  let summary = "Classifies taskflow counters and marks runtime-managed tasks";
+  let summary =
+      "Classifies taskflow counters and marks runtime-managable tasks";
   let description = [{
     Annotates every taskflow.task and its contained taskflow.counter ops.
 
@@ -72,9 +73,9 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
       loop-carried dependence and can be considered for data-level parallel
       replication.
 
-      task_type = "runtime_managed" only when the task has at least one
+      runtime_managable = true only when the task has at least one
       symbol_bound counter and is DLP-replicable.
-      Non-runtime-managed tasks are left unmarked.
+      Non-runtime-managable tasks are left unmarked.
   }];
   let constructor = "taskflow::createClassifyTaskAndCounterPass()";
   let dependentDialects = ["mlir::affine::AffineDialect",
