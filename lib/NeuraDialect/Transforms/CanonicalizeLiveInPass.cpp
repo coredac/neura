@@ -100,8 +100,11 @@ bool hasBackEdgeBeforeTarget(Block *from, Block *to, DominanceInfo &dom_info) {
 //    - All paths from A eventually reach D
 // 3. There exists at least one conditional branch (cond_br) between A and D
 //    - Control flow diverges and then converges
-// 4. No back edges (loop-free)
+// 4. No back edges before the sink (loop-free before the use)
 //    - Neither branch target of any cond_br dominates the cond_br block itself
+//    - A nested loop/backedge on either branch before reaching D is invalid
+//    - A back edge that leaves D itself is allowed because the value has already
+//      been consumed at D
 //
 // Examples of Valid Patterns:
 //
@@ -121,13 +124,26 @@ bool hasBackEdgeBeforeTarget(Block *from, Block *to, DominanceInfo &dom_info) {
 //
 // Counter-examples (Not Valid):
 //
-// 1. Loop structure (has back edge):
+// 1. Direct loop structure (has back edge):
 //        [ A: cond_br ]  <---+
 //         /          \       |
 //    [ B: exit ]  [ C ]      |
 //                     \------+
 //
-// 2. Entry block as source:
+// 2. Nested loop hidden in an asymmetric branch before the sink:
+//        [ A: cond_br ]
+//         /          \
+//        |       [ D: sink ]
+//        v
+//    [ B: loop header ] <---+
+//        |                  |
+//        v                  |
+//    [ C: loop latch ] -----+
+//        |
+//        v
+//    [ D: sink ]
+//
+// 3. Entry block as source:
 //        [ Entry Block ]  <- Excluded to maintain compatibility
 //              |              with TransformCtrlToDataFlowPass
 //           [ cond_br ]
