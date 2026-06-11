@@ -50,8 +50,8 @@ def ConstructHyperblockFromTask
 }
 
 def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
-  let summary = "Classifies taskflow counters (hierarchy/dynamism/id) and "
-                "tasks (task_type) in a single pass";
+  let summary =
+      "Classifies taskflow counters and marks runtime-managable tasks";
   let description = [{
     Annotates every taskflow.task and its contained taskflow.counter ops.
 
@@ -61,16 +61,21 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
         "relay"  : middle loop   (has parent and children)
         "leaf"   : innermost loop (no children; also single-loop tasks)
 
-      counter_dynamism – bound predictability:
-        "static"            : all bounds are compile-time constants
-        "symbol_dynamic"    : bounds trace to function args / memref.dim
-        "irregular_dynamic" : bounds depend on earlier task outputs
+      counter_dynamism – AMOEBA bound class:
+        "constant_bound" : all bounds are compile-time constants
+        "symbol_bound"   : bounds are known before the task launches
+        "dynamic_bound"  : bounds are produced during task execution
 
       counter_id – unique integer index within the task (0-based)
 
     Per task:
-      task_type – worst-case counter_dynamism across all counters
-        ("irregular_dynamic" > "symbol_dynamic" > "static")
+      dlp_replicable = true when the task has hyperblocks without
+      loop-carried dependence and can be considered for data-level parallel
+      replication.
+
+      runtime_managable = true only when the task has at least one
+      symbol_bound counter and is DLP-replicable.
+      Non-runtime-managable tasks are left unmarked.
   }];
   let constructor = "taskflow::createClassifyTaskAndCounterPass()";
   let dependentDialects = ["mlir::affine::AffineDialect",

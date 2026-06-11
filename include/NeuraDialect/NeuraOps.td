@@ -824,7 +824,7 @@ def Neura_CounterOp : Op<NeuraDialect, "counter", [Pure, AttrSizedOperandSegment
       %c32 = arith.constant 32 : index
       %c1 = arith.constant 1 : index
       %idx = neura.counter from %c0 to %c32 step %c1
-               {counter_hierarchy = "leaf", counter_dynamism = "static", counter_id = 0 : i32} : index
+               {counter_hierarchy = "leaf", counter_dynamism = "constant_bound", counter_id = 0 : i32} : index
 
     Example (dynamic upper bound from kernel input):
       %idx = neura.counter from %c0 to %N step %c1

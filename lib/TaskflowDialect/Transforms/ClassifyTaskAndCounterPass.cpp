@@ -1,7 +1,7 @@
 //===- ClassifyTaskAndCounterPass.cpp - Classify tasks and counters -------===//
 //
 // Single pass that annotates every taskflow.task and its contained
-// taskflow.counter ops with classification attributes:
+// taskflow.counter ops with AMOEBA execution-model attributes:
 //
 // Per taskflow.counter:
 //   counter_hierarchy  – structural role in the loop nest:
@@ -9,25 +9,28 @@
 //     "relay"  : middle loop   (has parent and children)
 //     "leaf"   : innermost loop (no children; also single-loop tasks)
 //
-//   counter_dynamism   – bound predictability:
-//     "static"            : all bounds are compile-time constants
-//     "symbol_dynamic"    : bounds trace to function args / memref.dim
-//     "irregular_dynamic" : bounds depend on earlier task outputs
+//   counter_dynamism   – AMOEBA bound class:
+//     "constant_bound" : all bounds are compile-time constants
+//     "symbol_bound"   : bounds are known before the task launches
+//     "dynamic_bound"  : bounds are produced during task execution
 //
 //   counter_id         – unique integer index within the task (0-based)
 //
 // Per taskflow.task:
-//   task_type – worst-case counter_dynamism across all counters in the task
-//     ("irregular_dynamic" > "symbol_dynamic" > "static")
+//   runtime_managable = true when the task can be managed by the AMOEBA
+//   runtime: it has at least one symbol-bound counter and its
+//   hyperblock bodies do not carry loop-carried dependences.
+//   dlp_replicable = true when the task can be replicated for data-level
+//   parallelism.
 //
 // Classification rules for a bound value inside the task body:
-//   arith.constant                             → static
+//   arith.constant                             → constant_bound
 //   affine.apply                               → recurse through operands
 //   block arg mapping to an outer value:
-//     func.func argument                       → symbol_dynamic
-//     memref.dim                               → symbol_dynamic
-//     arith.constant at call site              → static
-//   anything else                              → irregular_dynamic
+//     func.func argument                       → symbol_bound
+//     memref.dim / function-scope arithmetic   → symbol_bound
+//     arith.constant at call site              → constant_bound
+//   anything else                              → dynamic_bound
 //
 //===----------------------------------------------------------------------===//
 
@@ -39,6 +42,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/Diagnostics.h"
 #include "mlir/Pass/Pass.h"
@@ -48,6 +52,7 @@
 #include "llvm/ADT/SmallVector.h"
 
 #include <memory>
+#include <optional>
 
 using namespace mlir;
 using namespace mlir::taskflow;
@@ -58,7 +63,7 @@ namespace {
 // Bound kind
 //===----------------------------------------------------------------------===//
 
-enum class BoundKind { Static = 0, SymbolDynamic = 1, IrregularDynamic = 2 };
+enum class BoundKind { ConstantBound = 0, SymbolBound = 1, DynamicBound = 2 };
 
 static BoundKind worstCase(BoundKind a, BoundKind b) {
   return static_cast<BoundKind>(
@@ -67,12 +72,12 @@ static BoundKind worstCase(BoundKind a, BoundKind b) {
 
 static StringRef boundKindToStr(BoundKind k) {
   switch (k) {
-  case BoundKind::Static:
-    return "static";
-  case BoundKind::SymbolDynamic:
-    return "symbol_dynamic";
-  case BoundKind::IrregularDynamic:
-    return "irregular_dynamic";
+  case BoundKind::ConstantBound:
+    return "constant_bound";
+  case BoundKind::SymbolBound:
+    return "symbol_bound";
+  case BoundKind::DynamicBound:
+    return "dynamic_bound";
   }
   llvm_unreachable("unknown BoundKind");
 }
@@ -87,45 +92,49 @@ static BoundKind classifyOuterValue(Value v) {
   if (auto block_arg = dyn_cast<BlockArgument>(v)) {
     auto *parent_region = block_arg.getParentRegion();
     if (parent_region && isa<func::FuncOp>(parent_region->getParentOp())) {
-      return BoundKind::SymbolDynamic;
+      return BoundKind::SymbolBound;
     }
-    return BoundKind::IrregularDynamic;
+    return BoundKind::DynamicBound;
   }
   Operation *def = v.getDefiningOp();
   if (!def) {
-    return BoundKind::IrregularDynamic;
+    assert(false && "unexpected value with no defining op and not a block arg");
   }
   if (isa<arith::ConstantOp, arith::ConstantIndexOp>(def)) {
-    return BoundKind::Static;
+    return BoundKind::ConstantBound;
   }
-  if (isa<memref::DimOp>(def)) {
-    return BoundKind::SymbolDynamic;
+  // Any op at the function body scope (memref.dim, preceding taskflow.task
+  // results, arith on func args, etc.) is fully determined before this task
+  // launches.
+  if (def->getParentRegion() &&
+      isa<func::FuncOp>(def->getParentRegion()->getParentOp())) {
+    return BoundKind::SymbolBound;
   }
-  return BoundKind::IrregularDynamic;
+  return BoundKind::DynamicBound;
 }
 
-// Classifies a bound value as seen INSIDE the task body.
-// task_op is used to map block arguments back to their value_input operands.
-static BoundKind classifyTaskBoundValue(Value v, TaskflowTaskOp task_op) {
+// Classifies one lower/upper/step value used by a taskflow.counter.
+// task_op is used to map task block arguments back to value_input operands.
+static BoundKind classifyCounterBoundValue(Value v, TaskflowTaskOp task_op) {
   if (Operation *def = v.getDefiningOp()) {
     if (isa<arith::ConstantOp, arith::ConstantIndexOp>(def)) {
-      return BoundKind::Static;
+      return BoundKind::ConstantBound;
     }
     // affine.apply is a pure affine computation; its dynamism is determined
     // entirely by its operands (e.g. affine_map<()[s0]->(s0-2)>()[%n]).
     if (isa<affine::AffineApplyOp>(def)) {
-      BoundKind k = BoundKind::Static;
+      BoundKind k = BoundKind::ConstantBound;
       for (Value operand : def->getOperands()) {
-        k = worstCase(k, classifyTaskBoundValue(operand, task_op));
+        k = worstCase(k, classifyCounterBoundValue(operand, task_op));
       }
       return k;
     }
-    return BoundKind::IrregularDynamic;
+    return BoundKind::DynamicBound;
   }
 
   auto block_arg = dyn_cast<BlockArgument>(v);
   if (!block_arg) {
-    return BoundKind::IrregularDynamic;
+    return BoundKind::DynamicBound;
   }
 
   // Block args layout: [dep_read_in…] [dep_write_in…] [value_inputs…]
@@ -145,22 +154,89 @@ static BoundKind classifyTaskBoundValue(Value v, TaskflowTaskOp task_op) {
   return classifyOuterValue(value_inputs[vi_idx]);
 }
 
-// Returns the worst-case BoundKind across lb/ub/step of a single counter.
-static BoundKind classifyCounterBound(TaskflowCounterOp counter_op,
-                                      TaskflowTaskOp task_op) {
-  BoundKind k = BoundKind::Static;
+// Returns the drive-pattern class implied by a counter's lb/ub/step operands.
+static BoundKind classifyCounterDynamism(TaskflowCounterOp counter_op,
+                                         TaskflowTaskOp task_op) {
+  BoundKind k = BoundKind::ConstantBound;
   for (Value bound : {counter_op.getLowerBound(), counter_op.getUpperBound(),
                       counter_op.getStep()}) {
-    k = worstCase(k, classifyTaskBoundValue(bound, task_op));
+    k = worstCase(k, classifyCounterBoundValue(bound, task_op));
   }
   return k;
 }
 
 //===----------------------------------------------------------------------===//
-// Combined per-task classification
+// Hyperblock patterns for runtime management suitability.
 //===----------------------------------------------------------------------===//
 
-static LogicalResult classifyTaskAndCounters(TaskflowTaskOp task_op) {
+enum class TaskPattern { LoopCarriedDependence };
+
+static bool taskContainsHyperblock(TaskflowTaskOp task_op) {
+  bool saw_hyperblock = false;
+  task_op.walk([&](TaskflowHyperblockOp) {
+    saw_hyperblock = true;
+    return WalkResult::interrupt();
+  });
+  return saw_hyperblock;
+}
+
+static bool
+hyperblockMatchesLoopCarriedDependencePattern(TaskflowHyperblockOp hb) {
+  if (!hb.getIterArgs().empty()) {
+    return true;
+  }
+
+  bool matches = false;
+
+  hb.walk([&](TaskflowHyperblockYieldOp yield_op) {
+    if (!yield_op.getIterArgsNext().empty()) {
+      matches = true;
+    }
+  });
+
+  hb.walk([&](affine::AffineForOp for_op) {
+    if (for_op.getNumIterOperands() > 0 || for_op.getNumResults() > 0) {
+      matches = true;
+    }
+  });
+
+  hb.walk([&](scf::ForOp for_op) {
+    if (for_op.getNumRegionIterArgs() > 0 || for_op.getNumResults() > 0) {
+      matches = true;
+    }
+  });
+
+  return matches;
+}
+
+static bool taskMatchesLoopCarriedDependencePattern(TaskflowTaskOp task_op) {
+  WalkResult result = task_op.walk([&](TaskflowHyperblockOp hb) {
+    if (hyperblockMatchesLoopCarriedDependencePattern(hb)) {
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return result.wasInterrupted();
+}
+
+static bool taskMatchesPattern(TaskflowTaskOp task_op, TaskPattern pattern) {
+  switch (pattern) {
+  case TaskPattern::LoopCarriedDependence:
+    return taskMatchesLoopCarriedDependencePattern(task_op);
+  }
+  llvm_unreachable("unknown TaskPattern");
+}
+
+static bool taskHasDlpCapability(TaskflowTaskOp task_op) {
+  return taskContainsHyperblock(task_op) &&
+         !taskMatchesPattern(task_op, TaskPattern::LoopCarriedDependence);
+}
+
+//===----------------------------------------------------------------------===//
+// Counter classification
+//===----------------------------------------------------------------------===//
+
+static LogicalResult classifyCounters(TaskflowTaskOp task_op) {
   // Pre-flight check: construct-hyperblock-from-task must run first.
   bool has_affine_for = false;
   task_op.walk([&](affine::AffineForOp) -> WalkResult {
@@ -187,7 +263,6 @@ static LogicalResult classifyTaskAndCounters(TaskflowTaskOp task_op) {
   OpBuilder builder(task_op.getContext());
 
   if (counters.empty()) {
-    task_op->setAttr("task_type", builder.getStringAttr("static"));
     return success();
   }
 
@@ -206,13 +281,11 @@ static LogicalResult classifyTaskAndCounters(TaskflowTaskOp task_op) {
     }
   }
 
-  BoundKind task_kind = BoundKind::Static;
   int counter_id = 0;
 
   for (TaskflowCounterOp counter_op : counters) {
     // --- counter_dynamism ---
-    BoundKind bound_kind = classifyCounterBound(counter_op, task_op);
-    task_kind = worstCase(task_kind, bound_kind);
+    BoundKind bound_kind = classifyCounterDynamism(counter_op, task_op);
 
     // --- counter_hierarchy ---
     bool has_parent = (counter_op.getParentIndex() != nullptr);
@@ -234,10 +307,54 @@ static LogicalResult classifyTaskAndCounters(TaskflowTaskOp task_op) {
     counter_op.setCounterIdAttr(builder.getI32IntegerAttr(counter_id++));
   }
 
-  // --- task_type: worst-case dynamism across all counters ---
-  task_op->setAttr("task_type",
-                   builder.getStringAttr(boundKindToStr(task_kind)));
   return success();
+}
+
+//===----------------------------------------------------------------------===//
+// DLP-capability task tagging
+//===----------------------------------------------------------------------===//
+
+static bool taskIsDlpReplicable(TaskflowTaskOp task_op) {
+  auto attr = task_op->getAttrOfType<BoolAttr>("dlp_replicable");
+  return attr && attr.getValue();
+}
+
+static void identifyDlpCapability(TaskflowTaskOp task_op) {
+  // Re-running this pass should not preserve task-level tags from an older
+  // classification result.
+  task_op->removeAttr("dlp_replicable");
+
+  if (taskHasDlpCapability(task_op)) {
+    OpBuilder builder(task_op.getContext());
+    task_op->setAttr("dlp_replicable", builder.getBoolAttr(true));
+  }
+}
+
+//===----------------------------------------------------------------------===//
+// Runtime-managable task tagging
+//===----------------------------------------------------------------------===//
+
+static bool taskHasSymbolBoundCounter(TaskflowTaskOp task_op) {
+  WalkResult result = task_op.walk([&](TaskflowCounterOp counter_op) {
+    std::optional<StringRef> dynamism = counter_op.getCounterDynamism();
+    if (dynamism && *dynamism == "symbol_bound") {
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return result.wasInterrupted();
+}
+
+static void identifyRuntimeManagableTask(TaskflowTaskOp task_op) {
+  // Re-running this pass should not preserve task-level tags from an older
+  // classification result.
+  task_op->removeAttr("task_type");
+  task_op->removeAttr("runtime_managable");
+
+  if (taskHasSymbolBoundCounter(task_op) && taskIsDlpReplicable(task_op)) {
+    OpBuilder builder(task_op.getContext());
+    task_op->setAttr("runtime_managable", builder.getBoolAttr(true));
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -250,21 +367,27 @@ struct ClassifyTaskAndCounterPass
 
   StringRef getArgument() const override { return "classify-task-and-counter"; }
   StringRef getDescription() const override {
-    return "Classify taskflow counters (hierarchy/dynamism/id) and tasks "
-           "(task_type) in a single pass.";
+    return "Classify taskflow counters and mark runtime-managable tasks.";
   }
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    WalkResult result = module.walk([&](TaskflowTaskOp task_op) -> WalkResult {
-      if (failed(classifyTaskAndCounters(task_op))) {
-        return WalkResult::interrupt();
-      }
-      return WalkResult::advance();
-    });
-    if (result.wasInterrupted()) {
+    WalkResult counter_result =
+        module.walk([&](TaskflowTaskOp task_op) -> WalkResult {
+          if (failed(classifyCounters(task_op))) {
+            return WalkResult::interrupt();
+          }
+          return WalkResult::advance();
+        });
+    if (counter_result.wasInterrupted()) {
       signalPassFailure();
+      return;
     }
+
+    module.walk(
+        [&](TaskflowTaskOp task_op) { identifyDlpCapability(task_op); });
+    module.walk(
+        [&](TaskflowTaskOp task_op) { identifyRuntimeManagableTask(task_op); });
   }
 };
 
