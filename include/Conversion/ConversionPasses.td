@@ -92,6 +92,20 @@ def ConvertTaskflowToNeura : Pass<"convert-taskflow-to-neura", "ModuleOp"> {
                            "mlir::affine::AffineDialect"];
 }
 
+def StripTaskflowTask : Pass<"strip-taskflow-task", "ModuleOp"> {
+  let summary = "Strip taskflow.task wrappers from Neura dialect";
+  let description = [{
+    Strips taskflow.task wrappers and promotes their inner operations
+    (neura.kernel, arith constants, etc.) to the parent function level,
+    producing pure Neura dialect output.
+  }];
+  let constructor = "mlir::createStripTaskflowTaskPass()";
+  let dependentDialects = ["mlir::neura::NeuraDialect",
+                           "mlir::taskflow::TaskflowDialect",
+                           "mlir::func::FuncDialect",
+                           "mlir::memref::MemRefDialect"];
+}
+
 def FoldSubView : Pass<"fold-subview", "func::FuncOp"> {
   let summary = "Folds memref.subview into affine load/store operations";
   let description = [{

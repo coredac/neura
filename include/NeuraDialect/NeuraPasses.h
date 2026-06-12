@@ -14,6 +14,7 @@ namespace mlir {
 namespace neura {
 
 void registerNeuraConversionPassPipeline();
+void registerPythonToNeuraPassPipeline();
 
 // Passes defined in NeuraPasses.td
 #define GEN_PASS_DECL

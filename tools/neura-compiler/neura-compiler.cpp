@@ -67,6 +67,7 @@ int main(int argc, char **argv) {
   mlir::registerAllExtensions(registry);
 
   mlir::neura::registerNeuraConversionPassPipeline();
+  mlir::neura::registerPythonToNeuraPassPipeline();
   mlir::taskflow::registerTosaToAffineConversionPassPipeline();
   mlir::taskflow::registerTaskflowConversionPassPipeline();
   mlir::taskflow::registerLinalgToAffineConversionPassPipeline();

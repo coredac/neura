@@ -1,15 +1,23 @@
 #include <iterator>
+#include <map>
 #include <stdlib.h>
+#include <string>
+#include <unordered_map>
 
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
+#include <sstream>
 #include <vector>
 
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraOps.h"
+#include "TaskflowDialect/TaskflowDialect.h"
+#include "TaskflowDialect/TaskflowOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -273,7 +281,6 @@ static bool verbose = false;  /* Verbose logging mode switch: outputs debug
                                  information when true. */
 static bool dataflow = false; /* Dataflow analysis mode switch: enables
                                  dataflow-related analysis logic when true. */
-
 inline void setDataflowMode(bool v) { dataflow = v; }
 
 inline bool isDataflowMode() { return dataflow; }
@@ -343,9 +350,11 @@ bool handleArithConstantOp(
     return false;
   }
 
-  assert(value_to_predicated_data_map.count(op.getResult()) == 0 &&
-         "Duplicate constant result?");
-  value_to_predicated_data_map[op.getResult()] = val;
+  // In dataflow mode, constant ops may be re-executed across DFG iterations.
+  // If the value already exists, just skip (idempotent).
+  if (value_to_predicated_data_map.count(op.getResult()) == 0) {
+    value_to_predicated_data_map[op.getResult()] = val;
+  }
   return true;
 }
 
@@ -388,9 +397,9 @@ bool handleNeuraConstantOp(
       val.predicate = pred_attr.getValue();
     }
 
-    assert(value_to_predicated_data_map.count(op.getResult()) == 0 &&
-           "Duplicate constant result?");
-    value_to_predicated_data_map[op.getResult()] = val;
+    if (value_to_predicated_data_map.count(op.getResult()) == 0) {
+      value_to_predicated_data_map[op.getResult()] = val;
+    }
     if (isVerboseMode()) {
       llvm::outs() << "[neura-interpreter]  └─ Constant  : value = "
                    << val.value << " [pred = " << val.predicate << "]\n";
@@ -407,9 +416,9 @@ bool handleNeuraConstantOp(
       val.predicate = pred_attr.getValue();
     }
 
-    assert(value_to_predicated_data_map.count(op.getResult()) == 0 &&
-           "Duplicate constant result?");
-    value_to_predicated_data_map[op.getResult()] = val;
+    if (value_to_predicated_data_map.count(op.getResult()) == 0) {
+      value_to_predicated_data_map[op.getResult()] = val;
+    }
     if (isVerboseMode()) {
       llvm::outs() << "[neura-interpreter]  └─ Constant  : value = "
                    << val.value << " [pred = " << val.predicate << "]\n";
@@ -440,9 +449,9 @@ bool handleNeuraConstantOp(
       val.predicate = pred_attr.getValue();
     }
 
-    assert(value_to_predicated_data_map.count(op.getResult()) == 0 &&
-           "Duplicate constant result?");
-    value_to_predicated_data_map[op.getResult()] = val;
+    if (value_to_predicated_data_map.count(op.getResult()) == 0) {
+      value_to_predicated_data_map[op.getResult()] = val;
+    }
 
     if (isVerboseMode()) {
       llvm::outs() << "[neura-interpreter]  ├─ Constant  : pred = "
@@ -452,7 +461,48 @@ bool handleNeuraConstantOp(
     }
   }
   // Handles unsupported constant types.
-  else {
+  else if (auto str_attr = llvm::dyn_cast<mlir::StringAttr>(attr)) {
+    // String constants are Neura input references (e.g. "%input0").
+    // Resolve the reference to the enclosing kernel's argument value.
+    std::string ref_str = str_attr.getValue().str();
+    PredicatedData val;
+    val.value = 0.0f;
+    val.predicate = true; // the referenced kernel arg is always valid
+    val.is_vector = false;
+
+    // Try to resolve %inputN → kernel argument number N (0-based,
+    // counting ALL kernel inputs, matching PromoteInputArgToConstPass).
+    if (ref_str.rfind("%input", 0) == 0) { // starts with "%input"
+      int n = 0;
+      try {
+        n = std::stoi(ref_str.substr(6));
+      } catch (...) {
+        n = -1;
+      }
+      if (n >= 0) {
+        // Walk up to enclosing kernel.
+        Operation *parent = op->getParentOp();
+        while (parent && !isa<neura::KernelOp>(parent))
+          parent = parent->getParentOp();
+        if (parent) {
+          auto kernel = cast<neura::KernelOp>(parent);
+          auto inputs = kernel.getInputs();
+          if (n < static_cast<int>(inputs.size())) {
+            Value arg_val = *(inputs.begin() + n);
+            if (value_to_predicated_data_map.count(arg_val))
+              val = value_to_predicated_data_map[arg_val];
+          }
+        }
+      }
+    }
+
+    value_to_predicated_data_map[op.getResult()] = val;
+    if (isVerboseMode()) {
+      llvm::outs() << "[neura-interpreter]  └─ Input ref : "
+                   << str_attr.getValue() << " → value = " << val.value
+                   << " [pred = " << val.predicate << "]\n";
+    }
+  } else {
     if (isVerboseMode()) {
       llvm::errs() << "[neura-interpreter]  └─ Unsupported constant type in "
                       "neura.constant\n";
@@ -487,37 +537,38 @@ bool handleAddOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.add:\n";
   }
 
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.add expects at least two "
-                      "operands\n";
-    }
+  if (op.getNumOperands() < 1) {
     return false;
   }
 
   auto lhs = value_to_predicated_data_map[op.getLhs()];
-  auto rhs = value_to_predicated_data_map[op.getRhs()];
+  int64_t lhs_int = static_cast<int64_t>(std::round(lhs.value));
+  int64_t rhs_int;
+  bool final_predicate = lhs.predicate;
+
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    auto rhs = value_to_predicated_data_map[op.getRhs()];
+    rhs_int = static_cast<int64_t>(std::round(rhs.value));
+    final_predicate = final_predicate && rhs.predicate;
+  } else if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("rhs_value")) {
+    rhs_int = attr.getInt();
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.add: no rhs operand or "
+                      "rhs_value attribute\n";
+    return false;
+  }
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
-    llvm::outs() << "[neura-interpreter]  │  ├─ LHS  : value = " << lhs.value
+    llvm::outs() << "[neura-interpreter]  │  ├─ LHS  : " << lhs_int
                  << " [pred = " << lhs.predicate << "]\n";
-    llvm::outs() << "[neura-interpreter]  │  └─ RHS  : value = " << rhs.value
-                 << " [pred = " << rhs.predicate << "]\n";
+    llvm::outs() << "[neura-interpreter]  │  └─ RHS  : " << rhs_int << "\n";
   }
-
-  int64_t lhs_int = static_cast<int64_t>(std::round(lhs.value));
-  int64_t rhs_int = static_cast<int64_t>(std::round(rhs.value));
-  bool final_predicate = lhs.predicate && rhs.predicate;
 
   if (op.getNumOperands() > 2) {
     auto pred = value_to_predicated_data_map[op.getOperand(2)];
     final_predicate = final_predicate && pred.predicate && (pred.value != 0.0f);
-    if (isVerboseMode()) {
-      llvm::outs() << "[neura-interpreter]  ├─ Execution Context\n";
-      llvm::outs() << "[neura-interpreter]  │  └─ Pred : value = " << pred.value
-                   << " [pred = " << pred.predicate << "]\n";
-    }
   }
 
   int64_t sum = lhs_int + rhs_int;
@@ -562,39 +613,40 @@ bool handleSubOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.sub:\n";
   }
 
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.sub expects at least two "
-                      "operands\n";
-    }
+  if (op.getNumOperands() < 1) {
     return false;
   }
 
   auto lhs = value_to_predicated_data_map[op.getOperand(0)];
-  auto rhs = value_to_predicated_data_map[op.getOperand(1)];
+  int64_t lhs_int = static_cast<int64_t>(std::round(lhs.value));
+  int64_t rhs_int;
+  bool final_predicate = lhs.predicate;
+
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    auto rhs = value_to_predicated_data_map[op.getOperand(1)];
+    rhs_int = static_cast<int64_t>(std::round(rhs.value));
+    final_predicate = final_predicate && rhs.predicate;
+  } else if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("rhs_value")) {
+    rhs_int = attr.getInt();
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.sub: no rhs operand or "
+                      "rhs_value attribute\n";
+    return false;
+  }
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
-    llvm::outs() << "[neura-interpreter]  │  ├─ LHS  : value = " << lhs.value
+    llvm::outs() << "[neura-interpreter]  │  ├─ LHS  : " << lhs_int
                  << " [pred = " << lhs.predicate << "]\n";
-    llvm::outs() << "[neura-interpreter]  │  └─ RHS  : value = " << rhs.value
-                 << " [pred = " << rhs.predicate << "]\n";
+    llvm::outs() << "[neura-interpreter]  │  └─ RHS  : " << rhs_int << "\n";
   }
-
-  bool final_predicate = lhs.predicate && rhs.predicate;
 
   if (op.getNumOperands() > 2) {
     auto pred = value_to_predicated_data_map[op.getOperand(2)];
     final_predicate = final_predicate && pred.predicate && (pred.value != 0.0f);
-    if (isVerboseMode()) {
-      llvm::outs() << "[neura-interpreter]  ├─ Execution Context\n";
-      llvm::outs() << "[neura-interpreter]  │  └─ Pred : value = " << pred.value
-                   << " [pred = " << pred.predicate << "]\n";
-    }
   }
 
-  int64_t lhs_int = static_cast<int64_t>(std::round(lhs.value));
-  int64_t rhs_int = static_cast<int64_t>(std::round(rhs.value));
   int64_t result_int = lhs_int - rhs_int;
 
   PredicatedData result;
@@ -609,6 +661,189 @@ bool handleSubOp(
 
   value_to_predicated_data_map[op.getResult()] = result;
   return true;
+}
+
+/**
+ * @brief Handles the execution of a Neura integer multiplication operation
+ *        (neura.mul) by computing the product of integer operands.
+ *
+ * Supports both binary (lhs * rhs) and unary-with-attribute forms:
+ *   - %r = "neura.mul"(%a, %b) : ...         → lhs * rhs
+ *   - %r = "neura.mul"(%a) {rhs_value = 2}   → lhs * rhs_value
+ */
+bool handleMulOp(
+    neura::MulOp op,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Executing neura.mul:\n";
+  }
+
+  if (op.getNumOperands() < 1) {
+    return false;
+  }
+
+  auto lhs = value_to_predicated_data_map[op.getLhs()];
+  int64_t lhs_int = static_cast<int64_t>(std::round(lhs.value));
+
+  int64_t rhs_int;
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    auto rhs = value_to_predicated_data_map[op.getRhs()];
+    rhs_int = static_cast<int64_t>(std::round(rhs.value));
+  } else if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("rhs_value")) {
+    rhs_int = attr.getInt();
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.mul: no rhs operand or "
+                      "rhs_value attribute\n";
+    return false;
+  }
+
+  bool final_predicate = lhs.predicate;
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    auto rhs = value_to_predicated_data_map[op.getRhs()];
+    final_predicate = final_predicate && rhs.predicate;
+  }
+
+  int64_t product = lhs_int * rhs_int;
+
+  PredicatedData result;
+  result.value = static_cast<float>(product);
+  result.predicate = final_predicate;
+  result.is_vector = false;
+
+  value_to_predicated_data_map[op.getResult()] = result;
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  ├─ Operands\n"
+                 << "[neura-interpreter]  │  ├─ LHS  : " << lhs_int
+                 << " [pred = " << lhs.predicate << "]\n"
+                 << "[neura-interpreter]  │  └─ RHS  : " << rhs_int << "\n"
+                 << "[neura-interpreter]  └─ Result: " << product
+                 << " [pred = " << final_predicate << "]\n";
+  }
+
+  return true;
+}
+
+/**
+ * @brief Handles the execution of a Neura integer division operation
+ *        (neura.div) by computing the quotient of integer operands.
+ */
+bool handleDivOp(
+    neura::DivOp op,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Executing neura.div:\n";
+  }
+
+  if (op.getNumOperands() < 1) {
+    return false;
+  }
+
+  auto lhs = value_to_predicated_data_map[op.getLhs()];
+  int64_t lhs_int = static_cast<int64_t>(std::round(lhs.value));
+
+  int64_t rhs_int;
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    auto rhs = value_to_predicated_data_map[op.getRhs()];
+    rhs_int = static_cast<int64_t>(std::round(rhs.value));
+  } else if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("rhs_value")) {
+    rhs_int = attr.getInt();
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.div: no rhs operand or "
+                      "rhs_value attribute\n";
+    return false;
+  }
+
+  if (rhs_int == 0) {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.div: division by zero\n";
+    return false;
+  }
+
+  bool final_predicate = lhs.predicate;
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    auto rhs = value_to_predicated_data_map[op.getRhs()];
+    final_predicate = final_predicate && rhs.predicate;
+  }
+
+  int64_t quotient = lhs_int / rhs_int;
+
+  PredicatedData result;
+  result.value = static_cast<float>(quotient);
+  result.predicate = final_predicate;
+  result.is_vector = false;
+
+  value_to_predicated_data_map[op.getResult()] = result;
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  └─ Result: " << quotient
+                 << " [pred = " << final_predicate << "]\n";
+  }
+
+  return true;
+}
+
+/**
+ * @brief Resolves an operand value from either the operand list or a folded
+ *        attribute (lhs_value / rhs_value).
+ *
+ * When FoldConstantPass or PromoteInputArgToConstPass folds an operand into an
+ * attribute, binary ops like neura.fadd / neura.fdiv may have only one operand,
+ * with the other stored in the \"rhs_value\" or \"lhs_value\" attribute.
+ * This attribute can be:
+ *   - FloatAttr:  a literal constant (e.g. 2.0 : f32)
+ *   - StringAttr: a kernel input reference (e.g. \"%input1\") that must be
+ *                 resolved by walking up to the enclosing neura::KernelOp
+ *                 and looking up the corresponding argument value.
+ *
+ * @param op        The operation that may carry the attribute
+ * @param attrName  Attribute name (\"rhs_value\" or \"lhs_value\")
+ * @param value_map The interpreter's value-to-data map
+ * @return std::optional<PredicatedData>  Resolved value, or std::nullopt if
+ *         neither a matching operand nor a resolvable attribute exists
+ */
+static std::optional<PredicatedData>
+resolveAttributeValue(Operation *op, const char *attrName,
+                      llvm::DenseMap<Value, PredicatedData> &value_map) {
+  // --- StringAttr: kernel input reference, e.g. "%input1" ---------------
+  if (auto str_attr = op->getAttrOfType<mlir::StringAttr>(attrName)) {
+    std::string ref = str_attr.getValue().str();
+    if (ref.rfind("%input", 0) == 0) {
+      int n = 0;
+      try {
+        n = std::stoi(ref.substr(6));
+      } catch (...) {
+        n = -1;
+      }
+      if (n >= 0) {
+        Operation *parent = op->getParentOp();
+        while (parent && !isa<neura::KernelOp>(parent))
+          parent = parent->getParentOp();
+        if (auto kernel = dyn_cast_or_null<neura::KernelOp>(parent)) {
+          auto inputs = kernel.getInputs();
+          if (n < static_cast<int>(inputs.size())) {
+            Value arg_val = *(inputs.begin() + n);
+            if (value_map.count(arg_val))
+              return value_map[arg_val];
+          }
+        }
+      }
+    }
+    return PredicatedData{}; // unresolved reference → default (0.0, true)
+  }
+
+  // --- FloatAttr: literal constant, e.g. 2.500000e+00 : f32 ------------
+  if (auto float_attr = op->getAttrOfType<mlir::FloatAttr>(attrName)) {
+    PredicatedData val;
+    val.value = static_cast<float>(float_attr.getValueAsDouble());
+    val.predicate = true;
+    val.is_vector = false;
+    return val;
+  }
+
+  return std::nullopt;
 }
 
 /**
@@ -636,16 +871,36 @@ bool handleFAddOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.fadd:\n";
   }
 
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.fadd expects at least two "
-                      "operands\n";
-    }
+  PredicatedData lhs, rhs;
+
+  // Resolve LHS: prefer operand, fall back to lhs_value attribute.
+  if (op.getNumOperands() >= 1 && op.getLhs()) {
+    lhs = value_to_predicated_data_map[op.getLhs()];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "lhs_value",
+                                       value_to_predicated_data_map)) {
+    lhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fadd: no LHS operand "
+                      "or lhs_value attribute\n";
     return false;
   }
 
-  auto lhs = value_to_predicated_data_map[op.getLhs()];
-  auto rhs = value_to_predicated_data_map[op.getRhs()];
+  // Resolve RHS: prefer operand, fall back to rhs_value attribute.
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    rhs = value_to_predicated_data_map[op.getRhs()];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "rhs_value",
+                                       value_to_predicated_data_map)) {
+    rhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fadd: no RHS operand "
+                      "or rhs_value attribute\n";
+    return false;
+  }
+
   bool final_predicate = lhs.predicate && rhs.predicate;
 
   if (isVerboseMode()) {
@@ -708,16 +963,36 @@ bool handleFSubOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.fsub:\n";
   }
 
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.fsub expects at least two "
-                      "operands\n";
-    }
+  PredicatedData lhs, rhs;
+
+  // Resolve LHS: prefer operand, fall back to lhs_value attribute.
+  if (op.getNumOperands() >= 1 && op.getLhs()) {
+    lhs = value_to_predicated_data_map[op.getLhs()];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "lhs_value",
+                                       value_to_predicated_data_map)) {
+    lhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fsub: no LHS operand "
+                      "or lhs_value attribute\n";
     return false;
   }
 
-  auto lhs = value_to_predicated_data_map[op.getLhs()];
-  auto rhs = value_to_predicated_data_map[op.getRhs()];
+  // Resolve RHS: prefer operand, fall back to rhs_value attribute.
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    rhs = value_to_predicated_data_map[op.getRhs()];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "rhs_value",
+                                       value_to_predicated_data_map)) {
+    rhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fsub: no RHS operand "
+                      "or rhs_value attribute\n";
+    return false;
+  }
+
   bool final_predicate = lhs.predicate && rhs.predicate;
 
   if (isVerboseMode()) {
@@ -778,16 +1053,35 @@ bool handleFMulOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.fmul:\n";
   }
 
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.fmul expects at least two "
-                      "operands\n";
-    }
+  PredicatedData lhs, rhs;
+
+  // Resolve LHS: prefer operand, fall back to lhs_value attribute.
+  if (op.getNumOperands() >= 1) {
+    lhs = value_to_predicated_data_map[op.getOperand(0)];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "lhs_value",
+                                       value_to_predicated_data_map)) {
+    lhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fmul: no LHS operand "
+                      "or lhs_value attribute\n";
     return false;
   }
 
-  auto lhs = value_to_predicated_data_map[op.getOperand(0)];
-  auto rhs = value_to_predicated_data_map[op.getOperand(1)];
+  // Resolve RHS: prefer operand, fall back to rhs_value attribute.
+  if (op.getNumOperands() >= 2) {
+    rhs = value_to_predicated_data_map[op.getOperand(1)];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "rhs_value",
+                                       value_to_predicated_data_map)) {
+    rhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fmul: no RHS operand "
+                      "or rhs_value attribute\n";
+    return false;
+  }
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
@@ -853,16 +1147,35 @@ bool handleFDivOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.fdiv:\n";
   }
 
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.fdiv expects at least two "
-                      "operands\n";
-    }
+  PredicatedData lhs, rhs;
+
+  // Resolve LHS: prefer operand, fall back to lhs_value attribute.
+  if (op.getNumOperands() >= 1) {
+    lhs = value_to_predicated_data_map[op.getOperand(0)];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "lhs_value",
+                                       value_to_predicated_data_map)) {
+    lhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fdiv: no LHS operand "
+                      "or lhs_value attribute\n";
     return false;
   }
 
-  auto lhs = value_to_predicated_data_map[op.getOperand(0)];
-  auto rhs = value_to_predicated_data_map[op.getOperand(1)];
+  // Resolve RHS: prefer operand, fall back to rhs_value attribute.
+  if (op.getNumOperands() >= 2) {
+    rhs = value_to_predicated_data_map[op.getOperand(1)];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "rhs_value",
+                                       value_to_predicated_data_map)) {
+    rhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fdiv: no RHS operand "
+                      "or rhs_value attribute\n";
+    return false;
+  }
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
@@ -938,16 +1251,35 @@ bool handleFMaxOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.fmax:\n";
   }
 
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.fmax expects at least two "
-                      "operands\n";
-    }
+  PredicatedData lhs, rhs;
+
+  // Resolve LHS: prefer operand, fall back to lhs_value attribute.
+  if (op.getNumOperands() >= 1) {
+    lhs = value_to_predicated_data_map[op.getOperand(0)];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "lhs_value",
+                                       value_to_predicated_data_map)) {
+    lhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fmax: no LHS operand "
+                      "or lhs_value attribute\n";
     return false;
   }
 
-  auto lhs = value_to_predicated_data_map[op.getOperand(0)];
-  auto rhs = value_to_predicated_data_map[op.getOperand(1)];
+  // Resolve RHS: prefer operand, fall back to rhs_value attribute.
+  if (op.getNumOperands() >= 2) {
+    rhs = value_to_predicated_data_map[op.getOperand(1)];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "rhs_value",
+                                       value_to_predicated_data_map)) {
+    rhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fmax: no RHS operand "
+                      "or rhs_value attribute\n";
+    return false;
+  }
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
@@ -1035,16 +1367,35 @@ bool handleFMinOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.fmin:\n";
   }
 
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.fmin expects at least two "
-                      "operands\n";
-    }
+  PredicatedData lhs, rhs;
+
+  // Resolve LHS: prefer operand, fall back to lhs_value attribute.
+  if (op.getNumOperands() >= 1) {
+    lhs = value_to_predicated_data_map[op.getOperand(0)];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "lhs_value",
+                                       value_to_predicated_data_map)) {
+    lhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fmin: no LHS operand "
+                      "or lhs_value attribute\n";
     return false;
   }
 
-  auto lhs = value_to_predicated_data_map[op.getOperand(0)];
-  auto rhs = value_to_predicated_data_map[op.getOperand(1)];
+  // Resolve RHS: prefer operand, fall back to rhs_value attribute.
+  if (op.getNumOperands() >= 2) {
+    rhs = value_to_predicated_data_map[op.getOperand(1)];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "rhs_value",
+                                       value_to_predicated_data_map)) {
+    rhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fmin: no RHS operand "
+                      "or rhs_value attribute\n";
+    return false;
+  }
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
@@ -1214,8 +1565,8 @@ bool handleVFMulOp(
   }
 
   if (isVerboseMode()) {
-    llvm::outs() << "[neura-interpreter]  └─ Result  : "
-                 << "vector size = " << result.vector_data.size() << ", ";
+    llvm::outs() << "[neura-interpreter]  └─ Result  : " << "vector size = "
+                 << result.vector_data.size() << ", ";
     print_vector(result.vector_data);
     llvm::outs() << ", [pred = " << result.predicate << "]\n";
   }
@@ -1482,16 +1833,36 @@ bool handleFCmpOp(
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  Executing neura.fcmp:\n";
   }
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.fcmp expects at least two "
-                      "operands\n";
-    }
+
+  PredicatedData lhs, rhs;
+
+  // Resolve LHS: prefer operand, fall back to lhs_value attribute.
+  if (op.getNumOperands() >= 1 && op.getLhs()) {
+    lhs = value_to_predicated_data_map[op.getLhs()];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "lhs_value",
+                                       value_to_predicated_data_map)) {
+    lhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fcmp: no LHS operand "
+                      "or lhs_value attribute\n";
     return false;
   }
 
-  auto lhs = value_to_predicated_data_map[op.getLhs()];
-  auto rhs = value_to_predicated_data_map[op.getRhs()];
+  // Resolve RHS: prefer operand, fall back to rhs_value attribute.
+  if (op.getNumOperands() >= 2 && op.getRhs()) {
+    rhs = value_to_predicated_data_map[op.getRhs()];
+  } else if (auto resolved =
+                 resolveAttributeValue(op.getOperation(), "rhs_value",
+                                       value_to_predicated_data_map)) {
+    rhs = *resolved;
+  } else {
+    if (isVerboseMode())
+      llvm::errs() << "[neura-interpreter]  └─ neura.fcmp: no RHS operand "
+                      "or rhs_value attribute\n";
+    return false;
+  }
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
@@ -1517,17 +1888,20 @@ bool handleFCmpOp(
   bool fcmp_result = false;
   StringRef cmp_type = op.getCmpType();
   // Evaluates the comparison based on the specified type.
-  if (cmp_type == "eq") {
+  // Supports both ordered (ogt, olt, ...) and unordered (gt, lt, ...) variants.
+  // Ordered variants return false if any operand is NaN (predicate=false
+  // already handles this in our dataflow model).
+  if (cmp_type == "eq" || cmp_type == "oeq" || cmp_type == "ueq") {
     fcmp_result = (lhs.value == rhs.value);
-  } else if (cmp_type == "ne") {
+  } else if (cmp_type == "ne" || cmp_type == "une") {
     fcmp_result = (lhs.value != rhs.value);
-  } else if (cmp_type == "le") {
+  } else if (cmp_type == "le" || cmp_type == "ole" || cmp_type == "ule") {
     fcmp_result = (lhs.value <= rhs.value);
-  } else if (cmp_type == "lt") {
+  } else if (cmp_type == "lt" || cmp_type == "olt" || cmp_type == "ult") {
     fcmp_result = (lhs.value < rhs.value);
-  } else if (cmp_type == "ge") {
+  } else if (cmp_type == "ge" || cmp_type == "oge" || cmp_type == "uge") {
     fcmp_result = (lhs.value >= rhs.value);
-  } else if (cmp_type == "gt") {
+  } else if (cmp_type == "gt" || cmp_type == "ogt" || cmp_type == "ugt") {
     fcmp_result = (lhs.value > rhs.value);
   } else {
     if (isVerboseMode()) {
@@ -2073,6 +2447,20 @@ bool handleCastOp(
                    << input.value << " -> " << (bool_value ? "true" : "false")
                    << " (stored as " << result_value << ")\n";
     }
+  } else if (cast_type == "truncf") {
+    // f64 → f32 truncation: all interpreter values are f32, passthrough.
+    result_value = input.value;
+    if (isVerboseMode()) {
+      llvm::outs() << "[neura-interpreter]  │  └─ f64→f32 truncf passthrough: "
+                   << input.value << "\n";
+    }
+  } else if (cast_type == "extf") {
+    // f32 → f64 extension: all interpreter values are f32, passthrough.
+    result_value = input.value;
+    if (isVerboseMode()) {
+      llvm::outs() << "[neura-interpreter]  │  └─ f32→f64 extf passthrough: "
+                   << input.value << "\n";
+    }
   } else {
     if (isVerboseMode()) {
       llvm::errs() << "[neura-interpreter]  └─ Unsupported cast type: "
@@ -2089,6 +2477,59 @@ bool handleCastOp(
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  └─ Result    : value = "
                  << result_value << ", [pred = " << final_predicate << "]\n";
+  }
+
+  value_to_predicated_data_map[op.getResult()] = result;
+  return true;
+}
+
+/**
+ * @brief Handles the execution of a Neura reciprocal square root operation
+ *        (neura.rsqrt) by computing 1/sqrt(input) for floating-point values.
+ *
+ * This function processes Neura's rsqrt operation, which takes a single
+ * floating-point operand and computes the reciprocal square root: result =
+ * 1/sqrt(input). The input's predicate is passed through to the result. The
+ * operation requires exactly one operand; zero or more will result in an
+ * error.
+ *
+ * @param op                             The neura.rsqrt operation to handle
+ * @param value_to_predicated_data_map   Reference to the map where the result
+ *                                       will be stored, keyed by the
+ * operation's result value
+ * @return bool                          True if the rsqrt is successfully
+ * computed; false if there are insufficient operands
+ */
+bool handleRsqrtOp(
+    neura::RsqrtOp op,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Executing neura.rsqrt:\n";
+  }
+
+  auto input = value_to_predicated_data_map[op.getInput()];
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  ├─ Input  : value = " << input.value
+                 << " [pred = " << input.predicate << "]\n";
+  }
+
+  // Compute 1/sqrt(input). Guard against zero/negative input.
+  float rsqrt_result;
+  if (input.value <= 0.0f) {
+    rsqrt_result = (input.value == 0.0f) ? INFINITY : NAN;
+  } else {
+    rsqrt_result = 1.0f / sqrtf(input.value);
+  }
+
+  PredicatedData result;
+  result.value = rsqrt_result;
+  result.predicate = input.predicate;
+  result.is_vector = false;
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  └─ Result : value = " << result.value
+                 << " [pred = " << result.predicate << "]\n";
   }
 
   value_to_predicated_data_map[op.getResult()] = result;
@@ -2943,11 +3384,11 @@ bool handlePhiOp(
                    << pred_count << ")\n";
       for (size_t i = 0; i < pred_count; ++i) {
         if (i < pred_count - 1) {
-          llvm::outs() << "[neura-interpreter]  │  ├─ [" << i << "]: "
-                       << "Block@" << predecessors[i];
+          llvm::outs() << "[neura-interpreter]  │  ├─ [" << i
+                       << "]: " << "Block@" << predecessors[i];
         } else {
-          llvm::outs() << "[neura-interpreter]  │  └─ [" << i << "]: "
-                       << "Block@" << predecessors[i];
+          llvm::outs() << "[neura-interpreter]  │  └─ [" << i
+                       << "]: " << "Block@" << predecessors[i];
         }
         if (i == pred_index) {
           llvm::outs() << " (→ current path)\n";
@@ -3015,8 +3456,8 @@ bool handlePhiOp(
         if (value_to_predicated_data_map.count(input)) {
           auto input_data = value_to_predicated_data_map[input];
           const std::string prefix = (i < input_count - 1) ? "│ ├─" : "│ └─";
-          llvm::outs() << "[neura-interpreter]  " << prefix << "[" << i << "]:"
-                       << "value = " << input_data.value << ","
+          llvm::outs() << "[neura-interpreter]  " << prefix << "[" << i
+                       << "]:" << "value = " << input_data.value << ","
                        << "pred = " << input_data.predicate << "\n";
         } else {
           const std::string prefix = (i < input_count - 1) ? "│ ├─" : "│ └─";
@@ -3570,6 +4011,564 @@ bool handleGrantAlwaysOp(
  * @return OperationHandleResult          Structure containing processing
  * status and control flags
  */
+// =========================================================================
+// Handler for neura.counter
+// =========================================================================
+// Simulates a hardware loop counter: reads bounds from attributes,
+// produces an incrementing index value on each DFG iteration.
+// The counter state (current index) is stored in a global map keyed by
+// the counter's SSA result value.
+static llvm::DenseMap<Value, int64_t> counter_state;
+static llvm::DenseMap<Value, int64_t> counter_lower;
+static llvm::DenseMap<Value, int64_t> counter_upper;
+static llvm::DenseMap<Value, int64_t> counter_step;
+// Counter hierarchy: "root" (outermost) = 0, "relay" = 1, "leaf" (innermost)
+// = 2.
+static llvm::DenseMap<Value, int> counter_hierarchy_level;
+// Global mapping from memref SSA Value to a unique memref ID.
+// This ensures the same physical memref (same SSA value) gets the same
+// key prefix across all kernels that reference it, preserving aliasing.
+static llvm::DenseMap<Value, int> memref_value_to_id;
+static int next_memref_id = 0;
+
+/// Assign a unique global ID to a memref SSA Value if not already mapped.
+/// Returns the assigned ID.
+static int getOrAssignMemRefId(Value memref_val) {
+  if (memref_value_to_id.count(memref_val))
+    return memref_value_to_id[memref_val];
+  int id = next_memref_id++;
+  memref_value_to_id[memref_val] = id;
+  return id;
+}
+
+/// Look up the memref SSA value that corresponds to a given %inputN string
+/// within the enclosing neura::KernelOp.
+///
+/// The %inputN convention (set by PromoteInputArgToConstPass) is:
+/// N is a 0-based index into ALL kernel inputs (not just memref-typed ones).
+/// This function returns the Value at that index only if it is a memref;
+/// otherwise it returns Value().
+static Value getMemRefForInputN(Operation *op, const std::string &input_str) {
+  // Parse the number from "%inputN"
+  if (input_str.size() < 7 || input_str.substr(0, 6) != "%input")
+    return Value();
+  int n = 0;
+  try {
+    n = std::stoi(input_str.substr(6));
+  } catch (...) {
+    return Value();
+  }
+
+  // Walk up to enclosing kernel
+  Operation *parent = op->getParentOp();
+  while (parent && !isa<neura::KernelOp>(parent))
+    parent = parent->getParentOp();
+  if (!parent)
+    return Value();
+  auto kernel = cast<neura::KernelOp>(parent);
+
+  // Use 0-based indexing into ALL kernel inputs (matching generator
+  // convention).
+  auto inputs = kernel.getInputs();
+  if (n >= 0 && n < static_cast<int>(inputs.size())) {
+    Value input = *(inputs.begin() + n);
+    if (isa<MemRefType>(input.getType()))
+      return input;
+  }
+  return Value();
+}
+
+bool handleCounterOp(
+    neura::CounterOp op,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Executing neura.counter:\n";
+  }
+
+  Value result = op.getCurrentIndex();
+
+  // Initialize counter state on first encounter.
+  if (!counter_state.count(result)) {
+    // Read bounds from attributes (constant_bound counters store bounds as
+    // attrs).
+    int64_t lower = 0, upper = 1, step = 1;
+    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("lower_bound_value"))
+      lower = attr.getInt();
+    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("upper_bound_value"))
+      upper = attr.getInt();
+    if (auto attr = op->getAttrOfType<mlir::IntegerAttr>("step_value"))
+      step = attr.getInt();
+
+    // Also check SSA operands for dynamic bounds.
+    if (auto lb = op.getLowerBound()) {
+      if (value_to_predicated_data_map.count(lb))
+        lower = static_cast<int64_t>(value_to_predicated_data_map[lb].value);
+    }
+    if (auto ub = op.getUpperBound()) {
+      if (value_to_predicated_data_map.count(ub))
+        upper = static_cast<int64_t>(value_to_predicated_data_map[ub].value);
+    }
+    if (auto st = op.getStep()) {
+      if (value_to_predicated_data_map.count(st))
+        step = static_cast<int64_t>(value_to_predicated_data_map[st].value);
+    }
+
+    counter_lower[result] = lower;
+    counter_upper[result] = upper;
+    counter_step[result] = step;
+    counter_state[result] = lower;
+
+    // Track counter hierarchy for nested loop advancement.
+    if (auto hier_attr =
+            op->getAttrOfType<mlir::StringAttr>("counter_hierarchy")) {
+      auto hier = hier_attr.getValue();
+      if (hier == "root")
+        counter_hierarchy_level[result] = 0;
+      else if (hier == "relay")
+        counter_hierarchy_level[result] = 1;
+      else if (hier == "leaf")
+        counter_hierarchy_level[result] = 2;
+      else
+        counter_hierarchy_level[result] = 2; // default to innermost
+    } else {
+      counter_hierarchy_level[result] = 2; // default to innermost
+    }
+
+    if (isVerboseMode()) {
+      llvm::outs() << "[neura-interpreter]  └─ Counter initialized: lower="
+                   << lower << ", upper=" << upper << ", step=" << step
+                   << ", hierarchy=" << counter_hierarchy_level[result] << "\n";
+    }
+  }
+
+  int64_t current = counter_state[result];
+  bool in_bounds = (counter_step[result] > 0)
+                       ? (current < counter_upper[result])
+                       : (current > counter_upper[result]);
+
+  PredicatedData val;
+  val.value = static_cast<float>(current);
+  val.predicate = in_bounds;
+  val.is_vector = false;
+
+  value_to_predicated_data_map[result] = val;
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  └─ Counter index: " << current
+                 << " [pred = " << in_bounds << "]\n";
+  }
+
+  // Counter advancement: in both CF and DF modes, advancement is handled
+  // centrally with nested-loop carry propagation.
+  // See advanceCountersNested() below.
+
+  return true;
+}
+
+/// Advances a single counter by its step value, resetting to lower bound on
+/// overflow. Returns true if overflow occurred.
+static bool advanceOneCounter(Value cv) {
+  if (!cv || !counter_state.count(cv))
+    return true;
+  counter_state[cv] += counter_step[cv];
+  int64_t cur = counter_state[cv];
+  int64_t upper = counter_upper[cv];
+  int64_t step = counter_step[cv];
+  bool overflow = (step > 0) ? (cur >= upper) : (cur <= upper);
+  if (overflow)
+    counter_state[cv] = counter_lower[cv];
+  return overflow;
+}
+
+/// Advances a set of counter Values (one neura.kernel's counters) with
+/// nested-loop carry propagation: leaf → relay → root.
+/// Returns true if at least one more loop iteration remains.
+static bool advanceCountersNested(const SmallVector<Value> &counter_values) {
+  // Classify counters by hierarchy level.
+  Value root_val, relay_val, leaf_val;
+  for (Value cv : counter_values) {
+    if (!counter_state.count(cv))
+      continue;
+    int h = counter_hierarchy_level.count(cv) ? counter_hierarchy_level[cv] : 2;
+    if (h == 0)
+      root_val = cv;
+    else if (h == 1)
+      relay_val = cv;
+    else
+      leaf_val = cv;
+  }
+
+  // Advance leaf first.
+  bool overflow = advanceOneCounter(leaf_val);
+  bool outermost_overflow = false;
+
+  if (overflow) {
+    if (relay_val) {
+      overflow = advanceOneCounter(relay_val);
+      if (overflow && root_val) {
+        outermost_overflow = advanceOneCounter(root_val);
+      } else if (overflow && !root_val) {
+        outermost_overflow = true; // relay overflow w/o root → loop done
+      }
+    } else if (root_val) {
+      outermost_overflow = advanceOneCounter(root_val);
+    } else {
+      outermost_overflow = true; // leaf overflow w/o outer → loop done
+    }
+  }
+
+  return !outermost_overflow;
+}
+
+// =========================================================================
+// Handler for neura.load_indexed
+// =========================================================================
+// Simulates an indexed memory load. Since the interpreter doesn't have
+// real memory, we use a simplified flat memory model keyed by a string
+// combining the lhs_value/rhs_value attribute and the index values.
+static std::unordered_map<std::string, float> simulated_memory;
+
+/**
+ * @brief Collects the mapping from kernel-scoped "%inputN" names to their
+ *        memref shapes by scanning neura.kernel ops.
+ *
+ * Each kernel gets a unique scope ID, producing keys like "k0/%input0".
+ * This prevents collisions when different kernels reuse the same %inputN name
+ * for different physical memrefs.
+ */
+static std::map<std::string, std::vector<int64_t>>
+collectInputMemRefShapes(func::FuncOp func) {
+  std::map<std::string, std::vector<int64_t>> input_shapes;
+
+  func.walk([&](neura::KernelOp kernel) {
+    auto inputs = kernel.getInputs();
+    int memref_idx = 0;
+    for (Value input : inputs) {
+      auto memref_ty = dyn_cast<MemRefType>(input.getType());
+      if (!memref_ty) {
+        continue;
+      }
+      // Use global memref ID as key prefix so the same physical memref
+      // gets the same key across all kernels (preserving aliasing).
+      int mid = getOrAssignMemRefId(input);
+      std::string input_name = "m" + std::to_string(mid) + "/";
+      std::vector<int64_t> shape_vec;
+      for (int64_t s : memref_ty.getShape()) {
+        shape_vec.push_back(s);
+      }
+      input_shapes[input_name] = std::move(shape_vec);
+      memref_idx++;
+    }
+  });
+
+  return input_shapes;
+}
+
+/**
+ * @brief Fills simulated_memory with deterministic pseudo-random data for
+ *        every coordinate of every memref input identified by "%inputN".
+ */
+static void seedInputMemRef(
+    const std::map<std::string, std::vector<int64_t>> &input_shapes,
+    const std::map<std::string, std::vector<float>> &global_constants =
+        std::map<std::string, std::vector<float>>()) {
+  for (auto &kv : input_shapes) {
+    const std::string &base_key = kv.first;
+    const std::vector<int64_t> &shape = kv.second;
+
+    // Check if this input has a global constant override.
+    bool has_global = global_constants.count(base_key) > 0;
+    const std::vector<float> &global_data =
+        has_global ? global_constants.at(base_key) : std::vector<float>();
+
+    // Recursively fill all coordinates in the multi-dimensional shape.
+    std::function<void(std::vector<int64_t> &, int, size_t &)> fill_rec;
+    fill_rec = [&](std::vector<int64_t> &coords, int dim, size_t &flat_idx) {
+      if (dim == static_cast<int>(shape.size())) {
+        std::string key = base_key;
+        for (int64_t c : coords) {
+          key += "[" + std::to_string(c) + "]";
+        }
+        if (has_global && flat_idx < global_data.size()) {
+          simulated_memory[key] = global_data[flat_idx++];
+        } else {
+          uint64_t hash = 0x9e3779b9;
+          for (int64_t c : coords) {
+            hash ^= static_cast<uint64_t>(c) + 0x9e3779b9 + (hash << 6) +
+                    (hash >> 2);
+          }
+          // Deterministic float in [-1, 1) from hash.
+          float val =
+              static_cast<float>(static_cast<int32_t>(hash & 0xFFFFFFFF)) /
+              2147483648.0f;
+          simulated_memory[key] = val;
+        }
+        return;
+      }
+      for (int64_t i = 0; i < shape[dim]; ++i) {
+        coords.push_back(i);
+        fill_rec(coords, dim + 1, flat_idx);
+        coords.pop_back();
+      }
+    };
+
+    std::vector<int64_t> coords;
+    size_t flat_idx = 0;
+    fill_rec(coords, 0, flat_idx);
+  }
+}
+
+/**
+ * @brief Initializes simulated memory for all memref function arguments with
+ *        deterministic pseudo-random data so that load_indexed operations
+ *        see meaningful (non-zero) values.
+ *
+ * Scans neura.kernel ops to discover memref inputs, correlates them with
+ * "%inputN" names used by neura.constant / load_indexed / store_indexed,
+ * and seeds simulated_memory for every coordinate in each memref shape.
+ *
+ * Also registers function arguments in the value map.
+ *
+ * @param func                           The function whose memref args to seed
+ * @param value_to_predicated_data_map   Value map (updated with PredicatedData
+ *                                       entries for each argument Value)
+ */
+static void initMemRefArgs(
+    func::FuncOp func,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  // 1. Collect kernel-scoped "%inputN" → shape mapping from neura.kernel ops.
+  auto input_shapes = collectInputMemRefShapes(func);
+
+  // 2. Build memref-ID-based key → flat float data map from
+  //    memref.global constants.
+  std::map<std::string, std::vector<float>> global_constants;
+  auto module = func->getParentOfType<ModuleOp>();
+  if (module) {
+    // First pass: index all memref.global by symbol name → flat float data.
+    std::map<std::string, std::vector<float>> global_data_map;
+    for (auto global_op : module.getOps<memref::GlobalOp>()) {
+      std::string name = global_op.getSymName().str();
+      auto init_attr = global_op.getInitialValueAttr();
+      if (auto dense_attr =
+              llvm::dyn_cast_or_null<mlir::DenseElementsAttr>(init_attr)) {
+        std::vector<float> data;
+        auto vals = dense_attr.getValues<float>();
+        data.assign(vals.begin(), vals.end());
+        global_data_map[name] = std::move(data);
+      }
+    }
+
+    // Second pass: for each neura.kernel, map memref inputs to memref-ID keys
+    // and check if they come from memref.get_global.
+    func.walk([&](neura::KernelOp kernel) {
+      auto inputs = kernel.getInputs();
+      int memref_idx = 0;
+      for (Value input : inputs) {
+        auto memref_ty = dyn_cast<MemRefType>(input.getType());
+        if (!memref_ty) {
+          continue;
+        }
+        int mid = getOrAssignMemRefId(input);
+        std::string input_name = "m" + std::to_string(mid) + "/";
+        // Check if this input is defined by memref.get_global.
+        if (auto get_global = input.getDefiningOp<memref::GetGlobalOp>()) {
+          std::string global_name = get_global.getName().str();
+          if (global_data_map.count(global_name) &&
+              !global_constants.count(input_name)) {
+            global_constants[input_name] = global_data_map[global_name];
+          }
+        }
+        memref_idx++;
+      }
+    });
+  }
+
+  // 3. Seed simulated_memory for each input memref (with global overrides).
+  seedInputMemRef(input_shapes, global_constants);
+
+  // 4. Register function arguments in value map.
+  for (Value arg : func.getArguments()) {
+    PredicatedData pd;
+    pd.value = 0.0f;
+    pd.predicate = true;
+    value_to_predicated_data_map[arg] = pd;
+  }
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Initialized simulated memory with "
+                 << simulated_memory.size() << " entries for "
+                 << input_shapes.size() << " memref input(s)";
+    if (!global_constants.empty()) {
+      llvm::outs() << " (" << global_constants.size()
+                   << " from global constants)";
+    }
+    llvm::outs() << "\n";
+  }
+}
+
+bool handleLoadIndexedOp(
+    neura::LoadIndexedOp op,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Executing neura.load_indexed:\n";
+  }
+
+  Value result = op.getResult();
+
+  // Build a memory key with global memref ID prefix (preserves aliasing
+  // across kernels) + index values.
+  std::string mem_key;
+  std::string attr_str;
+  if (auto attr = op->getAttrOfType<mlir::StringAttr>("lhs_value"))
+    attr_str = attr.getValue().str();
+  else if (auto attr = op->getAttrOfType<mlir::StringAttr>("rhs_value"))
+    attr_str = attr.getValue().str();
+
+  Value memref_val = getMemRefForInputN(op.getOperation(), attr_str);
+  if (memref_val && memref_value_to_id.count(memref_val))
+    mem_key = "m" + std::to_string(memref_value_to_id[memref_val]) + "/";
+  else
+    mem_key = "m?/"; // fallback
+
+  // Append index values to the key.
+  for (Value idx : op.getIndices()) {
+    if (value_to_predicated_data_map.count(idx)) {
+      mem_key += "[" +
+                 std::to_string(static_cast<int64_t>(
+                     value_to_predicated_data_map[idx].value)) +
+                 "]";
+    }
+  }
+
+  PredicatedData val;
+  if (simulated_memory.count(mem_key)) {
+    val.value = simulated_memory[mem_key];
+    val.predicate = true;
+  } else {
+    // First access: initialize with 0.0.
+    val.value = 0.0f;
+    val.predicate = true;
+  }
+  val.is_vector = false;
+
+  value_to_predicated_data_map[result] = val;
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  └─ Load from " << mem_key
+                 << ": value = " << val.value << " [pred = " << val.predicate
+                 << "]\n";
+  }
+
+  return true;
+}
+
+// =========================================================================
+// Handler for neura.store_indexed
+// =========================================================================
+// Simulates an indexed memory store. Writes the value operand into the
+// simulated memory model.
+bool handleStoreIndexedOp(
+    neura::StoreIndexedOp op,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Executing neura.store_indexed:\n";
+  }
+
+  // Get the value to store.
+  Value store_val = op.getValue();
+  if (!value_to_predicated_data_map.count(store_val)) {
+    if (isVerboseMode()) {
+      llvm::errs() << "[neura-interpreter]  └─ Store value not found in map\n";
+    }
+    return false;
+  }
+
+  PredicatedData data = value_to_predicated_data_map[store_val];
+
+  // Respect predicate: only write when the store is actually enabled.
+  if (!data.predicate) {
+    if (isVerboseMode()) {
+      llvm::outs()
+          << "[neura-interpreter]  └─ Store skipped: predicate is false\n";
+    }
+    return true;
+  }
+
+  // Build a memory key with global memref ID prefix (preserves aliasing
+  // across kernels) + index values.
+  //
+  // FoldConstantPass convention:
+  //   rhs_value = folded BASE  operand (target memref) — try this first
+  //   lhs_value = folded VALUE operand (data to store)   — fallback
+  std::string mem_key;
+  std::string attr_str;
+  if (auto attr = op->getAttrOfType<mlir::StringAttr>("rhs_value"))
+    attr_str = attr.getValue().str();
+  else if (auto attr = op->getAttrOfType<mlir::StringAttr>("lhs_value"))
+    attr_str = attr.getValue().str();
+
+  Value memref_val = getMemRefForInputN(op.getOperation(), attr_str);
+
+  // If neither attribute resolved to a memref, fall back to the last
+  // memref-typed kernel argument (which is typically the output memref
+  // for this kernel).
+  if (!memref_val) {
+    Operation *parent = op->getParentOp();
+    while (parent && !isa<neura::KernelOp>(parent))
+      parent = parent->getParentOp();
+    if (auto kernel = dyn_cast_or_null<neura::KernelOp>(parent)) {
+      for (Value input : kernel.getInputs()) {
+        if (isa<MemRefType>(input.getType()))
+          memref_val = input; // last memref wins (kernel output)
+      }
+    }
+  }
+
+  if (memref_val && memref_value_to_id.count(memref_val))
+    mem_key = "m" + std::to_string(memref_value_to_id[memref_val]) + "/";
+  else
+    mem_key = "m?/"; // fallback
+
+  for (Value idx : op.getIndices()) {
+    if (value_to_predicated_data_map.count(idx)) {
+      mem_key += "[" +
+                 std::to_string(static_cast<int64_t>(
+                     value_to_predicated_data_map[idx].value)) +
+                 "]";
+    }
+  }
+
+  simulated_memory[mem_key] = data.value;
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  └─ Store to " << mem_key
+                 << ": value = " << data.value << " [pred = " << data.predicate
+                 << "]\n";
+  }
+
+  return true;
+}
+
+// =========================================================================
+// Helper: recursively collect operations from a region (including nested
+// neura.kernel bodies) into a flat op sequence for dataflow analysis.
+// =========================================================================
+static void collectOpsFromRegion(mlir::Region &region,
+                                 std::vector<Operation *> &op_seq) {
+  for (auto &block : region) {
+    for (auto &op : block) {
+      op_seq.push_back(&op);
+      // Recurse into neura.kernel and taskflow.task regions.
+      if (auto kernel_op = dyn_cast<neura::KernelOp>(op)) {
+        collectOpsFromRegion(kernel_op.getBody(), op_seq);
+      }
+      if (auto task_op = dyn_cast<taskflow::TaskflowTaskOp>(op)) {
+        collectOpsFromRegion(task_op.getBody(), op_seq);
+      }
+    }
+  }
+}
+
 OperationHandleResult handleOperation(
     Operation *op,
     llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map,
@@ -3585,10 +4584,21 @@ OperationHandleResult handleOperation(
   } else if (auto mov_op = dyn_cast<neura::DataMovOp>(op)) {
     value_to_predicated_data_map[mov_op.getResult()] =
         value_to_predicated_data_map[mov_op.getOperand()];
+  } else if (auto counter_op = dyn_cast<neura::CounterOp>(op)) {
+    result.success = handleCounterOp(counter_op, value_to_predicated_data_map);
+  } else if (auto load_op = dyn_cast<neura::LoadIndexedOp>(op)) {
+    result.success = handleLoadIndexedOp(load_op, value_to_predicated_data_map);
+  } else if (auto store_op = dyn_cast<neura::StoreIndexedOp>(op)) {
+    result.success =
+        handleStoreIndexedOp(store_op, value_to_predicated_data_map);
   } else if (auto add_op = dyn_cast<neura::AddOp>(op)) {
     result.success = handleAddOp(add_op, value_to_predicated_data_map);
   } else if (auto sub_op = dyn_cast<neura::SubOp>(op)) {
     result.success = handleSubOp(sub_op, value_to_predicated_data_map);
+  } else if (auto mul_op = dyn_cast<neura::MulOp>(op)) {
+    result.success = handleMulOp(mul_op, value_to_predicated_data_map);
+  } else if (auto div_op = dyn_cast<neura::DivOp>(op)) {
+    result.success = handleDivOp(div_op, value_to_predicated_data_map);
   } else if (auto fadd_op = dyn_cast<neura::FAddOp>(op)) {
     result.success = handleFAddOp(fadd_op, value_to_predicated_data_map);
   } else if (auto fsub_op = dyn_cast<neura::FSubOp>(op)) {
@@ -3630,6 +4640,8 @@ OperationHandleResult handleOperation(
     result.success = handleSelOp(sel_op, value_to_predicated_data_map);
   } else if (auto cast_op = dyn_cast<neura::CastOp>(op)) {
     result.success = handleCastOp(cast_op, value_to_predicated_data_map);
+  } else if (auto rsqrt_op = dyn_cast<neura::RsqrtOp>(op)) {
+    result.success = handleRsqrtOp(rsqrt_op, value_to_predicated_data_map);
   } else if (auto gep_op = dyn_cast<neura::GEP>(op)) {
     result.success = handleGEPOp(gep_op, value_to_predicated_data_map);
   } else if (auto br_op = dyn_cast<neura::Br>(op)) {
@@ -3691,6 +4703,33 @@ OperationHandleResult handleOperation(
   } else if (auto grant_always_op = dyn_cast<neura::GrantAlwaysOp>(op)) {
     result.success =
         handleGrantAlwaysOp(grant_always_op, value_to_predicated_data_map);
+  } else if (isa<neura::KernelOp>(op)) {
+    // neura.kernel is a container op; its body ops are already collected
+    // and handled individually. The kernel op itself is a no-op.
+    result.success = true;
+  } else if (auto yield_op = dyn_cast<neura::YieldOp>(op)) {
+    // neura.yield is the terminator for neura.kernel.
+    // In control-flow mode, it triggers a loop-back to the kernel body start
+    // if any counter is still in bounds; otherwise it exits the kernel.
+    result.success = true;
+    // The actual loop decision is made in the main control-flow loop
+    // based on the is_branch flag and counter predicates.
+    // We mark it as a branch so the main loop resets op_index.
+    result.is_branch = true;
+  } else if (isa<memref::AllocOp, memref::DeallocOp, memref::GetGlobalOp>(op)) {
+    // Buffer allocation/deallocation are no-ops in interpreter mode.
+    // memref.get_global data is pre-seeded into simulated_memory during init.
+    result.success = true;
+  } else if (isa<taskflow::TaskflowTaskOp>(op)) {
+    // taskflow.task is a container op wrapping neura.kernel; its body is
+    // already collected separately. Treat as no-op.
+    result.success = true;
+  } else if (isa<taskflow::TaskflowYieldOp>(op)) {
+    // taskflow.yield is a terminator; treated as no-op.
+    result.success = true;
+  } else if (isa<taskflow::TaskflowCounterOp>(op)) {
+    // taskflow.counter wraps neura.counter; treated as no-op.
+    result.success = true;
   } else {
     llvm::errs() << "[neura-interpreter]  Unhandled op: ";
     op->print(llvm::errs());
@@ -3812,15 +4851,45 @@ bool executeOperation(
  */
 int run(func::FuncOp func,
         llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  // Initialize simulated memory for memref arguments with pseudo-random data.
+  initMemRefArgs(func, value_to_predicated_data_map);
+
   if (isDataflowMode()) {
     // Data flow mode execution logic
-    // Initializes pending operation queue with all operations except return
-    // operations.
+    // Collect all operations except func.return for DFG iteration.
+    // func.return is executed once after all DFG iterations complete.
 
     std::vector<Operation *> op_seq;
+    Operation *return_op = nullptr;
+    // Collect operations from all blocks, recursing into neura.kernel
+    // and taskflow.task bodies, but skip func.return.
     for (auto &block : func.getBody()) {
-      for (auto &op : block.getOperations()) {
+      for (auto &op : block) {
+        if (isa<func::ReturnOp>(op)) {
+          return_op = &op;
+          continue;
+        }
         op_seq.emplace_back(&op);
+        if (auto kernel_op = dyn_cast<neura::KernelOp>(op)) {
+          collectOpsFromRegion(kernel_op.getBody(), op_seq);
+        }
+        if (auto task_op = dyn_cast<taskflow::TaskflowTaskOp>(op)) {
+          collectOpsFromRegion(task_op.getBody(), op_seq);
+        }
+      }
+    }
+
+    // Collect counters grouped by their enclosing neura.kernel, for
+    // per-kernel nested-loop carry propagation at the end of each DFG
+    // iteration.
+    llvm::DenseMap<Operation *, SmallVector<Value>> kernel_counter_map;
+    for (Operation *op : op_seq) {
+      if (auto counter_op = dyn_cast<neura::CounterOp>(op)) {
+        Operation *kernel = op->getParentOp();
+        while (kernel && !isa<neura::KernelOp>(kernel))
+          kernel = kernel->getParentOp();
+        if (kernel)
+          kernel_counter_map[kernel].push_back(counter_op.getCurrentIndex());
       }
     }
 
@@ -3831,8 +4900,12 @@ int run(func::FuncOp func,
     for (Operation *op : op_seq) {
       if (auto reserve_op = dyn_cast<neura::ReserveOp>(op)) {
         reserve_values.insert(reserve_op.getResult());
-      } else if (isa<neura::ConstantOp>(op) || isa<neura::GrantOnceOp>(op)) {
-        constant_values.insert(op->getResult(0));
+      } else if (isa<neura::ConstantOp>(op) || isa<neura::GrantOnceOp>(op) ||
+                 isa<mlir::arith::ConstantOp>(op) || isa<memref::AllocOp>(op) ||
+                 isa<memref::GetGlobalOp>(op)) {
+        for (Value res : op->getResults()) {
+          constant_values.insert(res);
+        }
       }
     }
 
@@ -3930,6 +5003,33 @@ int run(func::FuncOp func,
       // next DFG iteration.
       if (ready_to_execute_ops.empty() &&
           !dependency_graph.hasUnexecutedOperations()) {
+        // Advance all kernel counters with nested-loop carry propagation
+        // (leaf → relay → root). Each kernel's counters advance independently.
+        bool any_kernel_has_iterations = false;
+        for (auto &kv : kernel_counter_map) {
+          if (advanceCountersNested(kv.second))
+            any_kernel_has_iterations = true;
+        }
+        if (!any_kernel_has_iterations) {
+          if (isVerboseMode()) {
+            llvm::outs() << "[neura-interpreter]  All counters exhausted, "
+                            "ending DFG iterations\n";
+          }
+          break;
+        }
+
+        // Safety limit: prevent infinite loops and out-of-bounds access.
+        // dfg_count is the number of completed iterations; we stop before
+        // starting iteration N when dfg_count reaches N.
+        constexpr int MAX_DFG_ITERATIONS = 10000;
+        if (dfg_count >= MAX_DFG_ITERATIONS) {
+          if (isVerboseMode()) {
+            llvm::outs() << "[neura-interpreter]  Reached max DFG iterations ("
+                         << MAX_DFG_ITERATIONS << "), stopping\n";
+          }
+          break;
+        }
+
         dfg_count++;
         topo_level = 0;
         if (isVerboseMode()) {
@@ -3982,6 +5082,21 @@ int run(func::FuncOp func,
         continue;
       }
     }
+
+    // After all DFG iterations complete, execute func.return if present.
+    if (return_op) {
+      if (isVerboseMode()) {
+        llvm::outs() << "[neura-interpreter]  "
+                        "----------------------------------------\n";
+        llvm::outs() << "[neura-interpreter]  DFG iterations complete, "
+                        "executing func.return\n";
+      }
+      auto handle_result =
+          handleOperation(return_op, value_to_predicated_data_map);
+      if (!handle_result.success) {
+        return EXIT_FAILURE;
+      }
+    }
   } else {
     // Control flow mode execution logic
     Block *current_block = &func.getBody().front();
@@ -3989,13 +5104,73 @@ int run(func::FuncOp func,
     size_t op_index = 0;
     bool is_terminated = false;
 
+    // Stack for handling nested container ops (taskflow.task, neura.kernel).
+    struct Frame {
+      Block *block;
+      size_t index;
+      Block *last_block;
+      // For kernel loops: set of counter result Values to check at yield.
+      SmallVector<Value> counter_values;
+      // The kernel body block to jump back to on loop continuation.
+      Block *kernel_body;
+    };
+    SmallVector<Frame> frame_stack;
+
     // Main loop: processes operations sequentially through blocks.
     while (!is_terminated && current_block) {
       auto &operations = current_block->getOperations();
-      if (op_index >= operations.size())
+      if (op_index >= operations.size()) {
+        // Reached end of block — pop from stack if we were in a nested block.
+        if (!frame_stack.empty()) {
+          Frame parent = frame_stack.pop_back_val();
+          current_block = parent.block;
+          op_index = parent.index;
+          last_visited_block = parent.last_block;
+          // Advance past the container op.
+          op_index++;
+          continue;
+        }
         break;
+      }
 
       Operation &op = *std::next(operations.begin(), op_index);
+
+      // Enter nested containers to execute their body ops inline.
+      if (auto kernel_op = dyn_cast<neura::KernelOp>(op)) {
+        if (!kernel_op.getBody().empty()) {
+          Frame frame;
+          frame.block = current_block;
+          frame.index = op_index;
+          frame.last_block = last_visited_block;
+          frame.kernel_body = &kernel_op.getBody().front();
+          // Collect counter values from kernel body for loop predicate check.
+          for (auto &body_op : kernel_op.getBody().front()) {
+            if (isa<neura::CounterOp>(body_op)) {
+              frame.counter_values.push_back(body_op.getResult(0));
+            }
+          }
+          frame_stack.push_back(frame);
+          current_block = frame.kernel_body;
+          last_visited_block = nullptr;
+          op_index = 0;
+          continue;
+        }
+      }
+      if (auto task_op = dyn_cast<taskflow::TaskflowTaskOp>(op)) {
+        if (!task_op.getBody().empty()) {
+          Frame frame;
+          frame.block = current_block;
+          frame.index = op_index;
+          frame.last_block = last_visited_block;
+          frame.kernel_body = nullptr; // taskflow.task doesn't loop
+          frame_stack.push_back(frame);
+          current_block = &task_op.getBody().front();
+          last_visited_block = nullptr;
+          op_index = 0;
+          continue;
+        }
+      }
+
       // Processes operation with block information for control flow handling.
       auto handle_result = handleOperation(&op, value_to_predicated_data_map,
                                            &current_block, &last_visited_block);
@@ -4007,9 +5182,41 @@ int run(func::FuncOp func,
         is_terminated = true;
         op_index++;
       } else if (handle_result.is_branch) {
-        // Branch operations update current_block; reset index to start of new
-        // block.
-        op_index = 0;
+        // Check if this is a neura.yield that needs loop-back handling.
+        if (isa<neura::YieldOp>(op) && !frame_stack.empty() &&
+            frame_stack.back().kernel_body != nullptr) {
+          // Advance counters with nested-loop carry propagation
+          // (leaf → relay → root).
+          bool more_iterations =
+              advanceCountersNested(frame_stack.back().counter_values);
+          // Update predicates in the value map so that the next
+          // handleCounterOp call reflects the new counter_state.
+          for (Value cv : frame_stack.back().counter_values) {
+            if (!value_to_predicated_data_map.count(cv))
+              continue;
+            if (!counter_state.count(cv))
+              continue;
+            int64_t cur = counter_state[cv];
+            int64_t upper = counter_upper[cv];
+            int64_t step = counter_step[cv];
+            bool in_bounds = (step > 0) ? (cur < upper) : (cur > upper);
+            value_to_predicated_data_map[cv].predicate = in_bounds;
+            value_to_predicated_data_map[cv].value = static_cast<float>(cur);
+          }
+          if (more_iterations) {
+            // Loop back to start of kernel body.
+            op_index = 0;
+          } else {
+            // All counters exhausted; pop frame to exit kernel.
+            Frame parent = frame_stack.pop_back_val();
+            current_block = parent.block;
+            op_index = parent.index + 1; // advance past kernel op
+            last_visited_block = parent.last_block;
+          }
+        } else {
+          // Normal branch: reset index to start of new block.
+          op_index = 0;
+        }
       } else {
         // Regular operations increment to next operation in block.
         op_index++;
@@ -4038,13 +5245,16 @@ int main(int argc, char **argv) {
 
   // Initializes MLIR context and dialects.
   DialectRegistry registry;
-  registry
-      .insert<neura::NeuraDialect, func::FuncDialect, arith::ArithDialect>();
+  registry.insert<neura::NeuraDialect, func::FuncDialect, arith::ArithDialect,
+                  memref::MemRefDialect, taskflow::TaskflowDialect,
+                  math::MathDialect>();
 
   MLIRContext context;
   context.appendDialectRegistry(registry);
+  context.allowUnregisteredDialects();
 
   // Loads and parses input MLIR file.
+  // Pre-process: strip ml_program dialect ops which are not registered.
   llvm::SourceMgr source_mgr;
   auto file_or_err = mlir::openInputFile(argv[1]);
   if (!file_or_err) {
@@ -4052,7 +5262,20 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 
-  source_mgr.AddNewSourceBuffer(std::move(file_or_err), llvm::SMLoc());
+  std::string content = file_or_err->getBuffer().str();
+  // Remove ml_program.global lines (from torch-mlir export)
+  {
+    std::stringstream filtered;
+    std::stringstream input(content);
+    std::string line;
+    while (std::getline(input, line)) {
+      if (line.find("ml_program.global") == std::string::npos)
+        filtered << line << '\n';
+    }
+    content = filtered.str();
+  }
+  auto filtered_buf = llvm::MemoryBuffer::getMemBufferCopy(content);
+  source_mgr.AddNewSourceBuffer(std::move(filtered_buf), llvm::SMLoc());
 
   OwningOpRef<ModuleOp> module =
       parseSourceFile<ModuleOp>(source_mgr, &context);

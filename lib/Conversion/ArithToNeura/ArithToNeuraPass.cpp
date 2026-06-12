@@ -4,6 +4,7 @@
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/Math/IR/Math.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/PatternMatch.h"
@@ -221,6 +222,49 @@ struct ArithCmpiToNeuraICmp : public OpRewritePattern<mlir::arith::CmpIOp> {
   }
 };
 
+// Converts arith::CmpFOp to neura::FCmpOp.
+// This is critical for models with ReLU/GELU/LayerNorm which produce
+// floating-point comparisons. If arith.cmpf is not lowered before
+// LeveragePredicatedValuePass, the type wrapping causes operand type
+// mismatches because arith.cmpf expects f32 operands but receives
+// !neura.data<f32, i1> predicated values.
+struct ArithCmpFToNeuraFCmp : public OpRewritePattern<mlir::arith::CmpFOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::CmpFOp op,
+                                PatternRewriter &rewriter) const override {
+    Value lhs = op.getLhs();
+    Value rhs = op.getRhs();
+    Type result_type = op.getType(); // i1
+    arith::CmpFPredicate predicate = op.getPredicate();
+    StringRef cmp_type;
+    switch (predicate) {
+    case arith::CmpFPredicate::OEQ: cmp_type = "oeq"; break;
+    case arith::CmpFPredicate::ONE: cmp_type = "one"; break;
+    case arith::CmpFPredicate::OGT: cmp_type = "ogt"; break;
+    case arith::CmpFPredicate::OGE: cmp_type = "oge"; break;
+    case arith::CmpFPredicate::OLT: cmp_type = "olt"; break;
+    case arith::CmpFPredicate::OLE: cmp_type = "ole"; break;
+    case arith::CmpFPredicate::ORD: cmp_type = "ord"; break;
+    case arith::CmpFPredicate::UEQ: cmp_type = "ueq"; break;
+    case arith::CmpFPredicate::UNE: cmp_type = "une"; break;
+    case arith::CmpFPredicate::UGT: cmp_type = "ugt"; break;
+    case arith::CmpFPredicate::UGE: cmp_type = "uge"; break;
+    case arith::CmpFPredicate::ULT: cmp_type = "ult"; break;
+    case arith::CmpFPredicate::ULE: cmp_type = "ule"; break;
+    case arith::CmpFPredicate::UNO: cmp_type = "uno"; break;
+    default:
+      return rewriter.notifyMatchFailure(
+          op, "Unsupported arith CmpFOp predicate");
+    }
+
+    // Converts arith CmpFOp to Neura FCmpOp.
+    rewriter.replaceOpWithNewOp<neura::FCmpOp>(
+        op, result_type, lhs, rhs, rewriter.getStringAttr(cmp_type));
+    return success();
+  }
+};
+
 struct ArithSelectToNeuraSel : public OpRewritePattern<mlir::arith::SelectOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -271,6 +315,36 @@ struct ArithExtfToNeuraCast : public OpRewritePattern<mlir::arith::ExtFOp> {
   }
 };
 
+struct ArithTruncFToNeuraCast : public OpRewritePattern<mlir::arith::TruncFOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::TruncFOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input = op.getIn();
+    Type result_type = op.getType();
+
+    // Converts arith TruncFOp to Neura cast operation.
+    rewriter.replaceOpWithNewOp<neura::CastOp>(op, result_type, input,
+                                               rewriter.getStringAttr("truncf"));
+    return success();
+  }
+};
+
+struct ArithTruncIToNeuraCast : public OpRewritePattern<mlir::arith::TruncIOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::TruncIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input = op.getIn();
+    Type result_type = op.getType();
+
+    // Converts arith TruncIOp to Neura cast operation.
+    rewriter.replaceOpWithNewOp<neura::CastOp>(op, result_type, input,
+                                               rewriter.getStringAttr("trunci"));
+    return success();
+  }
+};
+
 struct ArithIndexCastToNeuraCast
     : public OpRewritePattern<mlir::arith::IndexCastOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -313,7 +387,8 @@ struct ArithMinimumFToNeuraFCmpSel
 
     // minimumf(a, b) → sel(fcmp(a, b, "olt"), a, b)
     // "olt" = ordered less-than: true when a < b (false if either is NaN).
-    Value cmp = rewriter.create<neura::FCmpOp>(loc, result_type, lhs, rhs,
+    Value cmp = rewriter.create<neura::FCmpOp>(loc, rewriter.getI1Type(), lhs,
+                                               rhs,
                                                rewriter.getStringAttr("olt"));
     rewriter.replaceOpWithNewOp<neura::SelOp>(op, result_type, cmp, lhs, rhs);
     return success();
@@ -333,7 +408,8 @@ struct ArithMaximumFToNeuraFCmpSel
 
     // maximumf(a, b) → sel(fcmp(a, b, "ogt"), a, b)
     // "ogt" = ordered greater-than: true when a > b (false if either is NaN).
-    Value cmp = rewriter.create<neura::FCmpOp>(loc, result_type, lhs, rhs,
+    Value cmp = rewriter.create<neura::FCmpOp>(loc, rewriter.getI1Type(), lhs,
+                                               rhs,
                                                rewriter.getStringAttr("ogt"));
     rewriter.replaceOpWithNewOp<neura::SelOp>(op, result_type, cmp, lhs, rhs);
     return success();
@@ -368,6 +444,20 @@ struct ArithOrIToNeuraOr : public OpRewritePattern<mlir::arith::OrIOp> {
   }
 };
 
+// math.rsqrt(x) → neura.rsqrt(x)
+struct MathRsqrtToNeuraRsqrt : public OpRewritePattern<mlir::math::RsqrtOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(mlir::math::RsqrtOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input = op.getOperand();
+    Type result_type = op.getType();
+
+    rewriter.replaceOpWithNewOp<neura::RsqrtOp>(op, result_type, input);
+    return success();
+  }
+};
+
 struct LowerArithToNeuraPass
     : public PassWrapper<LowerArithToNeuraPass, OperationPass<ModuleOp>> {
 
@@ -379,19 +469,22 @@ struct LowerArithToNeuraPass
   }
 
   void getDependentDialects(DialectRegistry &registry) const override {
-    registry.insert<mlir::neura::NeuraDialect>();
+    registry.insert<mlir::neura::NeuraDialect, mlir::math::MathDialect>();
   }
 
   RewritePatternSet populateArithToNeuraPatterns(MLIRContext *context) {
     RewritePatternSet patterns(context);
     patterns.add<
         ArithFAddToNeuraFAdd, ArithConstantToNeuraConstant, ArithAddIToNeuraAdd,
-        ArithCmpiToNeuraICmp, ArithSelectToNeuraSel, ArithExtUIToNeuraCast,
+        ArithCmpiToNeuraICmp, ArithCmpFToNeuraFCmp,
+        ArithSelectToNeuraSel, ArithExtUIToNeuraCast,
         ArithIndexCastToNeuraCast, ArithFDivToNeuraFDiv, ArithExtfToNeuraCast,
+        ArithTruncFToNeuraCast, ArithTruncIToNeuraCast,
         ArithMulFToNeuraFMul, ArithSubIToNeuraSub, ArithSubFToNeuraFSub,
         ArithMulIToNeuraMul, ArithDivSIToNeuraDiv, ArithRemSIToNeuraOp,
         ArithMinimumFToNeuraFCmpSel, ArithMaximumFToNeuraFCmpSel,
-        ArithAndIToNeuraAnd, ArithOrIToNeuraOr>(context);
+        ArithAndIToNeuraAnd, ArithOrIToNeuraOr,
+        MathRsqrtToNeuraRsqrt>(context);
     return patterns;
   }
 
