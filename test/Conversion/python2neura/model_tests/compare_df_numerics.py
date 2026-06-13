@@ -327,7 +327,7 @@ def main():
             all_pass = False
         else:
             for mid, r in results.items():
-                status = "✅" if r["max_abs_err"] < 2e-2 else "❌"
+                status = "✅" if r["max_abs_err"] < 1e-5 else "❌"
                 has_nz = "non-zero" if r["has_nonzero"] else "ALL ZERO"
                 print(f"  {status} {mid} shape={r['shape']} | "
                       f"max_abs_err={r['max_abs_err']:.2e} "
@@ -339,8 +339,8 @@ def main():
                         ref_vals = r['tensor_ref'].flatten()[:5]
                         print(f"       DF[0:5]:  {df_vals}")
                         print(f"       REF[0:5]: {ref_vals}")
-                all_pass = all_pass and (r["max_abs_err"] < 2e-2)
-                summary.append((name, "OK" if r["max_abs_err"] < 2e-2 else "MISMATCH",
+                all_pass = all_pass and (r["max_abs_err"] < 1e-5)
+                summary.append((name, "OK" if r["max_abs_err"] < 1e-5 else "MISMATCH",
                                 r["max_abs_err"], r["max_rel_err"]))
 
         # Cleanup

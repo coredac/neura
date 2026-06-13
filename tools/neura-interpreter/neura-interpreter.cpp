@@ -5274,310 +5274,185 @@ int run(func::FuncOp func,
   initMemRefArgs(func, value_to_predicated_data_map);
 
   if (isDataflowMode()) {
-    // Data flow mode execution logic
-    // Collect all operations except func.return for DFG iteration.
-    // func.return is executed once after all DFG iterations complete.
+    // Data flow mode execution logic.
+    //
+    // Kernels are executed SEQUENTIALLY (in IR order) to prevent
+    // interleaved execution across kernels.  In a flat DFG where all
+    // kernels' counters advance simultaneously, a later kernel (e.g.
+    // matmul layer 2) could read partially-computed values from an
+    // earlier kernel (e.g. matmul layer 1) that hasn't finished all
+    // its iterations yet.  Sequential execution guarantees that kernel
+    // N+1 only sees the fully-computed output of kernel N.
 
-    std::vector<Operation *> op_seq;
+    // Collect all ops, separating non-kernel ops from per-kernel body ops.
+    std::vector<Operation *> non_kernel_ops;
+    struct KernelGroup {
+      Operation *kernel_op;                         // the neura.kernel op
+      std::vector<Operation *> body_ops;            // body ops including yield
+      SmallVector<Value> counter_values;            // counter result Values
+    };
+    SmallVector<KernelGroup> kernel_groups;
     Operation *return_op = nullptr;
-    // Collect operations from all blocks, recursing into neura.kernel
-    // and taskflow.task bodies, but skip func.return.
+
     for (auto &block : func.getBody()) {
       for (auto &op : block) {
         if (isa<func::ReturnOp>(op)) {
           return_op = &op;
           continue;
         }
-        op_seq.emplace_back(&op);
-        if (auto kernel_op = dyn_cast<neura::KernelOp>(op)) {
-          collectOpsFromRegion(kernel_op.getBody(), op_seq);
-        }
-        if (auto task_op = dyn_cast<taskflow::TaskflowTaskOp>(op)) {
-          collectOpsFromRegion(task_op.getBody(), op_seq);
-        }
-      }
-    }
-
-    // Collect counters grouped by their enclosing neura.kernel, for
-    // per-kernel nested-loop carry propagation at the end of each DFG
-    // iteration.
-    llvm::DenseMap<Operation *, SmallVector<Value>> kernel_counter_map;
-    for (Operation *op : op_seq) {
-      if (auto counter_op = dyn_cast<neura::CounterOp>(op)) {
-        Operation *kernel = op->getParentOp();
-        while (kernel && !isa<neura::KernelOp>(kernel))
-          kernel = kernel->getParentOp();
-        if (kernel)
-          kernel_counter_map[kernel].push_back(counter_op.getCurrentIndex());
-      }
-    }
-    if (isVerboseMode()) {
-      llvm::outs() << "[neura-interpreter]  Collected "
-                   << kernel_counter_map.size() << " kernels with counters\n";
-      for (auto &kv : kernel_counter_map) {
-        llvm::outs() << "[neura-interpreter]  Kernel: ";
-        kv.first->print(llvm::outs());
-        llvm::outs() << " has " << kv.second.size() << " counters\n";
-      }
-    }
-
-    // Identifies reserve and constant operations.
-    llvm::DenseSet<Value> reserve_values;
-    llvm::DenseSet<Value> constant_values;
-
-    for (Operation *op : op_seq) {
-      if (auto reserve_op = dyn_cast<neura::ReserveOp>(op)) {
-        reserve_values.insert(reserve_op.getResult());
-      } else if (isa<neura::ConstantOp>(op) || isa<neura::GrantOnceOp>(op) ||
-                 isa<mlir::arith::ConstantOp>(op) || isa<memref::AllocOp>(op) ||
-                 isa<memref::GetGlobalOp>(op)) {
-        for (Value res : op->getResults()) {
-          constant_values.insert(res);
-        }
-      }
-    }
-
-    // Tracks operation dependencies with dependency graph.
-    DependencyGraph dependency_graph;
-    dependency_graph.build(op_seq);
-    // Initializes executable operations (no unsatisfied dependencies).
-    std::vector<Operation *> ready_to_execute_ops =
-        dependency_graph.getReadyToExecuteOperations();
-
-    // Map kernel block arguments to kernel input operands so that ops
-    // inside neura.kernel (e.g. store_indexed / load_indexed) can look up
-    // their operands by SSA value.  Required because kernel body ops are
-    // flattened into the main op_seq in dataflow mode.
-    mapKernelBlockArgs(value_to_predicated_data_map, op_seq);
-
-    for (auto *op : ready_to_execute_ops) {
-      if (isVerboseMode()) {
-        llvm::outs() << "[neura-interpreter]  Initial pending operation: ";
-        op->print(llvm::outs());
-        llvm::outs() << "\n";
-      }
-    }
-
-    bool should_terminate = false;
-    int topo_level = 0;
-    int dfg_count = 0;
-
-    if (isVerboseMode()) {
-      llvm::outs() << "[neura-interpreter]  "
-                      "----------------------------------------\n";
-      llvm::outs() << "[neura-interpreter]  DFG Iteration " << dfg_count
-                   << " - Beginning\n";
-      llvm::outs() << "[neura-interpreter]  "
-                      "----------------------------------------\n";
-    }
-
-    while (!ready_to_execute_ops.empty() ||
-           dependency_graph.hasUnexecutedOperations()) {
-      topo_level++;
-
-      if (isVerboseMode()) {
-        llvm::outs() << "[neura-interpreter]  "
-                        "----------------------------------------\n";
-        llvm::outs() << "[neura-interpreter]  DFG Iteration " << dfg_count
-                     << " | Topological Level " << topo_level
-                     << " | ready_to_execute_ops "
-                     << ready_to_execute_ops.size() << "\n";
-      }
-
-      std::vector<Operation *> next_ready_to_execute_ops;
-
-      for (Operation *op : ready_to_execute_ops) {
-        if (isVerboseMode()) {
-          llvm::outs() << "[neura-interpreter]  Executing: "
-                       << op->getName().getStringRef() << "\n";
-        }
-
-        if (!executeOperation(op, value_to_predicated_data_map,
-                              should_terminate)) {
-          return EXIT_FAILURE;
-        }
-
-        if (should_terminate) {
-          if (isVerboseMode()) {
-            llvm::outs() << "[neura-interpreter]  "
-                            "========================================\n";
-            llvm::outs() << "[neura-interpreter]  Execution terminated due to "
-                            "valid return\n";
-            llvm::outs() << "[neura-interpreter]  "
-                            "========================================\n";
+        if (isa<neura::KernelOp>(op)) {
+          KernelGroup group;
+          group.kernel_op = &op;
+          collectOpsFromRegion(cast<neura::KernelOp>(op).getBody(),
+                               group.body_ops);
+          // Collect counter values for this kernel
+          for (Operation *body_op : group.body_ops) {
+            if (auto ctr = dyn_cast<neura::CounterOp>(body_op))
+              group.counter_values.push_back(ctr.getCurrentIndex());
           }
-          return EXIT_SUCCESS;
+          kernel_groups.push_back(std::move(group));
+        } else {
+          non_kernel_ops.push_back(&op);
         }
+      }
+    }
 
-        dependency_graph.updateAfterExecution(op);
+    // Phase 1: execute non-kernel ops once (arith.constant, memref.alloc,
+    // memref.get_global, etc.).  These are pure init ops with no counters.
+    if (!non_kernel_ops.empty()) {
+      DependencyGraph init_graph;
+      init_graph.build(non_kernel_ops);
+      std::vector<Operation *> ready = init_graph.getReadyToExecuteOperations();
+      while (!ready.empty()) {
+        std::vector<Operation *> next_ready;
+        for (Operation *op : ready) {
+          bool ignored_terminate = false;
+          if (!executeOperation(op, value_to_predicated_data_map,
+                                ignored_terminate)) {
+            return EXIT_FAILURE;
+          }
+          init_graph.updateAfterExecution(op);
+          for (Operation *dep :
+               init_graph.getReadyToExecuteConsumerOperations(op)) {
+            if (init_graph.canExecute(dep) &&
+                std::find(next_ready.begin(), next_ready.end(), dep) ==
+                    next_ready.end())
+              next_ready.push_back(dep);
+          }
+        }
+        ready = std::move(next_ready);
+      }
+    }
 
-        for (Operation *dependent :
-             dependency_graph.getReadyToExecuteConsumerOperations(op)) {
-          if (dependency_graph.canExecute(dependent) &&
-              std::find(next_ready_to_execute_ops.begin(),
-                        next_ready_to_execute_ops.end(),
-                        dependent) == next_ready_to_execute_ops.end()) {
-            next_ready_to_execute_ops.push_back(dependent);
+    // Phase 2: execute each kernel sequentially to exhaustion.
+    for (auto &group : kernel_groups) {
+      if (isVerboseMode()) {
+        llvm::outs() << "[neura-interpreter]  ==================== "
+                        "Starting kernel: ";
+        group.kernel_op->print(llvm::outs());
+        llvm::outs() << " (" << group.body_ops.size() << " ops, "
+                     << group.counter_values.size() << " counters)\n";
+      }
 
+      // Map this kernel's block arguments to its input values.
+      auto kernel = cast<neura::KernelOp>(group.kernel_op);
+      auto inputs = kernel.getInputs();
+      Block &body = kernel.getBody().front();
+      unsigned num_args = body.getNumArguments();
+      for (unsigned i = 0; i < num_args && i < inputs.size(); ++i) {
+        Value block_arg = body.getArgument(i);
+        Value input_val = inputs[i];
+        if (value_to_predicated_data_map.count(input_val)) {
+          value_to_predicated_data_map[block_arg] =
+              value_to_predicated_data_map[input_val];
+        }
+      }
+
+      DependencyGraph dep_graph;
+      dep_graph.build(group.body_ops);
+      std::vector<Operation *> ready =
+          dep_graph.getReadyToExecuteOperations();
+
+      int dfg_count = 0;
+
+      while (!ready.empty() || dep_graph.hasUnexecutedOperations()) {
+        std::vector<Operation *> next_ready;
+        for (Operation *op : ready) {
+          bool ignored = false;
+          if (!executeOperation(op, value_to_predicated_data_map, ignored))
+            return EXIT_FAILURE;
+
+          dep_graph.updateAfterExecution(op);
+
+          for (Operation *consumer :
+               dep_graph.getReadyToExecuteConsumerOperations(op)) {
+            if (dep_graph.canExecute(consumer) &&
+                std::find(next_ready.begin(), next_ready.end(), consumer) ==
+                    next_ready.end())
+              next_ready.push_back(consumer);
+          }
+        }
+        ready = std::move(next_ready);
+
+        if (ready.empty()) {
+          // Advance counters for this kernel
+          bool has_iterations =
+              advanceCountersNested(group.counter_values);
+
+          if (!has_iterations)
+            break;
+
+          constexpr int MAX_DFG_ITERATIONS = 100000;
+          if (dfg_count >= MAX_DFG_ITERATIONS) {
             if (isVerboseMode()) {
               llvm::outs()
-                  << "[neura-interpreter]    -> consumer: "
-                  << dependent->getName().getStringRef() << "\n";
+                  << "[neura-interpreter]  Reached max DFG iterations ("
+                  << MAX_DFG_ITERATIONS << "), stopping kernel\n";
+            }
+            break;
+          }
+          dfg_count++;
+
+          // Reset non-constant, non-reserve values for the next iteration.
+          for (auto &entry : value_to_predicated_data_map) {
+            Value val = entry.first;
+            // Skip kernel block arguments and function-level constants.
+            if (isa<BlockArgument>(val))
+              continue;
+            if (val.getDefiningOp() &&
+                (isa<neura::ConstantOp>(val.getDefiningOp()) ||
+                 isa<mlir::arith::ConstantOp>(val.getDefiningOp()) ||
+                 isa<memref::AllocOp>(val.getDefiningOp()) ||
+                 isa<memref::GetGlobalOp>(val.getDefiningOp())))
+              continue;
+            entry.second.is_updated = false;
+            entry.second.predicate = false;
+          }
+
+          // Re-map block args for next iteration
+          for (unsigned i = 0; i < num_args && i < inputs.size(); ++i) {
+            Value block_arg = body.getArgument(i);
+            Value input_val = inputs[i];
+            if (value_to_predicated_data_map.count(input_val)) {
+              value_to_predicated_data_map[block_arg] =
+                  value_to_predicated_data_map[input_val];
             }
           }
+
+          dep_graph.resetForNextIteration();
+          ready = dep_graph.getReadyToExecuteOperations();
+          continue;
         }
       }
 
-      ready_to_execute_ops = std::move(next_ready_to_execute_ops);
-
-      // If no operations are executable in the current topological
-      // level, advance counters and start a new DFG iteration.  This
-      // handles both normal completion (all ops executed) and deadlock
-      // (some ops are waiting for dependencies that will only be
-      // satisfied after counter values change).
-      if (ready_to_execute_ops.empty()) {
-        if (isVerboseMode() && dependency_graph.hasUnexecutedOperations()) {
-          llvm::outs()
-              << "[neura-interpreter]  Deadlock resolved: advancing to next "
-                 "DFG iteration (some ops were blocked on unsatisfied "
-                 "dependencies)\n";
-        }
-        // Advance all kernel counters with nested-loop carry propagation
-        // (leaf → relay → root). Each kernel's counters advance independently.
-        bool any_kernel_has_iterations = false;
-        for (auto &kv : kernel_counter_map) {
-          Operation *kernel = kv.first;
-
-          // Skip kernels that have already been marked as exhausted
-          if (exhausted_kernels.count(kernel)) {
-            continue;
-          }
-
-          bool has_iterations = advanceCountersNested(kv.second);
-          if (isVerboseMode()) {
-            llvm::outs() << "[neura-interpreter]  Kernel ";
-            kv.first->print(llvm::outs());
-            llvm::outs() << " advance result: " << has_iterations << "\n";
-          }
-
-          if (!has_iterations) {
-            // Mark kernel as exhausted since it has no more iterations
-            exhausted_kernels.insert(kernel);
-            if (isVerboseMode()) {
-              llvm::outs() << "[neura-interpreter]  Kernel ";
-              kernel->print(llvm::outs());
-              llvm::outs() << " marked as exhausted\n";
-            }
-          } else {
-            any_kernel_has_iterations = true;
-          }
-        }
-        if (!any_kernel_has_iterations) {
-          if (isVerboseMode()) {
-            llvm::outs() << "[neura-interpreter]  All counters exhausted, "
-                            "ending DFG iterations\n";
-          }
-          break;
-        }
-
-        // Safety limit: prevent infinite loops and out-of-bounds access.
-        // dfg_count is the number of completed iterations; we stop before
-        // starting iteration N when dfg_count reaches N.
-        constexpr int MAX_DFG_ITERATIONS = 100000;
-        if (dfg_count >= MAX_DFG_ITERATIONS) {
-          if (isVerboseMode()) {
-            llvm::outs() << "[neura-interpreter]  Reached max DFG iterations ("
-                         << MAX_DFG_ITERATIONS << "), stopping\n";
-          }
-          break;
-        }
-
-        dfg_count++;
-        topo_level = 0;
-        if (isVerboseMode()) {
-          llvm::outs() << "[neura-interpreter]  "
-                          "----------------------------------------\n";
-          llvm::outs() << "[neura-interpreter]  DFG Iteration " << dfg_count
-                       << " - Beginning\n";
-          llvm::outs() << "[neura-interpreter]  "
-                          "----------------------------------------\n";
-        }
-
-        // Saves the states of reserve values to restore after reset.
-        llvm::DenseMap<Value, PredicatedData> reserve_states;
-        for (Value val : reserve_values) {
-          if (value_to_predicated_data_map.count(val)) {
-            reserve_states[val] = value_to_predicated_data_map[val];
-          }
-        }
-
-        // Resets all non-constant, non-reserve values to not updated and
-        // predicate false.
-        for (auto &entry : value_to_predicated_data_map) {
-          Value val = entry.first;
-
-          if (constant_values.count(val) || reserve_values.count(val)) {
-            continue;
-          }
-
-          entry.second.is_updated = false;
-          entry.second.predicate = false;
-        }
-
-        for (auto &entry : reserve_states) {
-          value_to_predicated_data_map[entry.first] = entry.second;
-        }
-
-        // Re-map kernel block arguments after reset: the non-constant
-        // values in the map were cleared, so kernel inputs that survived
-        // the reset must be propagated back to their block arguments.
-        mapKernelBlockArgs(value_to_predicated_data_map, op_seq);
-
-        dependency_graph.resetForNextIteration();
-
-        ready_to_execute_ops = dependency_graph.getReadyToExecuteOperations();
-
-        // In DF mode, filter out operations from exhausted kernels
-        // to prevent overwriting valid results. Only counters are allowed
-        // to execute from exhausted kernels (needed for iteration tracking).
-        if (dataflow && !exhausted_kernels.empty() &&
-            !ready_to_execute_ops.empty()) {
-          std::vector<Operation *> filtered_ops;
-          for (auto *op : ready_to_execute_ops) {
-            Operation *kernel = op->getParentOp();
-            while (kernel && !isa<neura::KernelOp>(kernel))
-              kernel = kernel->getParentOp();
-            // Skip operations from exhausted kernels (except counters)
-            if (kernel && exhausted_kernels.count(kernel) &&
-                !isa<neura::CounterOp>(op)) {
-              continue;
-            }
-            filtered_ops.push_back(op);
-          }
-          ready_to_execute_ops = std::move(filtered_ops);
-        }
-
-        if (isVerboseMode()) {
-          llvm::outs() << "[neura-interpreter]  Initial ready operations:\n";
-          for (auto *op : ready_to_execute_ops) {
-            llvm::outs() << "[neura-interpreter]  │  ";
-            op->print(llvm::outs());
-            llvm::outs() << "\n";
-          }
-        }
-
-        continue;
+      if (isVerboseMode()) {
+        llvm::outs() << "[neura-interpreter]  Kernel finished after "
+                     << dfg_count << " DFG iterations\n";
       }
     }
 
-    // After all DFG iterations complete, execute func.return if present.
+    // Phase 3: execute func.return if present.
     if (return_op) {
-      if (isVerboseMode()) {
-        llvm::outs() << "[neura-interpreter]  "
-                        "----------------------------------------\n";
-        llvm::outs() << "[neura-interpreter]  DFG iterations complete, "
-                        "executing func.return\n";
-      }
       auto handle_result =
           handleOperation(return_op, value_to_predicated_data_map);
       if (!handle_result.success) {
