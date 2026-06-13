@@ -119,5 +119,11 @@ void mlir::taskflow::registerLinalgToAffineConversionPassPipeline() {
         pm.nest<func::FuncOp>().addPass(
             mlir::affine::createSimplifyAffineStructuresPass());
         pm.addPass(createCanonicalizerPass());
+
+        // Step 7: Expand math.fpowi / math.tanh into arith/math.exp
+        // primitives before taskflow conversion, while constants (e.g.
+        // exponent 3 for GELU's x^3) are still visible as arith.constant
+        // inside affine loops.
+        pm.addPass(mlir::createExpandMathToArithPass());
       });
 }

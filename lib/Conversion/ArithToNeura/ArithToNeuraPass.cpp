@@ -472,6 +472,81 @@ struct MathRsqrtToNeuraRsqrt : public OpRewritePattern<mlir::math::RsqrtOp> {
   }
 };
 
+/// Expand math.fpowi(x, const_n) into a chain of arith.mulf, then let
+/// ArithMulFToNeuraFMul handle each multiply. Only constant positive integer
+/// exponents are supported; negative/zero/unknown exponents are rejected.
+/// This is needed for GELU tanh approximation (x^3).
+struct MathFPowIToNeuraMuls : public OpRewritePattern<mlir::math::FPowIOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(mlir::math::FPowIOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input = op.getOperand(0);
+    Value exponent = op.getOperand(1);
+    Type result_type = op.getType();
+    Location loc = op.getLoc();
+
+    // Require a constant integer exponent.
+    auto constExp = exponent.getDefiningOp<arith::ConstantOp>();
+    if (!constExp)
+      return rewriter.notifyMatchFailure(op, "exponent is not constant");
+    auto intAttr = mlir::dyn_cast<IntegerAttr>(constExp.getValue());
+    if (!intAttr)
+      return rewriter.notifyMatchFailure(op, "exponent is not IntegerAttr");
+    int64_t expVal = intAttr.getInt();
+    if (expVal < 0)
+      return rewriter.notifyMatchFailure(op, "negative exponent");
+    if (expVal == 0) {
+      auto one = rewriter.create<arith::ConstantOp>(
+          loc, result_type, rewriter.getFloatAttr(result_type, 1.0));
+      rewriter.replaceOp(op, one);
+      return success();
+    }
+
+    // Build result = input * input * ... * input (expVal times)
+    Value result = input;
+    for (int64_t i = 1; i < expVal; ++i)
+      result = rewriter.create<arith::MulFOp>(loc, result, input);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
+/// Expand math.tanh(x) → (exp(2x) - 1) / (exp(2x) + 1).
+/// The intermediate math.exp and arith ops will be lowered to Neura ops
+/// by other patterns in the greedy rewrite loop.
+/// This is needed for GELU tanh approximation.
+struct MathTanhToNeuraOps : public OpRewritePattern<mlir::math::TanhOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(mlir::math::TanhOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input = op.getOperand();
+    Type result_type = op.getType();
+    Location loc = op.getLoc();
+
+    // 2.0 constant
+    auto two = rewriter.create<arith::ConstantOp>(
+        loc, result_type, rewriter.getFloatAttr(result_type, 2.0));
+    // 1.0 constant
+    auto one = rewriter.create<arith::ConstantOp>(
+        loc, result_type, rewriter.getFloatAttr(result_type, 1.0));
+
+    // 2 * x
+    auto twoX = rewriter.create<arith::MulFOp>(loc, input, two);
+    // exp(2 * x) — this will be lowered by MathExpToNeuraExp
+    auto exp2x = rewriter.create<mlir::math::ExpOp>(loc, twoX);
+    // exp(2x) - 1
+    auto numerator = rewriter.create<arith::SubFOp>(loc, exp2x, one);
+    // exp(2x) + 1
+    auto denominator = rewriter.create<arith::AddFOp>(loc, exp2x, one);
+    // (exp(2x) - 1) / (exp(2x) + 1)
+    auto result = rewriter.create<arith::DivFOp>(loc, numerator, denominator);
+    rewriter.replaceOp(op, result);
+    return success();
+  }
+};
+
 struct LowerArithToNeuraPass
     : public PassWrapper<LowerArithToNeuraPass, OperationPass<ModuleOp>> {
 
@@ -498,7 +573,8 @@ struct LowerArithToNeuraPass
         ArithMulIToNeuraMul, ArithDivSIToNeuraDiv, ArithRemSIToNeuraOp,
         ArithMinimumFToNeuraFCmpSel, ArithMaximumFToNeuraFCmpSel,
         ArithAndIToNeuraAnd, ArithOrIToNeuraOr,
-        MathExpToNeuraExp, MathRsqrtToNeuraRsqrt>(context);
+        MathExpToNeuraExp, MathRsqrtToNeuraRsqrt,
+        MathFPowIToNeuraMuls, MathTanhToNeuraOps>(context);
     return patterns;
   }
 

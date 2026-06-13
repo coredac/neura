@@ -108,24 +108,149 @@ struct OperationHandleResult {
   bool is_branch;
 };
 
-/**
- * @brief Structure that represents the dependency graph of operations.
- */
-// =========================================================================
-// Helper: Extract the memref SSA value from a neura.load_indexed or
-// neura.store_indexed operation.  Prefers the lhs_value / rhs_value
-// %inputN attribute (set by FoldConstantPass), and falls back to the
-// memref operand of the op (first operand for load_indexed, the target
-// memref for store_indexed).  Block arguments are resolved through
-// resolveKernelBlockArg so that the same underlying memref SSA value is
-// returned across kernels.
-// =========================================================================
-// Forward declarations needed before DependencyGraph::build() uses these.
-static Value getMemRefForInputN(Operation *op, const std::string &input_str);
-static Value resolveKernelBlockArg(Value val);
+/**< Tracks which kernels have exhausted their counters. */
+static llvm::DenseSet<Operation *> exhausted_kernels;
 
+/**
+ * @brief Handler for neura.load_indexed.
+ *
+ * Simulates an indexed memory load. Since the interpreter doesn't have real
+ * memory, we use a simplified flat memory model keyed by a string combining
+ * the lhs_value/rhs_value attribute and the index values.
+ */
+static std::unordered_map<std::string, float> simulated_memory;
+
+/**
+ * @brief Extract the memref SSA value from a neura.load_indexed or
+ * neura.store_indexed operation.
+ *
+ * Prefers the lhs_value / rhs_value %inputN attribute (set by
+ * FoldConstantPass), and falls back to the memref operand of the op (first
+ * operand for load_indexed, the target memref for store_indexed).  Block
+ * arguments are resolved through resolveKernelBlockArg so that the same
+ * underlying memref SSA value is returned across kernels.
+ *
+ * Look up the memref SSA value that corresponds to a given %inputN string
+ * within the enclosing neura::KernelOp. The %inputN convention (set by
+ * PromoteInputArgToConstPass) is: N is a 0-based index into ALL kernel
+ * inputs (not just memref-typed ones). This function returns the Value at
+ * that index only if it is a memref; otherwise it returns Value().
+ *
+ * @param op         The load/store op to resolve the memref for.
+ * @param input_str  The %inputN string to look up.
+ * @return The memref SSA Value, or Value() if not found.
+ */
+static Value getMemRefForInputN(Operation *op, const std::string &input_str) {
+  // Parse the number from "%inputN"
+  if (input_str.size() < 7 || input_str.substr(0, 6) != "%input")
+    return Value();
+  int n = 0;
+  try {
+    n = std::stoi(input_str.substr(6));
+  } catch (...) {
+    return Value();
+  }
+
+  // Walk up to enclosing kernel
+  Operation *parent = op->getParentOp();
+  while (parent && !isa<neura::KernelOp>(parent))
+    parent = parent->getParentOp();
+  if (!parent)
+    return Value();
+  auto kernel = cast<neura::KernelOp>(parent);
+
+  // Use 0-based indexing into ALL kernel inputs (matching generator
+  // convention).
+  auto inputs = kernel.getInputs();
+  if (n >= 0 && n < static_cast<int>(inputs.size())) {
+    Value input = *(inputs.begin() + n);
+    if (isa<MemRefType>(input.getType()))
+      return input;
+  }
+  return Value();
+}
+
+static constexpr const char *INPUT_PREFIX = "%input";
+static constexpr size_t INPUT_PREFIX_LEN = 6;
+static constexpr size_t INPUT_MIN_LEN = 7; // prefix + at least 1 digit
+
+/**
+ * @brief If a Value is a block argument inside a neura::KernelOp, resolve
+ * it to the corresponding kernel input operand (the SSA value that was
+ * passed into the kernel).
+ *
+ * Returns the input as-is for all other Values. In dataflow mode, kernel
+ * body ops are flattened and block arguments have no producing op, so direct
+ * lookup in value_to_predicated_data_map fails. This helper lets handlers
+ * resolve the block arg to the kernel's input value which IS tracked in the
+ * map.
+ *
+ * @param val  The Value to resolve.
+ * @return The resolved kernel input operand, or @p val unchanged.
+ */
+static Value resolveKernelBlockArg(Value val) {
+  // Handle neura.data_mov wrappers (inserted by InsertDataMovPass) that
+  // wrap the actual memref value — just follow through.
+  if (auto dm_op = val.getDefiningOp<neura::DataMovOp>()) {
+    Value operand = dm_op.getOperand();
+    if (operand)
+      return resolveKernelBlockArg(operand);
+  }
+  // Handle neura.constant wrappers (e.g., {value = "%inputN"})
+  // that wrap kernel input references in DF-lowered IR.
+  if (auto const_op = val.getDefiningOp<neura::ConstantOp>()) {
+    if (auto attr = const_op->getAttrOfType<mlir::StringAttr>("value")) {
+      std::string ref = attr.getValue().str();
+      // Resolve %inputN → get the N-th kernel input
+      if (ref.size() >= INPUT_MIN_LEN &&
+          ref.substr(0, INPUT_PREFIX_LEN) == INPUT_PREFIX) {
+        Operation *parent = const_op->getParentOp();
+        while (parent && !isa<neura::KernelOp>(parent))
+          parent = parent->getParentOp();
+        if (auto kernel = dyn_cast_or_null<neura::KernelOp>(parent)) {
+          int n = std::stoi(ref.substr(INPUT_PREFIX_LEN));
+          auto inputs = kernel.getInputs();
+          if (n >= 0 && n < static_cast<int>(inputs.size())) {
+            Value resolved = *(inputs.begin() + n);
+            // Recurse to handle block args
+            return resolveKernelBlockArg(resolved);
+          }
+        }
+      }
+    }
+  }
+
+  auto block_arg = dyn_cast<BlockArgument>(val);
+  if (!block_arg)
+    return val;
+  Block *block = block_arg.getOwner();
+  if (!block)
+    return val;
+  Operation *parent = block->getParentOp();
+  if (!parent || !isa<neura::KernelOp>(parent))
+    return val;
+  auto kernel = cast<neura::KernelOp>(parent);
+  auto inputs = kernel.getInputs();
+  unsigned arg_num = block_arg.getArgNumber();
+  if (arg_num < inputs.size())
+    return inputs[arg_num];
+  return val;
+}
+
+/**
+ * @brief Extracts the memref SSA value from a neura.load_indexed or
+ * neura.store_indexed operation.
+ *
+ * First attempts attribute-based resolution via the lhs_value / rhs_value
+ * string attributes (which name the input memref), falling back to the
+ * operation's getBase() operand. The resolved value is passed through
+ * resolveKernelBlockArg() to unwrap indirect block-argument references.
+ *
+ * @param op  A neura::LoadIndexedOp or neura::StoreIndexedOp operation.
+ * @return The resolved memref SSA Value, or a null Value on failure.
+ */
 static Value getMemRefFromLoadStoreOp(Operation *op) {
-  // ---- Try attribute-based resolution first ----
+  // Try attribute-based resolution first.
   std::string attr_str;
   if (auto load_op = dyn_cast<neura::LoadIndexedOp>(op)) {
     if (auto attr = load_op->getAttrOfType<mlir::StringAttr>("lhs_value"))
@@ -145,7 +270,7 @@ static Value getMemRefFromLoadStoreOp(Operation *op) {
       return resolveKernelBlockArg(memref_val);
   }
 
-  // ---- Fallback: use the memref operand directly ----
+  // Fallback: use the memref operand directly
   // For both load_indexed and store_indexed, getBase() returns the memref.
 
   if (auto load_op = dyn_cast<neura::LoadIndexedOp>(op)) {
@@ -163,6 +288,9 @@ static Value getMemRefFromLoadStoreOp(Operation *op) {
   return Value();
 }
 
+/**
+ * @brief Structure that represents the dependency graph of operations.
+ */
 struct DependencyGraph {
   // Tracks the number of pending producer operations that each consumer
   // operation is waiting for.
@@ -173,8 +301,7 @@ struct DependencyGraph {
   llvm::DenseMap<Operation *, int> initial_dependency_counts;
   // Memory dependency tracking: maps a producer operation to the consumer
   // operations that have a memory dependency on it (same memref RAW/WAW/WAR).
-  llvm::DenseMap<Operation *, llvm::SmallVector<Operation *>>
-      memory_dependents;
+  llvm::DenseMap<Operation *, llvm::SmallVector<Operation *>> memory_dependents;
 
   /**
    * @brief Builds a dependency graph for operations, calculating the initial
@@ -447,6 +574,47 @@ inline bool isDataflowMode() { return dataflow; }
 inline void setVerboseMode(bool v) { verbose = v; }
 
 inline bool isVerboseMode() { return verbose; }
+
+/**
+ * @brief Global mapping from memref SSA Value to a unique memref ID.
+ *
+ * Ensures the same physical memref (same SSA value) gets the same key prefix
+ * across all kernels that reference it, preserving aliasing.
+ */
+static llvm::DenseMap<Value, int> memref_value_to_id;
+static int next_memref_id = 0; ///< monotonically increasing ID counter
+
+/**
+ * @brief Assign a unique global ID to a memref SSA Value if not already
+ * mapped.
+ *
+ * @param memref_val  The memref SSA Value to look up or register.
+ * @return The assigned unique ID.
+ */
+static int getOrAssignMemRefId(Value memref_val) {
+  if (memref_value_to_id.count(memref_val))
+    return memref_value_to_id[memref_val];
+  int id = next_memref_id++;
+  memref_value_to_id[memref_val] = id;
+  return id;
+}
+
+/**
+ * @brief Per-counter storage for neura.counter, keyed by SSA result value.
+ *
+ * Bounds and step are read from op attributes and initialized on first
+ * encounter. Each counter's current index is stored in counter_state;
+ * loop bounds in counter_lower / counter_upper; traversal direction in
+ * counter_step.
+ */
+static llvm::DenseMap<Value, int64_t> counter_state; ///< current index
+static llvm::DenseMap<Value, int64_t> counter_lower; ///< lower bound
+static llvm::DenseMap<Value, int64_t> counter_upper; ///< upper bound
+static llvm::DenseMap<Value, int64_t> counter_step;  ///< step (direction)
+
+/** Counter hierarchy level, keyed by SSA result value:
+ *  "root" (outermost) = 0, "relay" = 1, "leaf" (innermost) = 2. */
+static llvm::DenseMap<Value, int> counter_hierarchy_level;
 
 /**
  * @brief Handles the execution of an arithmetic constant operation
@@ -4266,91 +4434,18 @@ bool handleGrantAlwaysOp(
 }
 
 /**
- * @brief Generic operation handling function that unifies type checking for
- * both execution modes
+ * @brief Handles neura.counter: initializes bounds/step from op attributes
+ * on first encounter, then produces the current index as a predicated value.
  *
- * Processes core logic for all operation types and returns handling results.
- * This function abstracts the common operation processing logic while
- * accommodating mode-specific requirements through optional parameters for
- * control flow information.
+ * The counter is in-bounds while its step direction has not yet reached
+ * the upper bound. Counter state persists across iterations via global maps
+ * (counter_state, counter_lower, counter_upper, counter_step,
+ * counter_hierarchy_level).
  *
- * @param op                              The operation to process
- * @param value_to_predicated_data_map    Reference to map storing predicated
- * data for values
- * @param current_block                   Pointer to current block (control
- * flow mode only)
- * @param last_visited_block              Pointer to previously visited block
- * (control flow mode only)
- * @return OperationHandleResult          Structure containing processing
- * status and control flags
+ * @param op                             The neura.counter operation
+ * @param value_to_predicated_data_map   Map of SSA values to predicated data
+ * @return true on success, false on error
  */
-// =========================================================================
-// Handler for neura.counter
-// =========================================================================
-// Simulates a hardware loop counter: reads bounds from attributes,
-// produces an incrementing index value on each DFG iteration.
-// The counter state (current index) is stored in a global map keyed by
-// the counter's SSA result value.
-static llvm::DenseMap<Value, int64_t> counter_state;
-static llvm::DenseMap<Value, int64_t> counter_lower;
-static llvm::DenseMap<Value, int64_t> counter_upper;
-static llvm::DenseMap<Value, int64_t> counter_step;
-// Counter hierarchy: "root" (outermost) = 0, "relay" = 1, "leaf" (innermost)
-// = 2.
-static llvm::DenseMap<Value, int> counter_hierarchy_level;
-// Global mapping from memref SSA Value to a unique memref ID.
-// This ensures the same physical memref (same SSA value) gets the same
-// key prefix across all kernels that reference it, preserving aliasing.
-static llvm::DenseMap<Value, int> memref_value_to_id;
-static int next_memref_id = 0;
-
-/// Assign a unique global ID to a memref SSA Value if not already mapped.
-/// Returns the assigned ID.
-static int getOrAssignMemRefId(Value memref_val) {
-  if (memref_value_to_id.count(memref_val))
-    return memref_value_to_id[memref_val];
-  int id = next_memref_id++;
-  memref_value_to_id[memref_val] = id;
-  return id;
-}
-
-/// Look up the memref SSA value that corresponds to a given %inputN string
-/// within the enclosing neura::KernelOp.
-///
-/// The %inputN convention (set by PromoteInputArgToConstPass) is:
-/// N is a 0-based index into ALL kernel inputs (not just memref-typed ones).
-/// This function returns the Value at that index only if it is a memref;
-/// otherwise it returns Value().
-static Value getMemRefForInputN(Operation *op, const std::string &input_str) {
-  // Parse the number from "%inputN"
-  if (input_str.size() < 7 || input_str.substr(0, 6) != "%input")
-    return Value();
-  int n = 0;
-  try {
-    n = std::stoi(input_str.substr(6));
-  } catch (...) {
-    return Value();
-  }
-
-  // Walk up to enclosing kernel
-  Operation *parent = op->getParentOp();
-  while (parent && !isa<neura::KernelOp>(parent))
-    parent = parent->getParentOp();
-  if (!parent)
-    return Value();
-  auto kernel = cast<neura::KernelOp>(parent);
-
-  // Use 0-based indexing into ALL kernel inputs (matching generator
-  // convention).
-  auto inputs = kernel.getInputs();
-  if (n >= 0 && n < static_cast<int>(inputs.size())) {
-    Value input = *(inputs.begin() + n);
-    if (isa<MemRefType>(input.getType()))
-      return input;
-  }
-  return Value();
-}
-
 bool handleCounterOp(
     neura::CounterOp op,
     llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
@@ -4438,8 +4533,13 @@ bool handleCounterOp(
   return true;
 }
 
-/// Advances a single counter by its step value, resetting to lower bound on
-/// overflow. Returns true if overflow occurred.
+/**
+ * @brief Advances a single counter by its step value, resetting to lower
+ * bound on overflow.
+ *
+ * @param cv  The counter SSA value to advance.
+ * @return true if overflow occurred (counter wrapped around).
+ */
 static bool advanceOneCounter(Value cv) {
   if (!cv || !counter_state.count(cv))
     return true;
@@ -4455,9 +4555,14 @@ static bool advanceOneCounter(Value cv) {
   return overflow;
 }
 
-/// Advances a set of counter Values (one neura.kernel's counters) with
-/// nested-loop carry propagation: leaf → relay → root.
-/// Returns true if at least one more loop iteration remains.
+/**
+ * @brief Advances a set of counter Values (one neura.kernel's counters) with
+ * nested-loop carry propagation: leaf → relay → root.
+ *
+ * @param counter_values  The counter SSA values to advance.
+ * @return true if at least one more loop iteration remains, false if all
+ *         outer loops are exhausted.
+ */
 static bool advanceCountersNested(const SmallVector<Value> &counter_values) {
   // Classify counters by hierarchy level.
   Value root_val, relay_val, leaf_val;
@@ -4510,37 +4615,9 @@ static bool advanceCountersNested(const SmallVector<Value> &counter_values) {
   return !outermost_overflow;
 }
 
-/// Checks if a kernel's outer-most (hierarchy 0) counter is exhausted.
-/// We check the counter BEFORE it gets advanced, by examining if the current
-/// value is already at or past the upper bound.
-static bool isKernelOuterCounterExhausted(Operation *kernel) {
-  for (auto &child : kernel->getRegion(0).front()) {
-    if (auto counter_op = dyn_cast<neura::CounterOp>(&child)) {
-      Value result = counter_op.getCurrentIndex();
-      if (counter_hierarchy_level.count(result) &&
-          counter_hierarchy_level[result] == 0) {
-        int64_t cur = counter_state.count(result) ? counter_state[result] : -1;
-        int64_t upper =
-            counter_upper.count(result) ? counter_upper[result] : -1;
-        int64_t step = counter_step.count(result) ? counter_step[result] : 1;
-        bool exhausted = (step > 0) ? (cur >= upper) : (cur <= upper);
-        return exhausted;
-      }
-    }
-  }
-  return false;
-}
+/**
+ * @brief Checks if a kernel's outer-most (hierarchy 0) counter is exhausted.
 
-/// Tracks which kernels have exhausted their counters
-static llvm::DenseSet<Operation *> exhausted_kernels;
-
-// =========================================================================
-// Handler for neura.load_indexed
-// =========================================================================
-// Simulates an indexed memory load. Since the interpreter doesn't have
-// real memory, we use a simplified flat memory model keyed by a string
-// combining the lhs_value/rhs_value attribute and the index values.
-static std::unordered_map<std::string, float> simulated_memory;
 
 /**
  * @brief Collects the mapping from kernel-scoped "%inputN" names to their
@@ -4549,6 +4626,9 @@ static std::unordered_map<std::string, float> simulated_memory;
  * Each kernel gets a unique scope ID, producing keys like "k0/%input0".
  * This prevents collisions when different kernels reuse the same %inputN name
  * for different physical memrefs.
+ *
+ * @param func  The top-level function containing neura.kernel ops.
+ * @return Map from scoped input key to memref shape (dimension sizes).
  */
 static std::map<std::string, std::vector<int64_t>>
 collectInputMemRefShapes(func::FuncOp func) {
@@ -4581,6 +4661,10 @@ collectInputMemRefShapes(func::FuncOp func) {
 /**
  * @brief Fills simulated_memory with deterministic pseudo-random data for
  *        every coordinate of every memref input identified by "%inputN".
+ *
+ * @param input_shapes     Map from scoped "%inputN" key to memref shape.
+ * @param global_constants Optional map from key to flat float data used to
+ *                         override the pseudo-random seed for matched keys.
  */
 static void seedInputMemRef(
     const std::map<std::string, std::vector<int64_t>> &input_shapes,
@@ -4650,11 +4734,11 @@ static void seedInputMemRef(
 static void initMemRefArgs(
     func::FuncOp func,
     llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
-  // 1. Collect kernel-scoped "%inputN" → shape mapping from neura.kernel ops.
+  // Collect kernel-scoped "%inputN" → shape mapping from neura.kernel ops.
   auto input_shapes = collectInputMemRefShapes(func);
 
-  // 2. Build memref-ID-based key → flat float data map from
-  //    memref.global constants.
+  //  Build memref-ID-based key → flat float data map from
+  //  memref.global constants.
   std::map<std::string, std::vector<float>> global_constants;
   auto module = func->getParentOfType<ModuleOp>();
   if (module) {
@@ -4713,10 +4797,10 @@ static void initMemRefArgs(
     });
   }
 
-  // 3. Seed simulated_memory for each input memref (with global overrides).
+  // Seed simulated_memory for each input memref (with global overrides).
   seedInputMemRef(input_shapes, global_constants);
 
-  // 4. Register function arguments in value map.
+  //  Register function arguments in value map.
   for (Value arg : func.getArguments()) {
     PredicatedData pd;
     pd.value = 0.0f;
@@ -4802,15 +4886,12 @@ bool handleLoadIndexedOp(
   return true;
 }
 
-// =========================================================================
-// Handler for neura.store_indexed
-// =========================================================================
-// Forward declaration: resolve kernel block argument to the corresponding
-// kernel input operand (defined later in this file).
-static Value resolveKernelBlockArg(Value val);
-
-// Simulates an indexed memory store. Writes the value operand into the
-// simulated memory model.
+/**
+ * @brief Handler for neura.store_indexed.
+ *
+ * Simulates an indexed memory store. Writes the value operand into the
+ * simulated memory model.
+ */
 bool handleStoreIndexedOp(
     neura::StoreIndexedOp op,
     llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
@@ -4827,7 +4908,8 @@ bool handleStoreIndexedOp(
     store_val = resolveKernelBlockArg(store_val);
     if (!value_to_predicated_data_map.count(store_val)) {
       if (isVerboseMode()) {
-        llvm::errs() << "[neura-interpreter]  └─ Store value not found in map\n";
+        llvm::errs()
+            << "[neura-interpreter]  └─ Store value not found in map\n";
       }
       return false;
     }
@@ -4892,10 +4974,13 @@ bool handleStoreIndexedOp(
   return true;
 }
 
-// =========================================================================
-// Helper: recursively collect operations from a region (including nested
-// neura.kernel bodies) into a flat op sequence for dataflow analysis.
-// =========================================================================
+/**
+ * @brief Recursively collect operations from a region (including nested
+ * neura.kernel bodies) into a flat op sequence for dataflow analysis.
+ *
+ * @param region  The MLIR region to traverse.
+ * @param op_seq  Output vector to append operations into.
+ */
 static void collectOpsFromRegion(mlir::Region &region,
                                  std::vector<Operation *> &op_seq) {
   for (auto &block : region) {
@@ -4912,93 +4997,25 @@ static void collectOpsFromRegion(mlir::Region &region,
   }
 }
 
-// =========================================================================
-// Helper: map kernel block arguments to kernel input operands in the value
-// map.  In dataflow mode, kernel body ops are flattened into the main
-// op_seq but kernel block arguments have no producing op.  This function
-// propagates the PredicatedData of each kernel input to the corresponding
-// block argument so that ops inside the kernel (e.g. neura.store_indexed)
-// can look up their operands by SSA value.
-// =========================================================================
-static void mapKernelBlockArgs(
-    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map,
-    const std::vector<Operation *> &op_seq) {
-  for (Operation *op : op_seq) {
-    auto kernel_op = dyn_cast<neura::KernelOp>(op);
-    if (!kernel_op)
-      continue;
-    auto inputs = kernel_op.getInputs();
-    Block &body = kernel_op.getBody().front();
-    unsigned num_args = body.getNumArguments();
-    for (unsigned i = 0; i < num_args && i < inputs.size(); ++i) {
-      Value block_arg = body.getArgument(i);
-      Value input_val = inputs[i];
-      if (value_to_predicated_data_map.count(input_val)) {
-        value_to_predicated_data_map[block_arg] =
-            value_to_predicated_data_map[input_val];
-      }
-    }
-  }
-}
-
-// =========================================================================
-// Helper: if a Value is a block argument inside a neura::KernelOp, resolve
-// it to the corresponding kernel input operand (the SSA value that was
-// passed into the kernel).  Returns the input as-is for all other Values.
-//
-// In dataflow mode, kernel body ops are flattened and block arguments have
-// no producing op, so direct lookup in value_to_predicated_data_map fails.
-// This helper lets handlers resolve the block arg to the kernel's input
-// value which IS tracked in the map.
-// =========================================================================
-static Value resolveKernelBlockArg(Value val) {
-  // Handle neura.data_mov wrappers (inserted by InsertDataMovPass) that
-  // wrap the actual memref value — just follow through.
-  if (auto dm_op = val.getDefiningOp<neura::DataMovOp>()) {
-    Value operand = dm_op.getOperand();
-    if (operand)
-      return resolveKernelBlockArg(operand);
-  }
-  // Handle neura.constant wrappers (e.g., {value = "%inputN"})
-  // that wrap kernel input references in DF-lowered IR.
-  if (auto const_op = val.getDefiningOp<neura::ConstantOp>()) {
-    if (auto attr = const_op->getAttrOfType<mlir::StringAttr>("value")) {
-      std::string ref = attr.getValue().str();
-      // Resolve %inputN → get the N-th kernel input
-      if (ref.size() >= 7 && ref.substr(0, 6) == "%input") {
-        Operation *parent = const_op->getParentOp();
-        while (parent && !isa<neura::KernelOp>(parent))
-          parent = parent->getParentOp();
-        if (auto kernel = dyn_cast_or_null<neura::KernelOp>(parent)) {
-          int n = std::stoi(ref.substr(6));
-          auto inputs = kernel.getInputs();
-          if (n >= 0 && n < static_cast<int>(inputs.size())) {
-            Value resolved = *(inputs.begin() + n);
-            // Recurse to handle block args
-            return resolveKernelBlockArg(resolved);
-          }
-        }
-      }
-    }
-  }
-
-  auto block_arg = dyn_cast<BlockArgument>(val);
-  if (!block_arg)
-    return val;
-  Block *block = block_arg.getOwner();
-  if (!block)
-    return val;
-  Operation *parent = block->getParentOp();
-  if (!parent || !isa<neura::KernelOp>(parent))
-    return val;
-  auto kernel = cast<neura::KernelOp>(parent);
-  auto inputs = kernel.getInputs();
-  unsigned arg_num = block_arg.getArgNumber();
-  if (arg_num < inputs.size())
-    return inputs[arg_num];
-  return val;
-}
-
+/**
+ * @brief Generic operation handling function that unifies type checking for
+ * both execution modes
+ *
+ * Processes core logic for all operation types and returns handling results.
+ * This function abstracts the common operation processing logic while
+ * accommodating mode-specific requirements through optional parameters for
+ * control flow information.
+ *
+ * @param op                              The operation to process
+ * @param value_to_predicated_data_map    Reference to map storing predicated
+ * data for values
+ * @param current_block                   Pointer to current block (control
+ * flow mode only)
+ * @param last_visited_block              Pointer to previously visited block
+ * (control flow mode only)
+ * @return OperationHandleResult          Structure containing processing
+ * status and control flags
+ */
 OperationHandleResult handleOperation(
     Operation *op,
     llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map,
@@ -5302,9 +5319,9 @@ int run(func::FuncOp func,
     // Collect all ops, separating non-kernel ops from per-kernel body ops.
     std::vector<Operation *> non_kernel_ops;
     struct KernelGroup {
-      Operation *kernel_op;                         // the neura.kernel op
-      std::vector<Operation *> body_ops;            // body ops including yield
-      SmallVector<Value> counter_values;            // counter result Values
+      Operation *kernel_op;              // the neura.kernel op
+      std::vector<Operation *> body_ops; // body ops including yield
+      SmallVector<Value> counter_values; // counter result Values
     };
     SmallVector<KernelGroup> kernel_groups;
     Operation *return_op = nullptr;
@@ -5332,7 +5349,7 @@ int run(func::FuncOp func,
       }
     }
 
-    // Phase 1: execute non-kernel ops once (arith.constant, memref.alloc,
+    // Execute non-kernel ops once (arith.constant, memref.alloc,
     // memref.get_global, etc.).  These are pure init ops with no counters.
     if (!non_kernel_ops.empty()) {
       DependencyGraph init_graph;
@@ -5359,7 +5376,7 @@ int run(func::FuncOp func,
       }
     }
 
-    // Phase 2: execute each kernel sequentially to exhaustion.
+    // Execute each kernel sequentially to exhaustion.
     for (auto &group : kernel_groups) {
       if (isVerboseMode()) {
         llvm::outs() << "[neura-interpreter]  ==================== "
@@ -5385,8 +5402,7 @@ int run(func::FuncOp func,
 
       DependencyGraph dep_graph;
       dep_graph.build(group.body_ops);
-      std::vector<Operation *> ready =
-          dep_graph.getReadyToExecuteOperations();
+      std::vector<Operation *> ready = dep_graph.getReadyToExecuteOperations();
 
       int dfg_count = 0;
 
@@ -5411,8 +5427,7 @@ int run(func::FuncOp func,
 
         if (ready.empty()) {
           // Advance counters for this kernel
-          bool has_iterations =
-              advanceCountersNested(group.counter_values);
+          bool has_iterations = advanceCountersNested(group.counter_values);
 
           if (!has_iterations)
             break;
@@ -5466,7 +5481,7 @@ int run(func::FuncOp func,
       }
     }
 
-    // Phase 3: execute func.return if present.
+    // Execute func.return if present.
     if (return_op) {
       auto handle_result =
           handleOperation(return_op, value_to_predicated_data_map);

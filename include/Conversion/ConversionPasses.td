@@ -6,6 +6,21 @@
 include "mlir/Pass/PassBase.td"
 
 //=========================================================//
+// Math Expansion Pass.
+//=========================================================//
+def ExpandMathToArith : Pass<"expand-math-to-arith", "ModuleOp"> {
+  let summary = "Expand math.fpowi and math.tanh into arith/math.exp";
+  let description = [{
+    Expands math.fpowi(constant-exponent) into chains of arith.mulf and
+    math.tanh into math.exp + arith ops. This must run before affine loop
+    conversion so that constant operands are not promoted to block arguments.
+  }];
+  let constructor = "mlir::createExpandMathToArithPass()";
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::math::MathDialect"];
+}
+
+//=========================================================//
 // Neura Conversion Passes.
 //=========================================================//
 def LowerArithToNeura : Pass<"lower-arith-to-neura", "FuncOp"> {
