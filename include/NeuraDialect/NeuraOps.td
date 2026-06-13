@@ -461,6 +461,19 @@ def Neura_RsqrtOp : Op<NeuraDialect, "rsqrt"> {
   let results = (outs AnyType:$result);
 }
 
+// Defines an exponential operation (exp).
+def Neura_ExpOp : Op<NeuraDialect, "exp"> {
+  let summary = "Exponential operation";
+  let description = [{
+    Computes the exponential of the input value: result = exp(input).
+
+    Example:
+      %r = neura.exp %x : f32
+  }];
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+}
+
 // Defines an alloca operation for memory allocation.
 def Neura_AllocaOp : Op<NeuraDialect, "alloca"> {
   let summary = "Memory allocation operation";

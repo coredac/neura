@@ -1,4 +1,4 @@
-"""transformer_attention: simplified attention with ReLU (matching Neura IR)"""
+"""transformer_attention: simplified attention with real softmax"""
 import torch
 import torch.nn as nn
 
@@ -17,8 +17,7 @@ class Model(nn.Module):
         V = x @ self.wv
         d_k = Q.size(-1)
         scores = Q @ K.transpose(-2, -1) / (d_k ** 0.5)
-        # Use ReLU instead of softmax to match Neura IR behavior
-        attn = torch.relu(scores)
+        attn = torch.softmax(scores, dim=-1)
         return attn @ V
 
 model = Model().eval()

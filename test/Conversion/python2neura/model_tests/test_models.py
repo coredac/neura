@@ -21,11 +21,10 @@ INTERPRETER = os.path.join(BUILD_DIR, "tools/neura-interpreter/neura-interpreter
 from torch_mlir import compile as tm_compile, OutputType
 
 # Models: (name, py_file, input_shape)
-# Uses no-ReLU variants where original fails at --neura-conversion
 MODELS = [
     ("simple_matmul",        "simple_matmul",         [4, 8]),
-    ("residual_block",       "residual_block_norelu", [4, 8]),
-    ("two_layer_mlp",        "two_layer_mlp_norelu",  [2, 8]),
+    ("residual_block",       "residual_block",        [4, 8]),
+    ("two_layer_mlp",        "two_layer_mlp",         [2, 8]),
     ("conv2d_relu_pool",     "conv2d_relu_pool",      [1, 9]),
     ("transformer_attention","transformer_attention", [4, 8]),
     ("gelu_layernorm",       "gelu_layernorm",        [4, 8]),

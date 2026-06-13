@@ -444,6 +444,20 @@ struct ArithOrIToNeuraOr : public OpRewritePattern<mlir::arith::OrIOp> {
   }
 };
 
+// math.exp(x) → neura.exp(x)
+struct MathExpToNeuraExp : public OpRewritePattern<mlir::math::ExpOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(mlir::math::ExpOp op,
+                                PatternRewriter &rewriter) const override {
+    Value input = op.getOperand();
+    Type result_type = op.getType();
+
+    rewriter.replaceOpWithNewOp<neura::ExpOp>(op, result_type, input);
+    return success();
+  }
+};
+
 // math.rsqrt(x) → neura.rsqrt(x)
 struct MathRsqrtToNeuraRsqrt : public OpRewritePattern<mlir::math::RsqrtOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -484,7 +498,7 @@ struct LowerArithToNeuraPass
         ArithMulIToNeuraMul, ArithDivSIToNeuraDiv, ArithRemSIToNeuraOp,
         ArithMinimumFToNeuraFCmpSel, ArithMaximumFToNeuraFCmpSel,
         ArithAndIToNeuraAnd, ArithOrIToNeuraOr,
-        MathRsqrtToNeuraRsqrt>(context);
+        MathExpToNeuraExp, MathRsqrtToNeuraRsqrt>(context);
     return patterns;
   }
 

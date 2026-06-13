@@ -98,23 +98,32 @@ def export_pytorch_to_linalg(
 
     try:
         if dynamic_dims:
-            # For dynamic shapes, use make_fx + export path
-            from torch.export import Dim
-            from torch_mlir import make_fx
+            # Export with dynamic shapes using torch.export + torch_mlir.compile.
+            from torch.export import Dim, export
             dynamic_shapes = {}
             for tensor_name, dim_map in dynamic_dims.items():
                 dynamic_shapes[tensor_name] = {
                     dim: Dim(f"d{dim}", min=d["min"], max=d["max"])
                     for dim, d in dim_map.items()
                 }
-            # dynamic path not fully supported in this version; fallback
-            print("[neura_pipeline] Warning: dynamic shapes not supported in "
-                  "current torch-mlir version, using static shape", file=sys.stderr)
-
-        mlir_module = torch_mlir_compile(
-            model, example_input,
-            output_type=OutputType.LINALG_ON_TENSORS,
-        )
+            try:
+                exported = export(model, (example_input,),
+                                  dynamic_shapes=dynamic_shapes)
+                mlir_module = torch_mlir_compile(
+                    exported, output_type=OutputType.LINALG_ON_TENSORS)
+                print(f"[neura_pipeline] Exported with dynamic shapes "
+                      f"→ {output_mlir}")
+            except (ImportError, TypeError, AttributeError) as e:
+                print(f"[neura_pipeline] Dynamic shape export failed ({e}), "
+                      "falling back to static shape", file=sys.stderr)
+                mlir_module = torch_mlir_compile(
+                    model, example_input,
+                    output_type=OutputType.LINALG_ON_TENSORS)
+        else:
+            mlir_module = torch_mlir_compile(
+                model, example_input,
+                output_type=OutputType.LINALG_ON_TENSORS,
+            )
         with open(output_mlir, "w") as f:
             f.write(str(mlir_module))
         print(f"[neura_pipeline] Exported Linalg-on-Tensors IR → {output_mlir}")

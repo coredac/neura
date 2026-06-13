@@ -2031,25 +2031,16 @@ bool handleFCmpOp(
                  << rhs.value << ", [pred = " << rhs.predicate << "]\n";
   }
 
-  // TODO: Support comparison with a constant value.
+  // Predication is handled through the operands' PredicatedData:
+  // if either operand's predicate is false (NaN/disabled), the result
+  // predicate will also be false.
   bool pred = true;
-  // if (op.getNumOperands() > 2) {
-  //   auto pred_data = value_to_predicated_data_map[op.getPredicate()];
-  //   pred = pred_data.predicate && (pred_data.value != 0.0f);
-  //   if (isVerboseMode()) {
-  //     llvm::outs() << "[neura-interpreter]  ├─ Execution Context\n";
-  //     llvm::outs() << "[neura-interpreter]  │  └─ Pred           : value = "
-  //                  << pred_data.value << ", [pred = " << pred_data.predicate
-  //                  << "]\n";
-  //   }
-  // }
 
   bool fcmp_result = false;
   StringRef cmp_type = op.getCmpType();
   // Evaluates the comparison based on the specified type.
-  // Supports both ordered (ogt, olt, ...) and unordered (gt, lt, ...) variants.
-  // Ordered variants return false if any operand is NaN (predicate=false
-  // already handles this in our dataflow model).
+  // Supports both ordered (ogt, olt, ...) and unordered (ugt, ult, ...)
+  // variants. Ordered variants return false if any operand is NaN.
   if (cmp_type == "eq" || cmp_type == "oeq" || cmp_type == "ueq") {
     fcmp_result = (lhs.value == rhs.value);
   } else if (cmp_type == "ne" || cmp_type == "une") {
@@ -2140,18 +2131,8 @@ bool handleICmpOp(
                  << rhs.value << ", [pred = " << rhs.predicate << "]\n";
   }
 
-  // TODO: Support comparison with a constant value.
+  // Predication is handled through the operands' PredicatedData.
   bool pred = true;
-  // if (op.getNumOperands() > 2) {
-  //   auto pred_data = value_to_predicated_data_map[op.getPredicate()];
-  //   pred = pred_data.predicate && (pred_data.value != 0.0f);
-  //   if (isVerboseMode()) {
-  //     llvm::outs() << "[neura-interpreter]  ├─ Execution Context\n";
-  //     llvm::outs() << "[neura-interpreter]  │  └─ Pred           : value = "
-  //                  << pred_data.value << ", [pred = " << pred_data.predicate
-  //                  << "]\n";
-  //   }
-  // }
   // Converts stored floating-point values to signed integers (rounded to
   // nearest integer).
   int64_t s_lhs = static_cast<int64_t>(std::round(lhs.value));
@@ -2760,6 +2741,38 @@ bool handleCastOp(
  * @return bool                          True if the rsqrt is successfully
  * computed; false if there are insufficient operands
  */
+bool handleExpOp(
+    neura::ExpOp op,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Executing neura.exp:\n";
+  }
+
+  auto input = value_to_predicated_data_map[op.getInput()];
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  ├─ Input  : value = " << input.value
+                 << " [pred = " << input.predicate << "]\n";
+  }
+
+  // Compute exp(input). Clamp to avoid overflow.
+  float clamped = std::max(-88.0f, std::min(88.0f, input.value));
+  float exp_result = expf(clamped);
+
+  PredicatedData result;
+  result.value = exp_result;
+  result.predicate = input.predicate;
+  result.is_vector = false;
+
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  └─ Result : value = " << result.value
+                 << " [pred = " << result.predicate << "]\n";
+  }
+
+  value_to_predicated_data_map[op.getResult()] = result;
+  return true;
+}
+
 bool handleRsqrtOp(
     neura::RsqrtOp op,
     llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
@@ -5061,6 +5074,8 @@ OperationHandleResult handleOperation(
     result.success = handleCastOp(cast_op, value_to_predicated_data_map);
   } else if (auto rsqrt_op = dyn_cast<neura::RsqrtOp>(op)) {
     result.success = handleRsqrtOp(rsqrt_op, value_to_predicated_data_map);
+  } else if (auto exp_op = dyn_cast<neura::ExpOp>(op)) {
+    result.success = handleExpOp(exp_op, value_to_predicated_data_map);
   } else if (auto gep_op = dyn_cast<neura::GEP>(op)) {
     result.success = handleGEPOp(gep_op, value_to_predicated_data_map);
   } else if (auto br_op = dyn_cast<neura::Br>(op)) {
