@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""
-verify_kernel_iterations.py — Verify neura.kernel counter iteration counts.
-
-Validates counter behavior by inspecting interpreter verbose output:
-  - leaf-only:   upper=4 → 4 iterations
-  - nested:      root=4, relay=3, leaf=2 → 4*3*2 = 24 iterations
-  - single_iter: upper=1 → 1 iteration
-  - step=2:      upper=6, step=2 → ceil(6/2) = 3 iterations
-
-Usage:
-    python3 verify_kernel_iterations.py
-"""
+## @file verify_kernel_iterations.py
+## @brief Verify neura.kernel counter iteration counts.
+##
+## Validates counter behavior by inspecting interpreter verbose output:
+##   - leaf-only:   upper=4 → 4 iterations
+##   - nested:      root=4, relay=3, leaf=2 → 4*3*2 = 24 iterations
+##   - single_iter: upper=1 → 1 iteration
+##   - step=2:      upper=6, step=2 → ceil(6/2) = 3 iterations
+##
+## Usage:
+## @code{.sh}
+## python3 verify_kernel_iterations.py
+## @endcode
 
 import os
 import re
@@ -24,7 +25,9 @@ TEST_FILE = os.path.join(SCRIPT_DIR, "kernel_unit_tests.mlir")
 
 
 def run_verbose(mode_args=None):
-    """Run interpreter in verbose mode and return output."""
+    ## @brief Run interpreter in verbose mode and return combined output.
+    ## @param mode_args Optional list of extra CLI arguments (e.g. ["--dataflow"]).
+    ## @return stdout + stderr as a single string.
     cmd = [INTERPRETER, TEST_FILE, "--verbose"]
     if mode_args:
         cmd.extend(mode_args)
@@ -33,10 +36,10 @@ def run_verbose(mode_args=None):
 
 
 def count_iterations(output, counter_id):
-    """
-    Estimate iteration count by counting 'Counter index:' lines.
-    Each iteration prints the counter's current value once.
-    """
+    ## @brief Count how many times a counter printed its index.
+    ## @param output The raw verbose output from the interpreter.
+    ## @param counter_id The counter identifier (currently unused; left for future filtering).
+    ## @return Total number of "Counter index:" lines found.
     pattern = re.compile(r"Counter index: (\d+)")
     matches = pattern.findall(output)
     if not matches:
@@ -45,7 +48,8 @@ def count_iterations(output, counter_id):
 
 
 def test_cf_mode():
-    """Control-flow mode iteration tests."""
+    ## @brief Run control-flow mode iteration tests.
+    ## @return True if all checks pass, False otherwise.
     print("=== Control-flow Mode Iteration Tests ===")
     output = run_verbose()
 
@@ -81,7 +85,8 @@ def test_cf_mode():
 
 
 def test_df_mode():
-    """Dataflow mode iteration tests."""
+    ## @brief Run dataflow mode iteration tests.
+    ## @return True if all checks pass, False otherwise.
     print("\n=== Dataflow Mode Iteration Tests ===")
     output = run_verbose(["--dataflow"])
 
@@ -113,6 +118,8 @@ def test_df_mode():
 
 
 def main():
+    ## @brief Entry point: run CF and DF tests, print summary, exit with status.
+    ## @return None (exits via sys.exit).
     results = []
     results.append(("Control-flow mode", test_cf_mode()))
     results.append(("Dataflow mode", test_df_mode()))
