@@ -6,6 +6,21 @@
 include "mlir/Pass/PassBase.td"
 
 //=========================================================//
+// Math Expansion Pass.
+//=========================================================//
+def ExpandMathToArith : Pass<"expand-math-to-arith", "ModuleOp"> {
+  let summary = "Expand math.fpowi and math.tanh into arith/math.exp";
+  let description = [{
+    Expands math.fpowi(constant-exponent) into chains of arith.mulf and
+    math.tanh into math.exp + arith ops. This must run before affine loop
+    conversion so that constant operands are not promoted to block arguments.
+  }];
+  let constructor = "mlir::createExpandMathToArithPass()";
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::math::MathDialect"];
+}
+
+//=========================================================//
 // Neura Conversion Passes.
 //=========================================================//
 def LowerArithToNeura : Pass<"lower-arith-to-neura", "FuncOp"> {
@@ -90,6 +105,20 @@ def ConvertTaskflowToNeura : Pass<"convert-taskflow-to-neura", "ModuleOp"> {
   let dependentDialects = ["mlir::taskflow::TaskflowDialect",
                            "mlir::neura::NeuraDialect"
                            "mlir::affine::AffineDialect"];
+}
+
+def StripTaskflowTask : Pass<"strip-taskflow-task", "ModuleOp"> {
+  let summary = "Strip taskflow.task wrappers from Neura dialect";
+  let description = [{
+    Strips taskflow.task wrappers and promotes their inner operations
+    (neura.kernel, arith constants, etc.) to the parent function level,
+    producing pure Neura dialect output.
+  }];
+  let constructor = "mlir::createStripTaskflowTaskPass()";
+  let dependentDialects = ["mlir::neura::NeuraDialect",
+                           "mlir::taskflow::TaskflowDialect",
+                           "mlir::func::FuncDialect",
+                           "mlir::memref::MemRefDialect"];
 }
 
 def FoldSubView : Pass<"fold-subview", "func::FuncOp"> {

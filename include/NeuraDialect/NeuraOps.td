@@ -448,6 +448,32 @@ def Neura_CastOp : Op<NeuraDialect, "cast"> {
   // attr-dict";
 }
 
+// Defines a reciprocal square root operation (1/sqrt(x)).
+def Neura_RsqrtOp : Op<NeuraDialect, "rsqrt"> {
+  let summary = "Reciprocal square root operation";
+  let description = [{
+    Computes the reciprocal square root of the input value: result = 1/sqrt(input).
+
+    Example:
+      %r = neura.rsqrt %x : f32
+  }];
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+}
+
+// Defines an exponential operation (exp).
+def Neura_ExpOp : Op<NeuraDialect, "exp"> {
+  let summary = "Exponential operation";
+  let description = [{
+    Computes the exponential of the input value: result = exp(input).
+
+    Example:
+      %r = neura.exp %x : f32
+  }];
+  let arguments = (ins AnyType:$input);
+  let results = (outs AnyType:$result);
+}
+
 // Defines an alloca operation for memory allocation.
 def Neura_AllocaOp : Op<NeuraDialect, "alloca"> {
   let summary = "Memory allocation operation";

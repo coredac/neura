@@ -118,6 +118,10 @@ int main(int argc, char **argv) {
       registry);
 
   mlir::neura::registerPasses();
+  mlir::neura::registerNeuraConversionPassPipeline();
+  mlir::neura::registerPythonToNeuraPassPipeline();
+  mlir::taskflow::registerLinalgToAffineConversionPassPipeline();
+  mlir::taskflow::registerTaskflowConversionPassPipeline();
   mlir::registerAllPasses();
   mlir::registerPasses();
   mlir::registerViewOpGraphPass();

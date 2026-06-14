@@ -49,6 +49,11 @@ struct FuseFAddFAddPattern : public OpRewritePattern<neura::FAddOp> {
       return failure();
     }
 
+    // Bail out if the first fadd's rhs is attribute-sourced (null Value).
+    if (!first.getRhs()) {
+      return failure();
+    }
+
     Location loc = second.getLoc();
     Type type = second.getType();
 
@@ -94,6 +99,11 @@ struct FuseFMulFAddPattern : public OpRewritePattern<neura::FAddOp> {
 
     // Optionally fuses if fmul has a single use.
     if (!fmul->hasOneUse()) {
+      return failure();
+    }
+
+    // Bail out if the fmul's rhs is attribute-sourced (null Value).
+    if (!fmul.getRhs()) {
       return failure();
     }
 
@@ -207,6 +217,11 @@ struct FuseMulAddPattern : public OpRewritePattern<neura::AddOp> {
 
     // Only fuses if mul has a single use.
     if (!mul->hasOneUse()) {
+      return failure();
+    }
+
+    // Bail out if the mul's rhs is attribute-sourced (null Value).
+    if (!mul.getRhs()) {
       return failure();
     }
 

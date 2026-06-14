@@ -1,0 +1,9 @@
+name: neura-torch
+channels:
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+    - torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu
+    - torch-mlir@https://github.com/ShangkunLi/python-wheels/releases/download/v1.0/torch_mlir-20251210.657-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
