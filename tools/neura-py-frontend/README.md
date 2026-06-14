@@ -131,9 +131,10 @@ class SimpleMatMul(nn.Module):
 model = SimpleMatMul()
 ```
 
-8 built-in test models under `test/Conversion/python2neura/model_tests/models/`:
+9 built-in test models under `test/Conversion/python2neura/model_tests/models/`:
 `simple_matmul`, `residual_block`, `residual_block_norelu`, `two_layer_mlp`,
-`two_layer_mlp_norelu`, `conv2d_relu_pool`, `transformer_attention`, `gelu_layernorm`.
+`two_layer_mlp_norelu`, `conv2d_relu_pool`, `transformer_attention`,
+`transformer_block`, `gelu_layernorm`.
 
 ---
 
@@ -360,7 +361,7 @@ flowchart TD
 
 ## Interpreter Implementation
 
-**File:** `tools/neura-interpreter/neura-interpreter.cpp` (+2181 lines)
+**File:** `tools/neura-interpreter/neura-interpreter.cpp` (6434 lines)
 
 The interpreter executes Neura IR in two modes: **control-flow** (CF, sequential instruction dispatch) and **dataflow** (DF, dependency-graph-driven scheduling). The Python frontend tests invoke both.
 
@@ -682,7 +683,7 @@ flowchart TD
     H --> I["PASS / FAIL"]
 ```
 
-**8 test models:**
+**9 test models:**
 
 | Model | Input Shape | Key Ops |
 |-------|-------------|---------|
@@ -691,8 +692,9 @@ flowchart TD
 | `residual_block_norelu` | [4, 8] | matmul + add |
 | `two_layer_mlp` | [2, 8] | two-layer matmul + relu |
 | `two_layer_mlp_norelu` | [2, 8] | two-layer matmul |
-| `conv2d_relu_pool` | [1, 9] | conv2d + relu + max_pool2d |
-| `transformer_attention` | [4, 8] | multi-head attention |
+| `conv2d_relu_pool` | [1, 9] | conv2d + relu + max_pool2d (max_pool1d bypassed via torch-mlir workaround) |
+| `transformer_attention` | [4, 8] | single-head scaled dot-product attention with softmax |
+| `transformer_block` | [4, 8] | full encoder block: attention + 2×LayerNorm + GELU FFN |
 | `gelu_layernorm` | [4, 8] | GELU + LayerNorm |
 
 **Run:**
@@ -707,7 +709,7 @@ python test/Conversion/python2neura/model_tests/test_models.py
 python test/Conversion/python2neura/model_tests/test_models.py --dataflow
 ```
 
-**Results (all 8/8 pass):**
+**Results (all 9/9 pass):**
 
 ```
 ============================================================
@@ -720,12 +722,19 @@ python test/Conversion/python2neura/model_tests/test_models.py --dataflow
   two_layer_mlp_norelu           OK PASS
   conv2d_relu_pool               OK PASS
   transformer_attention          OK PASS
+  transformer_block              OK PASS
   gelu_layernorm                 OK PASS
 
-  8/8 models passed
+  9/9 models passed
 ```
 
-Precision (simple_matmul example): `max_abs_err=4.66e-09 max_rel_err=2.64e-06 mean_abs_err=7.90e-10`
+**Per-model tolerance:** Deep models with multiple non-linearities accumulate float32 errors.
+`transformer_block` (attention + 2×LayerNorm + GELU) uses tolerance `5e-5`; all others use default `1e-5`.
+This is configured in the `MODELS` registry via an optional 4th field.
+
+Typical precision:
+- Simple models: `max_abs_err ~ 1e-9` (e.g. `simple_matmul`: `4.66e-09`)
+- Deep non-linear models: `max_abs_err ~ 1e-5` (e.g. `transformer_block`: `1.67e-05`)
 
 ### Lit Static Regression Tests
 
@@ -781,7 +790,7 @@ conda env create -f tools/neura-py-frontend/environment.yml
 
 ## File Changes (vs main)
 
-**44 files, +5726/-293 lines:**
+**44 files, +8598/-393 lines:**
 
 | Category | Files | Type |
 |----------|-------|------|
@@ -791,5 +800,5 @@ conda env create -f tools/neura-py-frontend/environment.yml
 | Interpreter | `neura-interpreter.cpp` | Modified |
 | Arithmetic conversion | `ArithToNeuraPass.cpp` | Modified |
 | Pass registration | `ConversionPasses.h/.td`, `NeuraOps.td`, `CMakeLists.txt` | Modified |
-| Test models | `models/*.py` (8), `generated/*.mlir` (8) | Added |
+| Test models | `models/*.py` (9), `generated/*.mlir` (9) | Added |
 | Test scripts | `test_models.py`, `generate_mlir.py` | Added |

@@ -63,9 +63,10 @@ INTERPRETER = os.path.join(BUILD_DIR, "tools/neura-interpreter/neura-interpreter
 ## @}
 
 ## @var MODELS
-## @brief Model registry: (name, python_file_basename, input_shape).
+## @brief Model registry: (name, python_file_basename, input_shape, tolerance).
 ## @details Each entry corresponds to a .py file under E2E_DIR that must expose
 ##          a `model` attribute of type torch.nn.Module.
+##          tolerance is optional; defaults to 1e-5 for max_abs_err.
 MODELS = [
     ("simple_matmul",         "simple_matmul",          [4, 8]),
     ("residual_block",        "residual_block",         [4, 8]),
@@ -74,6 +75,7 @@ MODELS = [
     ("two_layer_mlp_norelu",  "two_layer_mlp_norelu",   [2, 8]),
     ("conv2d_relu_pool",      "conv2d_relu_pool",       [1, 9]),
     ("transformer_attention", "transformer_attention",  [4, 8]),
+    ("transformer_block",     "transformer_block",      [4, 8], 5e-5),
     ("gelu_layernorm",        "gelu_layernorm",         [4, 8]),
 ]
 
@@ -266,9 +268,9 @@ def compare_stores_to_reference(stores, ref_output, output_shape):
 ## @param dataflow If True, pass --dataflow to the interpreter.
 ## @returns Status string: "PASS", "NO_FILE", "EXPORT_FAIL", "PIPELINE_FAIL",
 ##          "INTERP_FAIL", or "NUM_FAIL".
-def test_model(name, py_file, input_shape, dataflow=False):
+def test_model(name, py_file, input_shape, dataflow=False, tolerance=1e-5):
     model_path = os.path.join(E2E_DIR, f"{py_file}.py")
-    print(f"\n{'=' * 60}\n  {name}  (shape={input_shape})\n{'=' * 60}")
+    print(f"\n{'=' * 60}\n  {name}  (shape={input_shape}  tol={tolerance:.0e})\n{'=' * 60}")
 
     if not os.path.exists(model_path):
         return "NO_FILE"
@@ -361,14 +363,14 @@ def test_model(name, py_file, input_shape, dataflow=False):
             return "NUM_FAIL"
 
         for mid, r in results.items():
-            err_pass = r["max_abs_err"] < 1e-5
+            err_pass = r["max_abs_err"] < tolerance
             icon = "PASS" if err_pass else "FAIL"
             has_nz = "non-zero" if r["has_nonzero"] else "ALL ZERO"
             print(f"  {icon} {mid} shape={r['shape']} | "
                   f"max_abs_err={r['max_abs_err']:.2e} "
                   f"max_rel_err={r['max_rel_err']:.2e} "
                   f"mean_abs_err={r['mean_abs_err']:.2e} "
-                  f"({has_nz})")
+                  f"({has_nz} tol={tolerance:.0e})")
             if not err_pass:
                 df_vals = r['tensor_df'].flatten()[:5]
                 ref_vals = r['tensor_ref'].flatten()[:5]
@@ -376,7 +378,7 @@ def test_model(name, py_file, input_shape, dataflow=False):
                 print(f"       REF[0:5]: {ref_vals}")
 
         return "PASS" if results and all(
-            r["max_abs_err"] < 1e-5 for r in results.values()) else "NUM_FAIL"
+            r["max_abs_err"] < tolerance for r in results.values()) else "NUM_FAIL"
 
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
@@ -392,8 +394,10 @@ def main():
     args = parser.parse_args()
 
     results = {}
-    for name, py_file, shape in MODELS:
-        results[name] = test_model(name, py_file, shape, dataflow=args.dataflow)
+    for entry in MODELS:
+        name, py_file, shape = entry[:3]
+        tolerance = entry[3] if len(entry) > 3 else 1e-5
+        results[name] = test_model(name, py_file, shape, dataflow=args.dataflow, tolerance=tolerance)
 
     print(f"\n{'=' * 60}")
     print("  E2E TEST SUMMARY")

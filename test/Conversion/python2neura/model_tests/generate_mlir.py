@@ -75,6 +75,7 @@ MODELS = [
     ("two_layer_mlp_norelu", "two_layer_mlp_norelu",  [2, 8]),
     ("conv2d_relu_pool",     "conv2d_relu_pool",      [1, 9]),
     ("transformer_attention","transformer_attention", [4, 8]),
+    ("transformer_block",    "transformer_block",     [4, 8]),
     ("gelu_layernorm",       "gelu_layernorm",        [4, 8]),
 ]
 
@@ -100,25 +101,6 @@ DATAFLOW_PASSES = [
     "--fuse-pattern",
     "--insert-data-mov",
 ]
-
-## @var _ALL_COMPUTE_OPS
-## @brief Complete list of neura compute ops that may appear in dataflow IR.
-## @details Used by _generate_dataflow_checks() to auto-detect which ops
-##          are present and emit the corresponding CHECK-DAG lines.
-_ALL_COMPUTE_OPS = [
-    "neura.fmul_fadd",
-    "neura.fadd",
-    "neura.relu",
-    "neura.tanh",
-    "neura.sigmoid",
-    "neura.erf",
-    "neura.fcmp",
-    "neura.fsub",
-    "neura.fdiv",
-    "neura.fmax",
-    "neura.fmul",
-]
-
 
 ## @brief Locate the mlir-neura-opt binary.
 ## @details Searches the build directory first, then falls back to PATH.
@@ -179,60 +161,93 @@ def _run_dataflow_interpreter(dataflow_mlir: str):
 ## @brief Generate FileCheck patterns from dataflow IR and interpreter output.
 ## @param dataflow_mlir Path to the dataflow IR .mlir file.
 ## @param interpreter_output stdout captured from neura-interpreter.
-## @return String containing DATAFLOW_IR-DAG and INTERPRETER_OUTPUT-DAG/NOT lines.
+## @return String containing DATAFLOW_IR and INTERPRETER_OUTPUT check lines.
 ## @details
-## Structural checks (DATAFLOW_IR-DAG):
-##   - module with torch.debug_module_name
-##   - func.func @forward with dataflow_mode="predicate"
-##   - neura.kernel, neura.counter, neura.load_indexed, neura.store_indexed
-##   - Compute ops auto-detected from #_ALL_COMPUTE_OPS
-##   - neura.yield
+## Structural checks (DATAFLOW_IR):
+##   Every significant non-empty line from the dataflow IR is emitted as a
+##   plain CHECK pattern (in-order but tolerant of blank/separator lines).
+##   {-# ... #-} dialect_resource blocks are skipped entirely.
+##   Huge dense<> constants are shortened with "...".
 ##
-## Value checks (INTERPRETER_OUTPUT-DAG):
-##   - "Store to m" for store existence
-##   - "Output: <value>" for the deterministic final output
-##
-## Error checks (INTERPRETER_OUTPUT-NOT):
-##   - Error, Failed, Unhandled
+## Value checks (INTERPRETER_OUTPUT):
+##   Only summary-level lines are kept: Store events, iteration count,
+##   return / output values, and NOT guards for Error/Failed/Unhandled.
+##   Per-operation trace details are omitted for brevity.
 def _generate_dataflow_checks(dataflow_mlir: str, interpreter_output: str) -> str:
     checks = []
 
     # --- Read the dataflow IR content ---
     with open(dataflow_mlir) as f:
-        df_content = f.read()
+        df_lines = f.readlines()
 
-    # --- DATAFLOW_IR: structural checks using CHECK-DAG ---
-    # DAG ordering avoids sensitivity to operation order in the generated IR.
-    checks.append('// DATAFLOW_IR-DAG: module attributes {torch.debug_module_name')
-    checks.append('// DATAFLOW_IR-DAG: func.func @forward')
-    checks.append('// DATAFLOW_IR-DAG: dataflow_mode = "predicate"')
-    checks.append("// DATAFLOW_IR-DAG: neura.kernel")
-    checks.append("// DATAFLOW_IR-DAG: neura.counter")
-    checks.append("// DATAFLOW_IR-DAG: neura.load_indexed")
-    checks.append("// DATAFLOW_IR-DAG: neura.store_indexed")
-
-    # Auto-detect present compute ops, dropping sub-string matches
-    present_ops = [op for op in _ALL_COMPUTE_OPS if op in df_content]
-    selected = []
-    for op in present_ops:
-        if any(longer for longer in present_ops if longer != op and op in longer):
+    # ---- DATAFLOW_IR: exact line-by-line structural verification -----
+    # First line uses plain CHECK, remaining lines use -NEXT for strict
+    # adjacent matching.  Blank lines and dialect_resource blocks are skipped.
+    in_resource_block = False
+    first = True
+    for line in df_lines:
+        stripped = line.strip()
+        if not stripped:
             continue
-        selected.append(op)
-    for op_name in selected:
-        checks.append(f"// DATAFLOW_IR-DAG: {op_name}")
+        if stripped.startswith("{-#"):
+            in_resource_block = True
+            continue
+        if in_resource_block:
+            if stripped.startswith("#-}"):
+                in_resource_block = False
+            continue
+        stripped = re.sub(r'dense<"[^"]{40,}">', 'dense<"...">', stripped)
+        prefix = "DATAFLOW_IR" if first else "DATAFLOW_IR-NEXT"
+        first = False
+        checks.append(f"// {prefix}: {stripped}")
 
-    checks.append("// DATAFLOW_IR-DAG: neura.yield")
-
-    # --- INTERPRETER_OUTPUT: value checks + no-error checks ---
+    # ---- INTERPRETER_OUTPUT: key execution events only -----
+    # Keep only summary-level lines: Store events, iteration count,
+    # return / output, and no-error guards.  Per-op trace details are omitted.
+    # Use plain CHECK (no -NEXT) because key lines are sparse in the output.
+    #
+    # "→ Output" triggers multi-line capture: when a line contains it, all
+    # subsequent non-empty lines are captured until we encounter another
+    # "[neura-interpreter]" line or EOF.  This handles the multi-line memref
+    # dump format, e.g.:
+    #   → Output memref<4x16xf32>:
+    #     [4.509688e-03 -2.552128e-03 ... -8.578561e-03
+    #      4.509643e-03 -2.552100e-03 ... -8.578470e-03
+    #      4.509640e-03 -2.552098e-03 ... -8.578463e-03
+    #      4.509651e-03 -2.552104e-03 ... -8.578483e-03]
     if interpreter_output:
-        if re.search(r'Store to m\d+/', interpreter_output):
-            checks.append("// INTERPRETER_OUTPUT-DAG: Store to m")
+        _KEY_PATTERNS = [
+            r"Executing func\.return",
+            r"→ Output",
+        ]
+        checks.append("")  # blank separator between DATAFLOW and INTERPRETER sections
 
+        in_output_block = False
+        first_line = True
         for line in interpreter_output.split("\n"):
-            m = re.search(r'Output:\s*([-\d.e+]+)', line)
-            if m:
-                checks.append(f"// INTERPRETER_OUTPUT-DAG: Output: {m.group(1)}")
-                break
+            stripped = line.strip()
+            if not stripped:
+                in_output_block = False
+                continue
+
+            # If we are inside a multi-line → Output block, keep capturing
+            # until we see the next "[neura-interpreter]" event line.
+            if in_output_block:
+                if stripped.startswith("[neura-interpreter]"):
+                    in_output_block = False
+                    # Fall through to check if this line matches a key pattern
+                else:
+                    prefix = "INTERPRETER_OUTPUT" if first_line else "INTERPRETER_OUTPUT-NEXT"
+                    first_line = False
+                    checks.append(f"// {prefix}: {stripped}")
+                    continue
+
+            if any(re.search(pat, stripped) for pat in _KEY_PATTERNS):
+                prefix = "INTERPRETER_OUTPUT" if first_line else "INTERPRETER_OUTPUT-NEXT"
+                first_line = False
+                checks.append(f"// {prefix}: {stripped}")
+                if "→ Output" in stripped:
+                    in_output_block = True
 
         checks.append("// INTERPRETER_OUTPUT-NOT: Error")
         checks.append("// INTERPRETER_OUTPUT-NOT: Failed")
