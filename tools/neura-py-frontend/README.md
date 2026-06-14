@@ -482,28 +482,29 @@ flowchart TD
 `neura.kernel` is the fundamental **hardware computation unit** in Neura. It marks a region to be offloaded to a CGRA (Coarse-Grained Reconfigurable Architecture) accelerator.
 
 ```mermaid
-flowchart TD
-    subgraph Func["func.func @main"]
-        subgraph CPU["CPU"]
-            Alloc["memref.alloc"]
-            Return["func.return"]
-        end
-        subgraph CGRA["CGRA (neura.kernel)"]
-            Block["bb0(%arg0)"]
-            Ctr["neura.counter\nlower=0 upper=4 step=1"]
-            Load(["load_indexed %arg0[i]"])
-            Fmul(["fmul %v, %v"])
-            Store(["store_indexed %r → %arg0[i]"])
-            Yield["neura.yield"]
-        end
-
-        Alloc -->|"inputs"| Block
-        Block --> Ctr
-        Ctr -->|"index"| Load
-        Ctr -.->|"pred"| Load
-        Load --> Fmul --> Store --> Yield
-        Yield -->|"results"| Return
+flowchart LR
+    subgraph CPU["CPU"]
+        Alloc["memref.alloc"]
+        Const["arith.constant"]
     end
+
+    CPU -->|"inputs (memrefs, scalars)"| CGRA
+
+    subgraph CGRA["CGRA — neura.kernel"]
+        BB["bb0(%arg0)"]
+        Ctr["neura.counter\n(lower=0, upper=4, step=1)"]
+        Load(["load_indexed %arg0[i]"])
+        Fmul(["fmul %v, %v"])
+        Store(["store_indexed %r → %arg0[i]"])
+        Yield["neura.yield"]
+
+        BB --> Ctr
+        Ctr -->|"index"| Load
+        Ctr -.->|"predicate"| Load
+        Load --> Fmul --> Store --> Yield
+    end
+
+    CGRA -->|"results"| Return["func.return"]
 ```
 
 **IR structure:**
@@ -741,14 +742,6 @@ python test/Conversion/python2neura/model_tests/generate_mlir.py \
     --output-dir test/Conversion/python2neura/model_tests/generated --lit
 ```
 
-### Removed Files
-
-| File | Reason |
-|------|--------|
-| `verify_models.py` | Superseded by `test_models.py` |
-| `compare_df_numerics.py` | Merged into `test_models.py` |
-| `test/.../environment.yml` | Moved to `tools/neura-py-frontend/environment.yml` |
-
 ---
 
 ## Key Fixes Summary
@@ -795,9 +788,8 @@ conda env create -f tools/neura-py-frontend/environment.yml
 | Frontend scripts | `neura_pipeline.py`, `neura-py-frontend.sh`, `CMakeLists.txt` | Added |
 | Docs & config | `README.md`, `environment.yml` | Added |
 | New passes | `ExpandMathToArith/`, `StripTaskflowTaskPass.cpp` | Added |
-| Interpreter | `neura-interpreter.cpp` | +2181 lines |
-| Arithmetic conversion | `ArithToNeuraPass.cpp` | +193 lines |
+| Interpreter | `neura-interpreter.cpp` | Modified |
+| Arithmetic conversion | `ArithToNeuraPass.cpp` | Modified |
 | Pass registration | `ConversionPasses.h/.td`, `NeuraOps.td`, `CMakeLists.txt` | Modified |
 | Test models | `models/*.py` (8), `generated/*.mlir` (8) | Added |
 | Test scripts | `test_models.py`, `generate_mlir.py` | Added |
-| Deprecated cleanup | `verify_models.py`, `compare_df_numerics.py`, old `environment.yml` | Deleted |
