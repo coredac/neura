@@ -601,9 +601,8 @@ public:
           std::function<void()> task;
           {
             std::unique_lock<std::mutex> lock(this->queue_mutex);
-            this->condition.wait(lock, [this] {
-              return this->stop || !this->tasks.empty();
-            });
+            this->condition.wait(
+                lock, [this] { return this->stop || !this->tasks.empty(); });
             if (this->stop && this->tasks.empty())
               return;
             task = std::move(this->tasks.front());
@@ -754,6 +753,9 @@ struct Frame {
   SmallVector<Value> counter_values;
   // The kernel body block to jump back to on loop continuation.
   Block *kernel_body;
+
+  Frame(Block *b, size_t i, Block *lb, Block *kb = nullptr)
+      : block(b), index(i), last_block(lb), kernel_body(kb) {}
 };
 
 /**
@@ -765,8 +767,8 @@ struct Frame {
  * @param group The kernel group to analyze.
  * @return Vector of memref Values that this kernel writes to.
  */
-SmallVector<Value> KernelDependencyGraph::getWrittenMemRefs(
-    const KernelGroup &group) {
+SmallVector<Value>
+KernelDependencyGraph::getWrittenMemRefs(const KernelGroup &group) {
   SmallVector<Value> writtenMemRefs;
   auto kernel = cast<neura::KernelOp>(group.kernel_op);
   auto inputs = kernel.getInputs();
@@ -786,13 +788,13 @@ SmallVector<Value> KernelDependencyGraph::getWrittenMemRefs(
     else if (auto storeOp = dyn_cast<neura::StoreIndexedOp>(op)) {
       // First, try to get written memref from the base operand
       Value base = storeOp.getBase();
-      
+
       // Try to resolve the base to a kernel input (if base is valid)
       Value resolved_base;
       if (base) {
         resolved_base = resolveKernelBlockArg(base);
       }
-      
+
       // Check if resolved_base is valid and matches any kernel input
       if (resolved_base) {
         for (size_t i = 0; i < inputs.size(); ++i) {
@@ -816,7 +818,7 @@ SmallVector<Value> KernelDependencyGraph::getWrittenMemRefs(
           }
         }
       }
-      
+
       // Fallback: try to get memref from attributes (rhs_value/lhs_value)
       std::string attr_str;
       if (auto attr = op->getAttrOfType<mlir::StringAttr>("rhs_value"))
@@ -825,7 +827,8 @@ SmallVector<Value> KernelDependencyGraph::getWrittenMemRefs(
         attr_str = attr.getValue().str();
 
       // Parse "%inputN" to get index N
-      if (!attr_str.empty() && attr_str.size() >= 7 && attr_str.substr(0, 6) == "%input") {
+      if (!attr_str.empty() && attr_str.size() >= 7 &&
+          attr_str.substr(0, 6) == "%input") {
         try {
           int n = std::stoi(attr_str.substr(6));
           if (n >= 0 && n < static_cast<int>(inputs.size())) {
@@ -866,7 +869,7 @@ SmallVector<Value> KernelDependencyGraph::getWrittenMemRefs(
  * @return true if there's a memref dependency.
  */
 bool KernelDependencyGraph::hasMemRefDependency(const KernelGroup &groupA,
-                                               const KernelGroup &groupB) {
+                                                const KernelGroup &groupB) {
   auto kernelA = cast<neura::KernelOp>(groupA.kernel_op);
   auto kernelB = cast<neura::KernelOp>(groupB.kernel_op);
 
@@ -912,14 +915,15 @@ bool KernelDependencyGraph::hasMemRefDependency(const KernelGroup &groupA,
  *
  * Checks for two types of dependencies:
  * 1. RAW (Read-After-Write): B reads what A writes -> B depends on A
- * 2. WAW (Write-After-Write): Both write the same memref -> B depends on A (arbitrary choice for determinism)
+ * 2. WAW (Write-After-Write): Both write the same memref -> B depends on A
+ * (arbitrary choice for determinism)
  *
  * @param groupA First kernel group.
  * @param groupB Second kernel group.
  * @param idxA Index of groupA in the kernel list.
  * @param idxB Index of groupB in the kernel list.
  */
-void KernelDependencyGraph::addDependency(const KernelGroup &groupA, 
+void KernelDependencyGraph::addDependency(const KernelGroup &groupA,
                                           const KernelGroup &groupB,
                                           size_t idxA, size_t idxB) {
   // Get written memrefs for each kernel
@@ -997,8 +1001,8 @@ void KernelDependencyGraph::build(const SmallVector<KernelGroup> &groups) {
  * @param completed Vector indicating which kernels have completed.
  * @return Vector of kernel indices that can now execute.
  */
-std::vector<size_t> KernelDependencyGraph::getReadyKernels(
-    const std::vector<bool> &completed) {
+std::vector<size_t>
+KernelDependencyGraph::getReadyKernels(const std::vector<bool> &completed) {
   std::vector<size_t> ready;
   for (size_t i = 0; i < dependencies.size(); ++i) {
     if (completed[i])
@@ -2563,7 +2567,8 @@ bool handleFuncReturnOp(
 
     llvm::outs() << "[neura-interpreter]  → Output memref<";
     for (unsigned i = 0; i < shape.size(); ++i) {
-      if (i > 0) llvm::outs() << "x";
+      if (i > 0)
+        llvm::outs() << "x";
       llvm::outs() << shape[i];
     }
     llvm::outs() << "xf32>:\n";
@@ -2575,8 +2580,7 @@ bool handleFuncReturnOp(
         std::string key = "m" + std::to_string(mem_id) + "/";
         for (int64_t c : coords)
           key += "[" + std::to_string(c) + "]";
-        float val =
-            simulated_memory.count(key) ? simulated_memory[key] : 0.0f;
+        float val = simulated_memory.count(key) ? simulated_memory[key] : 0.0f;
         llvm::outs() << llvm::format("%.6e", val);
         return;
       }
@@ -5777,8 +5781,10 @@ bool executeOperation(
  * @brief Collects kernel groups and non-kernel operations from a function.
  *
  * Separates the function body into:
- * - Kernel groups: neura.kernel operations with their body ops and counter values
- * - Non-kernel ops: initialization operations (arith.constant, memref.alloc, etc.)
+ * - Kernel groups: neura.kernel operations with their body ops and counter
+ * values
+ * - Non-kernel ops: initialization operations (arith.constant, memref.alloc,
+ * etc.)
  *
  * @param func               The MLIR function to analyze
  * @param kernel_groups      Output vector of kernel groups
@@ -5843,7 +5849,7 @@ static int executeNonKernelOperations(
     for (Operation *op : ready) {
       bool ignored_terminate = false;
       if (!executeOperation(op, value_to_predicated_data_map,
-                           ignored_terminate)) {
+                            ignored_terminate)) {
         return EXIT_FAILURE;
       }
       init_graph.updateAfterExecution(op);
@@ -5937,7 +5943,8 @@ static bool executeKernelDFG(
 
     if (ready.empty()) {
       bool has_iterations = advanceCountersNested(group.counter_values);
-      if (!has_iterations) break;
+      if (!has_iterations)
+        break;
 
       if (dfg_count >= MAX_DFG_ITERATIONS) {
         if (isVerboseMode()) {
@@ -5952,7 +5959,8 @@ static bool executeKernelDFG(
       auto resetValues = [&]() {
         for (auto &entry : value_to_predicated_data_map) {
           Value val = entry.first;
-          if (isa<BlockArgument>(val)) continue;
+          if (isa<BlockArgument>(val))
+            continue;
           if (val.getDefiningOp() &&
               (isa<neura::ConstantOp>(val.getDefiningOp()) ||
                isa<mlir::arith::ConstantOp>(val.getDefiningOp()) ||
@@ -5979,24 +5987,444 @@ static bool executeKernelDFG(
   }
 
   if (isVerboseMode()) {
-    llvm::outs() << "[neura-interpreter]  Kernel finished after "
-                 << dfg_count << " DFG iterations\n";
+    llvm::outs() << "[neura-interpreter]  Kernel finished after " << dfg_count
+                 << " DFG iterations\n";
   }
 
   return true;
 }
 
 /**
- * @brief Main interpreter execution function.
+ * @brief Kernel execution state for parallel mode scheduling.
+ */
+enum KernelState { PENDING, RUNNING, COMPLETED };
+
+/**
+ * @brief Detect and break circular dependencies between kernels.
  *
- * Executes a MLIR function with three execution modes:
- * - Control flow mode: Sequential execution with block-based control flow
- * - Dataflow mode: Kernel-level dataflow execution (sequential kernels)
- * - Parallel mode: Dataflow execution with kernel-level parallelism
+ * Scans the dependency graph for cycles (kernel A depends on B and B depends
+ * on A), and breaks them by removing the dependency from the later kernel to
+ * the earlier one.
+ *
+ * @param kernel_groups    Vector of kernel groups.
+ * @param kernel_dep_graph Dependency graph to analyze and modify.
+ * @return true if cycles were detected and broken, false otherwise.
+ */
+static bool detectAndBreakCycles(SmallVector<KernelGroup> &kernel_groups,
+                                 KernelDependencyGraph &kernel_dep_graph) {
+  size_t n = kernel_groups.size();
+  bool has_cycles = false;
+  for (size_t i = 0; i < n; ++i) {
+    for (size_t j = 0; j < n; ++j) {
+      if (i == j)
+        continue;
+      bool i_depends_j = false;
+      bool j_depends_i = false;
+      for (size_t dep : kernel_dep_graph.dependencies[i]) {
+        if (dep == j) {
+          i_depends_j = true;
+          break;
+        }
+      }
+      for (size_t dep : kernel_dep_graph.dependencies[j]) {
+        if (dep == i) {
+          j_depends_i = true;
+          break;
+        }
+      }
+      if (i_depends_j && j_depends_i) {
+        has_cycles = true;
+        llvm::errs() << "[neura-interpreter]  WARNING: Circular "
+                        "dependency detected between kernel "
+                     << i << " and " << j << ", breaking cycle\n";
+        auto &deps = kernel_dep_graph.dependencies[j];
+        auto it = std::find(deps.begin(), deps.end(), i);
+        if (it != deps.end()) {
+          deps.erase(it);
+        }
+        auto &deps_i = kernel_dep_graph.dependents[i];
+        auto it_i = std::find(deps_i.begin(), deps_i.end(), j);
+        if (it_i != deps_i.end()) {
+          deps_i.erase(it_i);
+        }
+      }
+    }
+  }
+  return has_cycles;
+}
+
+/**
+ * @brief Check if all dependencies of a kernel are completed.
+ *
+ * @param idx               Index of the kernel to check.
+ * @param kernel_dep_graph  Dependency graph.
+ * @param kernel_states     Current states of all kernels.
+ * @return true if all dependencies are COMPLETED.
+ */
+static bool
+areDependenciesCompleted(size_t idx,
+                         const KernelDependencyGraph &kernel_dep_graph,
+                         const std::vector<KernelState> &kernel_states) {
+  for (size_t dep : kernel_dep_graph.dependencies[idx]) {
+    if (kernel_states[dep] != COMPLETED) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * @brief Execute a function in dataflow mode.
+ *
+ * In dataflow mode, the function is treated as a dataflow graph where
+ * neura.kernel ops are the primary compute units. Execution supports both
+ * sequential (kernels in IR order) and parallel (dependency-driven) modes.
  *
  * @param func                           The MLIR function to execute
  * @param value_to_predicated_data_map    Map storing predicated data for values
- * @return int                           EXIT_SUCCESS on success, EXIT_FAILURE on error
+ * @return int                           EXIT_SUCCESS on success, EXIT_FAILURE
+ *                                       on error
+ */
+static int runDataflowMode(
+    func::FuncOp func,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  // Kernels are executed SEQUENTIALLY (in IR order) by default to prevent
+  // interleaved execution across kernels. In a flat DFG where all kernels'
+  // counters advance simultaneously, a later kernel (e.g. matmul layer 2)
+  // could read partially-computed values from an earlier kernel (e.g.
+  // matmul layer 1) that hasn't finished all its iterations yet.
+  // Sequential execution guarantees that kernel N+1 only sees the fully-
+  // computed output of kernel N.
+
+  // Collect kernel groups and non-kernel operations
+  std::vector<Operation *> non_kernel_ops;
+  SmallVector<KernelGroup> kernel_groups;
+  Operation *return_op = nullptr;
+  collectKernelGroupsFromFunc(func, kernel_groups, non_kernel_ops, return_op);
+
+  // Execute non-kernel operations (arith.constant, memref.alloc, etc.)
+  if (executeNonKernelOperations(
+          non_kernel_ops, value_to_predicated_data_map) != EXIT_SUCCESS) {
+    return EXIT_FAILURE;
+  }
+
+  // Execute kernels - either sequentially or in parallel
+  if (isParallelMode()) {
+    KernelDependencyGraph kernel_dep_graph;
+    kernel_dep_graph.build(kernel_groups);
+
+    // Debug: print dependency graph
+    if (isVerboseMode()) {
+      llvm::outs()
+          << "\n[neura-interpreter]  ===== Kernel Dependency Graph =====\n";
+      for (size_t i = 0; i < kernel_groups.size(); ++i) {
+        llvm::outs() << "[neura-interpreter]  Kernel " << i << " writes: {";
+        auto outputs =
+            KernelDependencyGraph::getWrittenMemRefs(kernel_groups[i]);
+        for (size_t j = 0; j < outputs.size(); ++j) {
+          if (j > 0)
+            llvm::outs() << ", ";
+          outputs[j].print(llvm::outs());
+        }
+        llvm::outs() << "}\n";
+
+        llvm::outs() << "[neura-interpreter]    depends on: {";
+        for (size_t j = 0; j < kernel_dep_graph.dependencies[i].size(); ++j) {
+          if (j > 0)
+            llvm::outs() << ", ";
+          llvm::outs() << kernel_dep_graph.dependencies[i][j];
+        }
+        llvm::outs() << "}\n";
+      }
+      llvm::outs() << "[neura-interpreter]  "
+                      "======================================\n\n";
+    }
+
+    // Detect and break circular dependencies
+    bool has_cycles = detectAndBreakCycles(kernel_groups, kernel_dep_graph);
+
+    // If there were cycles, fall back to sequential execution
+    // to ensure deterministic results
+    if (has_cycles) {
+      llvm::errs() << "[neura-interpreter]  WARNING: Circular dependencies "
+                      "detected, falling back to sequential execution\n";
+      for (auto &group : kernel_groups) {
+        if (!executeKernelDFG(group, value_to_predicated_data_map)) {
+          return EXIT_FAILURE;
+        }
+      }
+      if (return_op) {
+        auto handle_result =
+            handleOperation(return_op, value_to_predicated_data_map);
+        if (!handle_result.success) {
+          return EXIT_FAILURE;
+        }
+      }
+      return EXIT_SUCCESS;
+    }
+
+    ThreadPool pool;
+    std::vector<KernelState> kernel_states(kernel_groups.size(), PENDING);
+    std::vector<std::future<bool>> futures;
+    std::mutex state_mutex;
+
+    auto executeKernel = [&](size_t idx) -> bool {
+      bool result = executeKernelDFG(
+          kernel_groups[idx], value_to_predicated_data_map, &state_mutex);
+      {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        kernel_states[idx] = COMPLETED;
+      }
+      return result;
+    };
+
+    // Main parallel execution loop
+    int iteration_count = 0;
+    while (std::any_of(kernel_states.begin(), kernel_states.end(),
+                       [](KernelState s) { return s != COMPLETED; })) {
+      std::vector<size_t> ready_kernels;
+      {
+        std::lock_guard<std::mutex> lock(state_mutex);
+        for (size_t i = 0; i < kernel_groups.size(); ++i) {
+          if (kernel_states[i] == PENDING &&
+              areDependenciesCompleted(i, kernel_dep_graph, kernel_states)) {
+            kernel_states[i] = RUNNING;
+            ready_kernels.push_back(i);
+          }
+        }
+      }
+
+      if (ready_kernels.empty()) {
+        // Check if we're stuck (all kernels are PENDING but none are ready)
+        bool all_pending = true;
+        {
+          std::lock_guard<std::mutex> lock(state_mutex);
+          for (auto state : kernel_states) {
+            if (state != PENDING) {
+              all_pending = false;
+              break;
+            }
+          }
+        }
+
+        if (all_pending) {
+          // Deadlock detected - debug output
+          llvm::errs() << "[neura-interpreter]  WARNING: All kernels pending "
+                          "but none ready! Dependency graph:\n";
+          for (size_t i = 0; i < kernel_groups.size(); ++i) {
+            llvm::errs() << "[neura-interpreter]    Kernel " << i
+                         << " depends on: ";
+            if (kernel_dep_graph.dependencies[i].empty()) {
+              llvm::errs() << "(none)";
+            } else {
+              for (size_t j = 0; j < kernel_dep_graph.dependencies[i].size();
+                   ++j) {
+                if (j > 0)
+                  llvm::errs() << ", ";
+                llvm::errs() << kernel_dep_graph.dependencies[i][j];
+              }
+            }
+            llvm::errs() << "\n";
+          }
+
+          // For debugging, let's force execute all kernels sequentially if
+          // deadlocked
+          llvm::errs() << "[neura-interpreter]  Forcing sequential execution "
+                          "due to dependency issue\n";
+          {
+            std::lock_guard<std::mutex> lock(state_mutex);
+            for (size_t i = 0; i < kernel_groups.size(); ++i) {
+              if (kernel_states[i] == PENDING) {
+                kernel_states[i] = RUNNING;
+                ready_kernels.push_back(i);
+              }
+            }
+          }
+        } else {
+          // Wait a bit and retry
+          std::this_thread::sleep_for(std::chrono::microseconds(10));
+        }
+      }
+
+      if (!ready_kernels.empty()) {
+        // Launch all ready kernels
+        for (size_t idx : ready_kernels) {
+          futures.push_back(pool.enqueue(executeKernel, idx));
+        }
+
+        // Wait for all pending futures
+        for (auto &fut : futures) {
+          if (!fut.get()) {
+            return EXIT_FAILURE;
+          }
+        }
+        futures.clear();
+      }
+
+      iteration_count++;
+      if (iteration_count > 100000) {
+        llvm::errs() << "[neura-interpreter]  WARNING: Parallel execution "
+                        "loop exceeded 100000 iterations\n";
+        break;
+      }
+    }
+  } else {
+    // Execute each kernel sequentially to exhaustion.
+    for (auto &group : kernel_groups) {
+      if (!executeKernelDFG(group, value_to_predicated_data_map)) {
+        return EXIT_FAILURE;
+      }
+    }
+  }
+
+  // Execute func.return if present.
+  if (return_op) {
+    auto handle_result =
+        handleOperation(return_op, value_to_predicated_data_map);
+    if (!handle_result.success) {
+      return EXIT_FAILURE;
+    }
+  }
+
+  return EXIT_SUCCESS;
+}
+
+/**
+ * @brief Execute a function in control-flow mode.
+ *
+ * Walks operations sequentially through blocks, handling branches,
+ * nested containers (neura.kernel, taskflow.task), and loop-back
+ * via counter advancement.
+ *
+ * @param func                           The MLIR function to execute
+ * @param value_to_predicated_data_map    Map storing predicated data for values
+ * @return int                           EXIT_SUCCESS on success, EXIT_FAILURE
+ *                                       on error
+ */
+static int runControlFlowMode(
+    func::FuncOp func,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
+  Block *current_block = &func.getBody().front();
+  Block *last_visited_block = nullptr;
+  size_t op_index = 0;
+  bool is_terminated = false;
+
+  // Stack for handling nested container ops (taskflow.task, neura.kernel).
+  SmallVector<Frame> frame_stack;
+
+  // Main loop: processes operations sequentially through blocks.
+  while (!is_terminated && current_block) {
+    auto &operations = current_block->getOperations();
+    if (op_index >= operations.size()) {
+      // Reached end of block — pop from stack if we were in a nested block.
+      if (!frame_stack.empty()) {
+        Frame parent = frame_stack.pop_back_val();
+        current_block = parent.block;
+        op_index = parent.index;
+        last_visited_block = parent.last_block;
+        // Advance past the container op.
+        op_index++;
+        continue;
+      }
+      break;
+    }
+
+    Operation &op = *std::next(operations.begin(), op_index);
+
+    // Enter nested containers to execute their body ops inline.
+    if (auto kernel_op = dyn_cast<neura::KernelOp>(op)) {
+      if (!kernel_op.getBody().empty()) {
+        Block *kb = &kernel_op.getBody().front();
+        Frame frame(current_block, op_index, last_visited_block, kb);
+        // Collect counter values from kernel body for loop predicate check.
+        for (auto &body_op : *kb) {
+          if (isa<neura::CounterOp>(body_op)) {
+            frame.counter_values.push_back(body_op.getResult(0));
+          }
+        }
+        frame_stack.push_back(frame);
+        current_block = kb;
+        last_visited_block = nullptr;
+        op_index = 0;
+        continue;
+      }
+    }
+    if (auto task_op = dyn_cast<taskflow::TaskflowTaskOp>(op)) {
+      if (!task_op.getBody().empty()) {
+        // taskflow.task doesn't loop → kernel_body is defaulted to nullptr.
+        frame_stack.emplace_back(current_block, op_index, last_visited_block);
+        current_block = &task_op.getBody().front();
+        last_visited_block = nullptr;
+        op_index = 0;
+        continue;
+      }
+    }
+
+    // Processes operation with block information for control flow handling.
+    auto handle_result = handleOperation(&op, value_to_predicated_data_map,
+                                         &current_block, &last_visited_block);
+
+    if (!handle_result.success) {
+      return EXIT_FAILURE;
+    }
+    if (handle_result.is_terminated) {
+      is_terminated = true;
+      op_index++;
+    } else if (handle_result.is_branch) {
+      // Check if this is a neura.yield that needs loop-back handling.
+      if (isa<neura::YieldOp>(op) && !frame_stack.empty() &&
+          frame_stack.back().kernel_body != nullptr) {
+        // Advance counters with nested-loop carry propagation
+        // (leaf → relay → root).
+        bool more_iterations =
+            advanceCountersNested(frame_stack.back().counter_values);
+        // Update predicates in the value map so that the next
+        // handleCounterOp call reflects the new counter_state.
+        for (Value cv : frame_stack.back().counter_values) {
+          if (!value_to_predicated_data_map.count(cv))
+            continue;
+          if (!counter_state.count(cv))
+            continue;
+          int64_t cur = counter_state[cv];
+          int64_t upper = counter_upper[cv];
+          int64_t step = counter_step[cv];
+          bool in_bounds = (step > 0) ? (cur < upper) : (cur > upper);
+          value_to_predicated_data_map[cv].predicate = in_bounds;
+          value_to_predicated_data_map[cv].value = static_cast<float>(cur);
+        }
+        if (more_iterations) {
+          // Loop back to start of kernel body.
+          op_index = 0;
+        } else {
+          // All counters exhausted; pop frame to exit kernel.
+          Frame parent = frame_stack.pop_back_val();
+          current_block = parent.block;
+          op_index = parent.index + 1; // advance past kernel op
+          last_visited_block = parent.last_block;
+        }
+      } else {
+        // Normal branch: reset index to start of new block.
+        op_index = 0;
+      }
+    } else {
+      // Regular operations increment to next operation in block.
+      op_index++;
+    }
+  }
+
+  return EXIT_SUCCESS;
+}
+
+/**
+ * @brief Main interpreter execution function.
+ *
+ * Dispatches to either dataflow or control-flow execution mode based
+ * on the current interpreter configuration.
+ *
+ * @param func                           The MLIR function to execute
+ * @param value_to_predicated_data_map    Map storing predicated data for values
+ * @return int                           EXIT_SUCCESS on success, EXIT_FAILURE
+ * on error
  */
 int run(func::FuncOp func,
         llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
@@ -6004,362 +6432,9 @@ int run(func::FuncOp func,
   initMemRefArgs(func, value_to_predicated_data_map);
 
   if (isDataflowMode()) {
-    // ===== DATA FLOW MODE =====
-    //
-    // Kernels are executed SEQUENTIALLY (in IR order) by default to prevent
-    // interleaved execution across kernels. In a flat DFG where all kernels'
-    // counters advance simultaneously, a later kernel (e.g. matmul layer 2)
-    // could read partially-computed values from an earlier kernel (e.g.
-    // matmul layer 1) that hasn't finished all its iterations yet.
-    // Sequential execution guarantees that kernel N+1 only sees the fully-
-    // computed output of kernel N.
-
-    // Collect kernel groups and non-kernel operations
-    std::vector<Operation *> non_kernel_ops;
-    SmallVector<KernelGroup> kernel_groups;
-    Operation *return_op = nullptr;
-    collectKernelGroupsFromFunc(func, kernel_groups, non_kernel_ops, return_op);
-
-    // Execute non-kernel operations (arith.constant, memref.alloc, etc.)
-    if (executeNonKernelOperations(non_kernel_ops,
-                                 value_to_predicated_data_map) != EXIT_SUCCESS) {
-      return EXIT_FAILURE;
-    }
-
-    // Execute kernels - either sequentially or in parallel
-    if (isParallelMode()) {
-      KernelDependencyGraph kernel_dep_graph;
-      kernel_dep_graph.build(kernel_groups);
-
-      // Debug: print dependency graph
-      if (isVerboseMode()) {
-        llvm::outs() << "\n[neura-interpreter]  ===== Kernel Dependency Graph =====\n";
-        for (size_t i = 0; i < kernel_groups.size(); ++i) {
-          llvm::outs() << "[neura-interpreter]  Kernel " << i << " writes: {";
-          auto outputs = KernelDependencyGraph::getWrittenMemRefs(kernel_groups[i]);
-          for (size_t j = 0; j < outputs.size(); ++j) {
-            if (j > 0) llvm::outs() << ", ";
-            outputs[j].print(llvm::outs());
-          }
-          llvm::outs() << "}\n";
-          
-          llvm::outs() << "[neura-interpreter]    depends on: {";
-          for (size_t j = 0; j < kernel_dep_graph.dependencies[i].size(); ++j) {
-            if (j > 0) llvm::outs() << ", ";
-            llvm::outs() << kernel_dep_graph.dependencies[i][j];
-          }
-          llvm::outs() << "}\n";
-        }
-        llvm::outs() << "[neura-interpreter]  ======================================\n\n";
-      }
-
-      // Detect and break circular dependencies
-      bool has_cycles = false;
-      auto detectAndBreakCycles = [&]() {
-        size_t n = kernel_groups.size();
-        for (size_t i = 0; i < n; ++i) {
-          for (size_t j = 0; j < n; ++j) {
-            if (i == j) continue;
-            // Check if there's a cycle: i depends on j and j depends on i
-            bool i_depends_j = false;
-            bool j_depends_i = false;
-            for (size_t dep : kernel_dep_graph.dependencies[i]) {
-              if (dep == j) {
-                i_depends_j = true;
-                break;
-              }
-            }
-            for (size_t dep : kernel_dep_graph.dependencies[j]) {
-              if (dep == i) {
-                j_depends_i = true;
-                break;
-              }
-            }
-            if (i_depends_j && j_depends_i) {
-              has_cycles = true;
-              // Found a cycle! Break it by removing the dependency from j to i
-              // (keep i depends on j since i comes first)
-              llvm::errs() << "[neura-interpreter]  WARNING: Circular dependency detected between kernel " 
-                           << i << " and " << j << ", breaking cycle\n";
-              auto& deps = kernel_dep_graph.dependencies[j];
-              auto it = std::find(deps.begin(), deps.end(), i);
-              if (it != deps.end()) {
-                deps.erase(it);
-              }
-              // Also remove from dependents
-              auto& deps_i = kernel_dep_graph.dependents[i];
-              auto it_i = std::find(deps_i.begin(), deps_i.end(), j);
-              if (it_i != deps_i.end()) {
-                deps_i.erase(it_i);
-              }
-            }
-          }
-        }
-      };
-      
-      detectAndBreakCycles();
-      
-      // If there were cycles, fall back to sequential execution
-      // to ensure deterministic results
-      if (has_cycles) {
-        llvm::errs() << "[neura-interpreter]  WARNING: Circular dependencies detected, falling back to sequential execution\n";
-        for (auto &group : kernel_groups) {
-          if (!executeKernelDFG(group, value_to_predicated_data_map)) {
-            return EXIT_FAILURE;
-          }
-        }
-        if (return_op) {
-          auto handle_result = handleOperation(return_op, value_to_predicated_data_map);
-          if (!handle_result.success) {
-            return EXIT_FAILURE;
-          }
-        }
-        return EXIT_SUCCESS;
-      }
-
-      ThreadPool pool;
-      enum KernelState { PENDING, RUNNING, COMPLETED };
-      std::vector<KernelState> kernel_states(kernel_groups.size(), PENDING);
-      std::vector<std::future<bool>> futures;
-      std::mutex state_mutex;
-
-      auto executeKernel = [&](size_t idx) -> bool {
-        bool result = executeKernelDFG(kernel_groups[idx], value_to_predicated_data_map, &state_mutex);
-        {
-          std::lock_guard<std::mutex> lock(state_mutex);
-          kernel_states[idx] = COMPLETED;
-        }
-        return result;
-      };
-
-      // Helper to check if all dependencies are completed
-      auto areDependenciesCompleted = [&](size_t idx) {
-        for (size_t dep : kernel_dep_graph.dependencies[idx]) {
-          if (kernel_states[dep] != COMPLETED) {
-            return false;
-          }
-        }
-        return true;
-      };
-
-      // Main parallel execution loop
-      int iteration_count = 0;
-      while (std::any_of(kernel_states.begin(), kernel_states.end(),
-                         [](KernelState s) { return s != COMPLETED; })) {
-        std::vector<size_t> ready_kernels;
-        {
-          std::lock_guard<std::mutex> lock(state_mutex);
-          for (size_t i = 0; i < kernel_groups.size(); ++i) {
-            if (kernel_states[i] == PENDING && areDependenciesCompleted(i)) {
-              kernel_states[i] = RUNNING;
-              ready_kernels.push_back(i);
-            }
-          }
-        }
-
-        if (ready_kernels.empty()) {
-          // Check if we're stuck (all kernels are PENDING but none are ready)
-          bool all_pending = true;
-          {
-            std::lock_guard<std::mutex> lock(state_mutex);
-            for (auto state : kernel_states) {
-              if (state != PENDING) {
-                all_pending = false;
-                break;
-              }
-            }
-          }
-          
-          if (all_pending) {
-            // Deadlock detected - debug output
-            llvm::errs() << "[neura-interpreter]  WARNING: All kernels pending but none ready! Dependency graph:\n";
-            for (size_t i = 0; i < kernel_groups.size(); ++i) {
-              llvm::errs() << "[neura-interpreter]    Kernel " << i << " depends on: ";
-              if (kernel_dep_graph.dependencies[i].empty()) {
-                llvm::errs() << "(none)";
-              } else {
-                for (size_t j = 0; j < kernel_dep_graph.dependencies[i].size(); ++j) {
-                  if (j > 0) llvm::errs() << ", ";
-                  llvm::errs() << kernel_dep_graph.dependencies[i][j];
-                }
-              }
-              llvm::errs() << "\n";
-            }
-            
-            // For debugging, let's force execute all kernels sequentially if deadlocked
-            llvm::errs() << "[neura-interpreter]  Forcing sequential execution due to dependency issue\n";
-            {
-              std::lock_guard<std::mutex> lock(state_mutex);
-              for (size_t i = 0; i < kernel_groups.size(); ++i) {
-                if (kernel_states[i] == PENDING) {
-                  kernel_states[i] = RUNNING;
-                  ready_kernels.push_back(i);
-                }
-              }
-            }
-          } else {
-            // Wait a bit and retry
-            std::this_thread::sleep_for(std::chrono::microseconds(10));
-          }
-        }
-
-        if (!ready_kernels.empty()) {
-          // Launch all ready kernels
-          for (size_t idx : ready_kernels) {
-            futures.push_back(pool.enqueue(executeKernel, idx));
-          }
-
-          // Wait for all pending futures
-          for (auto &fut : futures) {
-            if (!fut.get()) {
-              return EXIT_FAILURE;
-            }
-          }
-          futures.clear();
-        }
-        
-        iteration_count++;
-        if (iteration_count > 100000) {
-          llvm::errs() << "[neura-interpreter]  WARNING: Parallel execution loop exceeded 100000 iterations\n";
-          break;
-        }
-      }
-    } else {
-      // Execute each kernel sequentially to exhaustion.
-      for (auto &group : kernel_groups) {
-        if (!executeKernelDFG(group, value_to_predicated_data_map)) {
-          return EXIT_FAILURE;
-        }
-      }
-    }
-
-    // Execute func.return if present.
-    if (return_op) {
-      auto handle_result =
-          handleOperation(return_op, value_to_predicated_data_map);
-      if (!handle_result.success) {
-        return EXIT_FAILURE;
-      }
-    }
-  } else {
-    // Control flow mode execution logic
-    Block *current_block = &func.getBody().front();
-    Block *last_visited_block = nullptr;
-    size_t op_index = 0;
-    bool is_terminated = false;
-
-    // Stack for handling nested container ops (taskflow.task, neura.kernel).
-    SmallVector<Frame> frame_stack;
-
-    // Main loop: processes operations sequentially through blocks.
-    while (!is_terminated && current_block) {
-      auto &operations = current_block->getOperations();
-      if (op_index >= operations.size()) {
-        // Reached end of block — pop from stack if we were in a nested block.
-        if (!frame_stack.empty()) {
-          Frame parent = frame_stack.pop_back_val();
-          current_block = parent.block;
-          op_index = parent.index;
-          last_visited_block = parent.last_block;
-          // Advance past the container op.
-          op_index++;
-          continue;
-        }
-        break;
-      }
-
-      Operation &op = *std::next(operations.begin(), op_index);
-
-      // Enter nested containers to execute their body ops inline.
-      if (auto kernel_op = dyn_cast<neura::KernelOp>(op)) {
-        if (!kernel_op.getBody().empty()) {
-          Frame frame;
-          frame.block = current_block;
-          frame.index = op_index;
-          frame.last_block = last_visited_block;
-          frame.kernel_body = &kernel_op.getBody().front();
-          // Collect counter values from kernel body for loop predicate check.
-          for (auto &body_op : kernel_op.getBody().front()) {
-            if (isa<neura::CounterOp>(body_op)) {
-              frame.counter_values.push_back(body_op.getResult(0));
-            }
-          }
-          frame_stack.push_back(frame);
-          current_block = frame.kernel_body;
-          last_visited_block = nullptr;
-          op_index = 0;
-          continue;
-        }
-      }
-      if (auto task_op = dyn_cast<taskflow::TaskflowTaskOp>(op)) {
-        if (!task_op.getBody().empty()) {
-          Frame frame;
-          frame.block = current_block;
-          frame.index = op_index;
-          frame.last_block = last_visited_block;
-          frame.kernel_body = nullptr; // taskflow.task doesn't loop
-          frame_stack.push_back(frame);
-          current_block = &task_op.getBody().front();
-          last_visited_block = nullptr;
-          op_index = 0;
-          continue;
-        }
-      }
-
-      // Processes operation with block information for control flow handling.
-      auto handle_result = handleOperation(&op, value_to_predicated_data_map,
-                                           &current_block, &last_visited_block);
-
-      if (!handle_result.success) {
-        return EXIT_FAILURE;
-      }
-      if (handle_result.is_terminated) {
-        is_terminated = true;
-        op_index++;
-      } else if (handle_result.is_branch) {
-        // Check if this is a neura.yield that needs loop-back handling.
-        if (isa<neura::YieldOp>(op) && !frame_stack.empty() &&
-            frame_stack.back().kernel_body != nullptr) {
-          // Advance counters with nested-loop carry propagation
-          // (leaf → relay → root).
-          bool more_iterations =
-              advanceCountersNested(frame_stack.back().counter_values);
-          // Update predicates in the value map so that the next
-          // handleCounterOp call reflects the new counter_state.
-          for (Value cv : frame_stack.back().counter_values) {
-            if (!value_to_predicated_data_map.count(cv))
-              continue;
-            if (!counter_state.count(cv))
-              continue;
-            int64_t cur = counter_state[cv];
-            int64_t upper = counter_upper[cv];
-            int64_t step = counter_step[cv];
-            bool in_bounds = (step > 0) ? (cur < upper) : (cur > upper);
-            value_to_predicated_data_map[cv].predicate = in_bounds;
-            value_to_predicated_data_map[cv].value = static_cast<float>(cur);
-          }
-          if (more_iterations) {
-            // Loop back to start of kernel body.
-            op_index = 0;
-          } else {
-            // All counters exhausted; pop frame to exit kernel.
-            Frame parent = frame_stack.pop_back_val();
-            current_block = parent.block;
-            op_index = parent.index + 1; // advance past kernel op
-            last_visited_block = parent.last_block;
-          }
-        } else {
-          // Normal branch: reset index to start of new block.
-          op_index = 0;
-        }
-      } else {
-        // Regular operations increment to next operation in block.
-        op_index++;
-      }
-    }
+    return runDataflowMode(func, value_to_predicated_data_map);
   }
-
-  return EXIT_SUCCESS;
+  return runControlFlowMode(func, value_to_predicated_data_map);
 }
 
 int main(int argc, char **argv) {
