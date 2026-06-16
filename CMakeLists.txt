@@ -36,10 +36,6 @@ add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)
 
-# ===--------------------------------------------------------------------===#
-# LIT test setup
-# ===--------------------------------------------------------------------===#
-
 # Tools built by this project or LLVM
 set(MLIR_NEURA_OPT ${CMAKE_BINARY_DIR}/tools/mlir-neura-opt/mlir-neura-opt)
 set(NEURA_INTERPRETER ${CMAKE_BINARY_DIR}/tools/neura-interpreter/neura-interpreter)
