@@ -9,7 +9,9 @@
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/AsmState.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -3551,6 +3553,28 @@ bool handleGrantAlwaysOp(
   return true;
 }
 
+
+/**
+ * @brief Handles the execution of a Neura yield operation (neura.yield),
+ *        the mandatory region terminator for neura.kernel and neura.fused_op.
+ *
+ * neura.yield marks the end of a kernel region. In the mapped IR, it carries
+ * no operands and no results (the kernel is void — output is written via
+ * neura.store). It is a no-op for the interpreter: actual function termination
+ * is signaled by neura.return_void, not by neura.yield.
+ *
+ * @param op     The neura.yield operation to handle
+ * @return bool  Always true; this operation cannot fail
+ */
+bool handleYieldOp(neura::YieldOp op) {
+  if (isVerboseMode()) {
+    llvm::outs() << "[neura-interpreter]  Executing neura.yield\n";
+  }
+  return true;
+}
+
+
+
 /**
  * @brief Generic operation handling function that unifies type checking for
  * both execution modes
@@ -3691,6 +3715,8 @@ OperationHandleResult handleOperation(
   } else if (auto grant_always_op = dyn_cast<neura::GrantAlwaysOp>(op)) {
     result.success =
         handleGrantAlwaysOp(grant_always_op, value_to_predicated_data_map);
+  } else if (auto yield_op = dyn_cast<neura::YieldOp>(op)) {
+    result.success = handleYieldOp(yield_op);
   } else {
     llvm::errs() << "[neura-interpreter]  Unhandled op: ";
     op->print(llvm::errs());
@@ -4038,8 +4064,8 @@ int main(int argc, char **argv) {
 
   // Initializes MLIR context and dialects.
   DialectRegistry registry;
-  registry
-      .insert<neura::NeuraDialect, func::FuncDialect, arith::ArithDialect>();
+  registry.insert<neura::NeuraDialect, func::FuncDialect, arith::ArithDialect,
+                  mlir::DLTIDialect, mlir::LLVM::LLVMDialect>();
 
   MLIRContext context;
   context.appendDialectRegistry(registry);
