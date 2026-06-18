@@ -132,9 +132,9 @@ static void processYields(neura::KernelOp kernel_op, OpBuilder &builder) {
   }
 }
 
-static void processEmptyReturnVoidBlock(Block *ret_block,
-                                        neura::ReturnOp void_ret_op,
-                                        OpBuilder &builder) {
+static void processReturnVoidBlock(Block *ret_block,
+                                   neura::ReturnOp void_ret_op,
+                                   OpBuilder &builder) {
   SmallVector<Block *> predecessor_blocks(ret_block->getPredecessors());
   // Entry bolock with return_void is unreachable; no action needed.
   if (predecessor_blocks.empty()) {
@@ -272,13 +272,8 @@ static void processVoidReturnsInKernel(neura::KernelOp kernel_op,
   // Processes each return_void block.
   for (neura::ReturnOp ret_void_op : ret_void_ops) {
     Block *ret_block = ret_void_op->getBlock();
-    bool is_empty_block = (ret_block->getOperations().size() == 1);
 
-    if (is_empty_block) {
-      processEmptyReturnVoidBlock(ret_block, ret_void_op, builder);
-    } else {
-      assert(false && "Unsupported case: return block is not empty.");
-    }
+    processReturnVoidBlock(ret_block, ret_void_op, builder);
   }
 }
 
@@ -337,18 +332,7 @@ struct CanonicalizeReturnPass
       for (neura::ReturnOp ret_void_op : ret_void_ops) {
         Block *ret_block = ret_void_op->getBlock();
 
-        // Checks if ret_block only contains the return_void operation.
-        bool is_empty_block = (ret_block->getOperations().size() == 1);
-
-        if (is_empty_block) {
-          processEmptyReturnVoidBlock(ret_block, ret_void_op, builder);
-        } else {
-          // TODO: Handle non-empty return blocks.
-          // The basic idea is to create a new block that only contains the
-          // return_void operation, and redirect the original return block to
-          // this new block.
-          assert(false && "Unsupported case: return block is not empty.");
-        }
+        processReturnVoidBlock(ret_block, ret_void_op, builder);
       }
     });
 
