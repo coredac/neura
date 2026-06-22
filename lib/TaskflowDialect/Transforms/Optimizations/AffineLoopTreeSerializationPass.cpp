@@ -171,15 +171,58 @@ public:
 
   // Entry point for building one MCT. `buildNode` does the recursive work while
   // this function owns the old-to-new value mapping for the whole chain.
-  affine::AffineForOp build(const LoopChain &chain) {
+  FailureOr<affine::AffineForOp> build(const LoopChain &chain) {
     // Mapping from old values to new values.
     IRMapping mapping;
-    return buildNode(chain, /*index=*/0, mapping, builder);
+    return buildNode(chain, /*index=*/0, mapping, builder,
+                     chain.getRoot()->loop_op.getOperation());
   }
 
 private:
   OpBuilder &builder;
   Location loc;
+
+  static bool isDefinedInside(Operation *root_op, Value value) {
+    if (auto block_arg = dyn_cast<BlockArgument>(value)) {
+      Region *region = block_arg.getParentRegion();
+      Operation *owner = region ? region->getParentOp() : nullptr;
+      while (owner) {
+        if (owner == root_op) {
+          return true;
+        }
+        owner = owner->getParentOp();
+      }
+      return false;
+    }
+
+    Operation *def = value.getDefiningOp();
+    while (def) {
+      if (def == root_op) {
+        return true;
+      }
+      def = def->getParentOp();
+    }
+    return false;
+  }
+
+  LogicalResult checkOperandsMapped(Operation *op, Operation *root_op,
+                                    const IRMapping &mapping) {
+    for (Value operand : op->getOperands()) {
+      if (isDefinedInside(root_op, operand) && !mapping.contains(operand)) {
+        return failure();
+      }
+    }
+    return success();
+  }
+
+  FailureOr<Value> lookupMappedValue(Operation *op, Value value,
+                                     Operation *root_op,
+                                     const IRMapping &mapping) {
+    if (isDefinedInside(root_op, value) && !mapping.contains(value)) {
+      return failure();
+    }
+    return mapping.lookupOrDefault(value);
+  }
 
   // Recursively rebuilds `chain[index]` and its selected child.
   //
@@ -191,8 +234,10 @@ private:
   //
   // Rebuilding the selected child exactly where it appeared ensures `%sum` is
   // mapped before later operations are cloned.
-  affine::AffineForOp buildNode(const LoopChain &chain, size_t index,
-                                IRMapping &mapping, OpBuilder &insert_builder) {
+  FailureOr<affine::AffineForOp> buildNode(const LoopChain &chain, size_t index,
+                                           IRMapping &mapping,
+                                           OpBuilder &insert_builder,
+                                           Operation *root_op) {
     SALTNode *node = chain.nodes[index];
     // The next node in the LoopChain is the only nested loop cloned at this
     // level. Other sibling loops are serialized into their own MCTs.
@@ -201,7 +246,12 @@ private:
 
     SmallVector<Value> iter_args_init_values;
     for (Value init : node->loop_op.getInits()) {
-      iter_args_init_values.push_back(mapping.lookupOrDefault(init));
+      FailureOr<Value> mapped_init =
+          lookupMappedValue(node->loop_op, init, root_op, mapping);
+      if (failed(mapped_init)) {
+        return failure();
+      }
+      iter_args_init_values.push_back(*mapped_init);
     }
 
     auto new_loop = insert_builder.create<affine::AffineForOp>(
@@ -234,7 +284,13 @@ private:
       if (auto yield_op = dyn_cast<affine::AffineYieldOp>(&op)) {
         SmallVector<Value> yielded_values;
         for (Value operand : yield_op.getOperands()) {
-          yielded_values.push_back(mapping.lookupOrDefault(operand));
+          FailureOr<Value> mapped_operand =
+              lookupMappedValue(yield_op, operand, root_op, mapping);
+          if (failed(mapped_operand)) {
+            new_loop.erase();
+            return failure();
+          }
+          yielded_values.push_back(*mapped_operand);
         }
         body_builder.create<affine::AffineYieldOp>(loc, yielded_values);
         continue;
@@ -243,7 +299,11 @@ private:
       if (auto nested_for = dyn_cast<affine::AffineForOp>(&op)) {
         // Only clone the selected child for this root-to-leaf chain.
         if (selected_child && nested_for == selected_child->loop_op) {
-          buildNode(chain, index + 1, mapping, body_builder);
+          if (failed(buildNode(chain, index + 1, mapping, body_builder,
+                               root_op))) {
+            new_loop.erase();
+            return failure();
+          }
           body_builder = OpBuilder::atBlockEnd(body);
         }
         continue;
@@ -251,6 +311,10 @@ private:
 
       // Non-loop operations belong to this MCT and are cloned with the current
       // mapping. Their results are then available to later operations.
+      if (failed(checkOperandsMapped(&op, root_op, mapping))) {
+        new_loop.erase();
+        return failure();
+      }
       Operation *new_op = body_builder.clone(op, mapping);
       for (auto [old_res, new_res] :
            llvm::zip(op.getResults(), new_op->getResults())) {
@@ -346,22 +410,36 @@ private:
       }
 
       // Builds new chains.
+      bool serialized_root = true;
+      SmallVector<affine::AffineForOp> new_loops;
       for (const LoopChain &chain : root_chains) {
         MCTBuilder mct_builder(builder, loc);
-        affine::AffineForOp new_loop = mct_builder.build(chain);
-
-        // If the original root loop had results (iter_args), and the new loop
-        // has matching results, we must replace the uses of the original
-        // results with the new ones. NOTE: This assumes that for a loop
-        // defining values, there is a corresponding single chain that produces
-        // all the values (or at least the one we process). If a root with
-        // results is split into multiple chains, this simple logic might loop
-        // over them. However, for a reduction loop that is a single chain, this
-        // works.
-        if (root->loop_op.getNumResults() > 0 && new_loop &&
-            new_loop.getNumResults() == root->loop_op.getNumResults()) {
-          root->loop_op.replaceAllUsesWith(new_loop.getResults());
+        FailureOr<affine::AffineForOp> new_loop = mct_builder.build(chain);
+        if (failed(new_loop)) {
+          serialized_root = false;
+          break;
         }
+        new_loops.push_back(*new_loop);
+      }
+
+      if (!serialized_root) {
+        for (auto it = new_loops.rbegin(); it != new_loops.rend(); ++it) {
+          it->erase();
+        }
+        continue;
+      }
+
+      // If the original root loop had results (iter_args), and the new loop
+      // has matching results, we must replace the uses of the original
+      // results with the new ones. NOTE: This assumes that for a loop
+      // defining values, there is a corresponding single chain that produces
+      // all the values (or at least the one we process). If a root with
+      // results is split into multiple chains, this simple logic might loop
+      // over them. However, for a reduction loop that is a single chain, this
+      // works.
+      if (root->loop_op.getNumResults() > 0 && new_loops.size() == 1 &&
+          new_loops.front().getNumResults() == root->loop_op.getNumResults()) {
+        root->loop_op.replaceAllUsesWith(new_loops.front().getResults());
       }
 
       // Erases the original root loop.
