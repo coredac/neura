@@ -57,6 +57,87 @@ static bool hasSideEffect(Operation *op) {
   return true;
 }
 
+static bool usesLoopResult(Operation *op, affine::AffineForOp loop) {
+  return llvm::any_of(op->getOperands(), [&](Value operand) {
+    return llvm::is_contained(loop.getResults(), operand);
+  });
+}
+
+static LogicalResult checkLoopBandSupported(AffineLoopBand &loop_band) {
+  for (size_t i = loop_band.size() - 1; i > 0; i--) {
+    affine::AffineForOp loop = loop_band[i - 1];
+    affine::AffineForOp child_loop = loop_band[i];
+
+    bool is_prologue = true;
+    bool has_prologue_side_effect = false;
+    bool has_epilogue_side_effect = false;
+
+    for (Operation &op : loop.getRegion().front()) {
+      if (&op == child_loop) {
+        is_prologue = false;
+        continue;
+      }
+
+      if (isa<affine::AffineYieldOp>(&op)) {
+        continue;
+      }
+
+      if (llvm::any_of(op.getResultTypes(),
+                       [](Type type) { return isa<MemRefType>(type); })) {
+        llvm::errs() << "[LoopPerfection] Skipping unsupported loop band: "
+                        "memref-producing operation.\n";
+        return failure();
+      }
+
+      if (isa<func::CallOp>(&op)) {
+        llvm::errs() << "[LoopPerfection] Skipping unsupported loop band: "
+                        "function call operation.\n";
+        return failure();
+      }
+
+      if (!is_prologue && usesLoopResult(&op, child_loop)) {
+        llvm::errs()
+            << "[LoopPerfection] Skipping unsupported loop band: epilogue "
+               "operation uses a child loop result.\n";
+        return failure();
+      }
+
+      if (hasSideEffect(&op)) {
+        if (is_prologue) {
+          has_prologue_side_effect = true;
+        } else {
+          has_epilogue_side_effect = true;
+        }
+      }
+    }
+
+    ArrayRef<affine::AffineForOp> inner_loops =
+        ArrayRef<affine::AffineForOp>(loop_band).drop_front(i);
+
+    if (has_prologue_side_effect) {
+      for (affine::AffineForOp inner_loop : inner_loops) {
+        if (!inner_loop.hasConstantLowerBound()) {
+          llvm::errs() << "[LoopPerfection] Skipping unsupported loop band: "
+                          "non-constant lower bound.\n";
+          return failure();
+        }
+      }
+    }
+
+    if (has_epilogue_side_effect) {
+      for (affine::AffineForOp inner_loop : inner_loops) {
+        if (!inner_loop.getStepAsInt() || !inner_loop.hasConstantUpperBound()) {
+          llvm::errs() << "[LoopPerfection] Skipping unsupported loop band: "
+                          "non-constant upper bound or step.\n";
+          return failure();
+        }
+      }
+    }
+  }
+
+  return success();
+}
+
 // Collects loop bands from a function.
 static void collectLoopBands(func::FuncOp func_op,
                              SmallVector<AffineLoopBand> &loop_bands) {
@@ -192,11 +273,15 @@ createEpilogueCondition(OpBuilder &builder, Location loc,
 // Sinks all operations into the innermost loop with condition execution.
 static LogicalResult applyLoopPerfection(AffineLoopBand &loop_band) {
   if (loop_band.empty()) {
-    return failure();
+    return success();
   }
 
   llvm::errs() << "[LoopPerfection] Processing loop band with "
                << loop_band.size() << " loops.\n";
+
+  if (failed(checkLoopBandSupported(loop_band))) {
+    return success();
+  }
 
   affine::AffineForOp innermost_loop = loop_band.back();
   OpBuilder builder(innermost_loop);
