@@ -867,9 +867,9 @@ public:
       // Check if incrementing cgra_count is feasible on the 4×4 grid.
       // TODO: This currently only checks the capacity (total CGRA count).
       // Ideally, we should invoke a global placement pass (aka
-      // OrchestrateTaskOnCgraPass) here to verify if the speculatively increased CGRA
-      // count and its proposed shape actually fit on the 4x4 grid alongside
-      // other previously allocated tasks.
+      // OrchestrateTaskOnCgraPass) here to verify if the speculatively
+      // increased CGRA count and its proposed shape actually fit on the 4x4
+      // grid alongside other previously allocated tasks.
       //
       // Currently, OrchestrateTaskOnCgraPass does not support multi-CGRA task
       // placement. Once it does, we should call it here; if global placement
@@ -1554,13 +1554,12 @@ private:
         OpBuilder b(fused_task);
         MLIRContext *ctx = fused_task->getContext();
         SmallVector<NamedAttribute, 1> profile_attrs;
-        profile_attrs.push_back(NamedAttribute(
-            StringAttr::get(ctx, "duration"),
-            b.getI32IntegerAttr(fused_node.steps)));
+        profile_attrs.push_back(
+            NamedAttribute(StringAttr::get(ctx, "duration"),
+                           b.getI32IntegerAttr(fused_node.steps)));
         fused_task->setAttr("profile_info",
                             DictionaryAttr::get(ctx, profile_attrs));
-        fused_task->setAttr("compiled_ii",
-                            b.getI64IntegerAttr(fused_node.ii));
+        fused_task->setAttr("compiled_ii", b.getI64IntegerAttr(fused_node.ii));
       }
     }
 
@@ -1780,9 +1779,9 @@ struct ResourceAwareTaskOptimizationPass
           }
           if (node->steps != kUnprofiled) {
             SmallVector<NamedAttribute, 1> profile_attrs;
-            profile_attrs.push_back(NamedAttribute(
-                StringAttr::get(b.getContext(), "duration"),
-                b.getI32IntegerAttr(node->steps)));
+            profile_attrs.push_back(
+                NamedAttribute(StringAttr::get(b.getContext(), "duration"),
+                               b.getI32IntegerAttr(node->steps)));
             node->op->setAttr(
                 "profile_info",
                 DictionaryAttr::get(b.getContext(), profile_attrs));
@@ -1829,9 +1828,9 @@ struct ResourceAwareTaskOptimizationPass
           node->op->setAttr("compiled_ii", b.getI32IntegerAttr(node->ii));
           {
             SmallVector<NamedAttribute, 1> profile_attrs;
-            profile_attrs.push_back(NamedAttribute(
-                StringAttr::get(b.getContext(), "duration"),
-                b.getI32IntegerAttr(node->steps)));
+            profile_attrs.push_back(
+                NamedAttribute(StringAttr::get(b.getContext(), "duration"),
+                               b.getI32IntegerAttr(node->steps)));
             node->op->setAttr(
                 "profile_info",
                 DictionaryAttr::get(b.getContext(), profile_attrs));

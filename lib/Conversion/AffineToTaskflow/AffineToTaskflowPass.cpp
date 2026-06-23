@@ -91,12 +91,22 @@ static void collectExternalValues(Operation *root_op,
   }
 }
 
-// Updates operands of an operation using the value mapping.
+// Updates operands of a non-loop operation after preceding loops have been
+// converted into taskflow.task ops. Memref operands consume the latest write
+// state for that original memref; scalar SSA values use value_mapping.
 static void
 updateOperationOperands(Operation *op,
+                        const DenseMap<Value, Value> &latest_write_out,
                         const DenseMap<Value, Value> &value_mapping) {
   for (OpOperand &operand : op->getOpOperands()) {
     Value original_value = operand.get();
+    if (isa<MemRefType>(original_value.getType())) {
+      auto it = latest_write_out.find(original_value);
+      if (it != latest_write_out.end())
+        operand.set(it->second);
+      continue;
+    }
+
     auto it = value_mapping.find(original_value);
     if (it != value_mapping.end()) {
       operand.set(it->second);
@@ -136,9 +146,11 @@ analyzeMemrefAccesses(func::FuncOp func_op) {
 // Converts a top-level affine.for to a taskflow.task operation.
 static TaskflowTaskOp convertLoopToTask(
     OpBuilder &builder, affine::AffineForOp for_op,
+    DenseMap<Value, Value> &latest_write_out,
+    DenseMap<Value, SmallVector<Value>> &pending_read_outs,
     DenseMap<Value, Value> &value_mapping,
     const DenseMap<Operation *, MemrefAccessInfo> &loop_to_original_memref_info,
-    int task_id) {
+    const SetVector<Value> &read_output_memrefs, int task_id) {
   Location loc = for_op.getLoc();
   std::string task_name = "Task_" + std::to_string(task_id);
 
@@ -197,12 +209,16 @@ static TaskflowTaskOp convertLoopToTask(
   //-------------------------------------------------------------------
   SmallVector<Value> read_inputs;
   SmallVector<Value> write_inputs;
+  SmallVector<Value> write_input_states;
+  SmallVector<Value> write_body_state_memrefs;
   SmallVector<Value> value_inputs;
   IRMapping mapping;
 
-  // Resolves read inputs.
+  // Resolves read inputs from the latest write state only. Read outputs from
+  // previous readers are pending WAR dependencies for future writers and must
+  // not serialize independent readers.
   for (Value memref : read_memrefs) {
-    Value resolved_memref = value_mapping.lookup(memref);
+    Value resolved_memref = latest_write_out.lookup(memref);
     if (!resolved_memref) {
       resolved_memref = memref;
     }
@@ -210,14 +226,27 @@ static TaskflowTaskOp convertLoopToTask(
     mapping.map(memref, resolved_memref);
   }
 
-  // Resolves write inputs.
+  // Resolves write inputs. A writer must consume all pending read states for
+  // the same original memref before it writes, then it consumes the latest
+  // write state if there is no pending read state. This keeps WAR ordering in
+  // the memref dependence-state chain without introducing read-read edges.
   for (Value memref : write_memrefs) {
-    Value resolved_memref = value_mapping.lookup(memref);
-    if (!resolved_memref) {
-      resolved_memref = memref;
+    auto pending_it = pending_read_outs.find(memref);
+    if (pending_it != pending_read_outs.end() && !pending_it->second.empty()) {
+      for (Value pending_read : pending_it->second) {
+        write_inputs.push_back(pending_read);
+        write_input_states.push_back(pending_read);
+      }
+      write_body_state_memrefs.push_back(pending_it->second.back());
+    } else {
+      Value resolved_memref = latest_write_out.lookup(memref);
+      if (!resolved_memref) {
+        resolved_memref = memref;
+      }
+      write_inputs.push_back(resolved_memref);
+      write_input_states.push_back(resolved_memref);
+      write_body_state_memrefs.push_back(resolved_memref);
     }
-    write_inputs.push_back(resolved_memref);
-    mapping.map(memref, resolved_memref);
   }
 
   // Resolves external SSA value inputs.
@@ -233,9 +262,10 @@ static TaskflowTaskOp convertLoopToTask(
   //-------------------------------------------------------------------
   // Step 5: Prepares output types.
   //-------------------------------------------------------------------
-  // Read output types: passthrough read memrefs for WAR dependency tracking.
+  // Read output types: sparse read states for WAR ordering. These are produced
+  // only when a later writer must depend on this task's read.
   SmallVector<Type> read_output_types;
-  for (Value memref : read_memrefs) {
+  for (Value memref : read_output_memrefs) {
     read_output_types.push_back(memref.getType());
   }
 
@@ -279,11 +309,20 @@ static TaskflowTaskOp convertLoopToTask(
     input_to_block_arg[memref] = arg;
   }
 
-  // Memory write input arguments.
-  for (Value memref : write_memrefs) {
-    BlockArgument arg = task_body->addArgument(memref.getType(), loc);
-    mapping.map(memref, arg);
-    input_to_block_arg[memref] = arg;
+  // Memory write input arguments. There can be multiple dependence states for
+  // one original write memref when several previous readers are pending; the
+  // last argument is used inside the task body as the writable memref state.
+  for (Value state_memref : write_input_states) {
+    BlockArgument arg = task_body->addArgument(state_memref.getType(), loc);
+    mapping.map(state_memref, arg);
+    input_to_block_arg[state_memref] = arg;
+  }
+  for (auto [original_memref, state_memref] :
+       llvm::zip(write_memrefs, write_body_state_memrefs)) {
+    auto it = input_to_block_arg.find(state_memref);
+    assert(it != input_to_block_arg.end() && "write state has no block arg");
+    mapping.map(original_memref, it->second);
+    input_to_block_arg[original_memref] = it->second;
   }
 
   // Value input arguments.
@@ -305,8 +344,9 @@ static TaskflowTaskOp convertLoopToTask(
   SmallVector<Value> yield_for_dependency_write_out;
   SmallVector<Value> value_yield_operands;
 
-  // Read yield outputs: passthrough read memref block args for WAR tracking.
-  for (Value memref : read_memrefs) {
+  // Read yield outputs: passthrough only sparse read states needed by later
+  // writers.
+  for (Value memref : read_output_memrefs) {
     if (input_to_block_arg.count(memref)) {
       yield_for_dependency_read_out.push_back(input_to_block_arg[memref]);
     } else {
@@ -335,20 +375,19 @@ static TaskflowTaskOp convertLoopToTask(
   // Step 9 : Updates value mapping with task outputs for subsequent tasks
   // conversion.
   //-------------------------------------------------------------------
-  // Read outputs: establishes WAR dependency chain.
-  // Only update mapping for memrefs not already mapped by a prior write.
+  // Read outputs: pending WAR states for future writers. These do not update
+  // latest_write_out, so later readers of the same memref remain independent.
   for (auto [memref, task_read_output] :
-       llvm::zip(read_memrefs, task_op.getDependencyReadOut())) {
-    if (!value_mapping.count(memref)) {
-      value_mapping[memref] = task_read_output;
-    }
+       llvm::zip(read_output_memrefs, task_op.getDependencyReadOut())) {
+    pending_read_outs[memref].push_back(task_read_output);
   }
 
-  // Memory outputs (write): establishes RAW/WAW dependency chain.
-  // Write outputs always overwrite read outputs in the mapping.
+  // Memory outputs (write): establishes RAW/WAW dependency chain and consumes
+  // pending reads for that memref.
   for (auto [memref, task_output] :
        llvm::zip(output_memrefs, task_op.getDependencyWriteOut())) {
-    value_mapping[memref] = task_output;
+    latest_write_out[memref] = task_output;
+    pending_read_outs[memref].clear();
   }
 
   return task_op;
@@ -366,6 +405,8 @@ static LogicalResult convertFuncToTaskflow(func::FuncOp func_op) {
       analyzeMemrefAccesses(func_op);
   OpBuilder builder(func_op.getContext());
   SmallVector<affine::AffineForOp> loops_to_erase;
+  DenseMap<Value, Value> latest_write_out;
+  DenseMap<Value, SmallVector<Value>> pending_read_outs;
   DenseMap<Value, Value> value_mapping;
   int task_id_counter = 0;
 
@@ -382,14 +423,46 @@ static LogicalResult convertFuncToTaskflow(func::FuncOp func_op) {
       llvm::errs() << *op << "\n";
     }
 
+    // Computes sparse read-out liveness. A task only needs to yield a read
+    // state when a later task in the same block writes the same original
+    // memref. Pure read-read sharing must not create dependence edges.
+    DenseMap<Operation *, SetVector<Value>> loop_to_read_output_memrefs;
+    DenseSet<Value> future_write_memrefs;
+    for (Operation *op : llvm::reverse(ops_to_process)) {
+      auto for_op = dyn_cast<affine::AffineForOp>(op);
+      if (!for_op) {
+        continue;
+      }
+
+      auto info_it = loop_to_original_memref_info.find(for_op.getOperation());
+      assert(info_it != loop_to_original_memref_info.end() &&
+             "Original memref access info not found for the loop");
+
+      const MemrefAccessInfo &access_info = info_it->second;
+      SetVector<Value> read_outputs;
+      for (Value memref : access_info.read_memrefs) {
+        if (future_write_memrefs.contains(memref) &&
+            !access_info.write_memrefs.contains(memref)) {
+          read_outputs.insert(memref);
+        }
+      }
+      loop_to_read_output_memrefs[for_op.getOperation()] = read_outputs;
+
+      for (Value memref : access_info.write_memrefs) {
+        future_write_memrefs.insert(memref);
+      }
+    }
+
     // Processes each operation in order (top to bottom).
     for (Operation *op : ops_to_process) {
       if (auto for_op = dyn_cast<affine::AffineForOp>(op)) {
         // Converts affine.for to taskflow.task.
         OpBuilder builder(for_op);
-        TaskflowTaskOp task_op =
-            convertLoopToTask(builder, for_op, value_mapping,
-                              loop_to_original_memref_info, task_id_counter++);
+        TaskflowTaskOp task_op = convertLoopToTask(
+            builder, for_op, latest_write_out, pending_read_outs, value_mapping,
+            loop_to_original_memref_info,
+            loop_to_read_output_memrefs[for_op.getOperation()],
+            task_id_counter++);
 
         // Replaces uses of loop results with task value outputs.
         for (auto [loop_result, task_value_output] :
@@ -398,8 +471,9 @@ static LogicalResult convertFuncToTaskflow(func::FuncOp func_op) {
         }
         loops_to_erase.push_back(for_op);
       } else {
-        // Updates operands of non-loop operations based on value_mapping.
-        updateOperationOperands(op, value_mapping);
+        // Updates operands of non-loop operations based on the taskflow values
+        // produced by earlier converted loops.
+        updateOperationOperands(op, latest_write_out, value_mapping);
       }
     }
   }

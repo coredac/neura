@@ -31,23 +31,27 @@ def TaskflowTaskOp
   let summary = "Computation task operation within a Taskflow graph.";
 
   let description = [{
-    Represents a computational task that takes data inputs and produces
-    data outoputs. Tasks are isolated from their surrounding scope and can only
-    communicate through explicit data dependencies.
+    Represents a computational task that consumes and produces explicit
+    dependence-state SSA values. Tasks are isolated from their surrounding scope
+    and can only communicate through these explicit dependencies.
 
     Tasks has two types of inputs/outputs:
-    1. Memory dependencies: memrefs that are read or written by the task
+    1. Memory dependence states: memref SSA versions that the task reads or
+       writes. A dependency_read_out or dependency_write_out is still the same
+       underlying memref, but represents the state after this task has observed
+       or modified it.
     2. Value dependencies: SSA values from producer tasks
 
-    The `original_read_memrefs` and `original_write_memrefs` attributes record the actural
-    original memrefs that this task accesses,
-    enabling data placement analysis for multi-CGRA mapping.
+    The `original_read_memrefs` and `original_write_memrefs` operands record
+    the actual original memrefs that this task accesses. These operands keep
+    the memory identity separate from the dependence-state SSA value, enabling
+    dependence analysis and data placement for multi-CGRA mapping.
 
     Example:
-      // Memory inputs: %mem, Value inputs: %val
+      // Memory state inputs: %mem_state, %out_state. Value input: %val.
       $out_mem, %out_val = taskflow.task "Task_0"
-        dependency_read_in(%mem : memref<4xi32>)
-        dependency_write_in(%arg5 : memref<?xi32>)
+        dependency_read_in(%mem_state : memref<4xi32>)
+        dependency_write_in(%out_state : memref<?xi32>)
         value_inputs(%val : i32)
         [original_read_memrefs(%arg0 : memref<?x8x6xi32>),
          original_write_memrefs(%arg5 : memref<?xi32>)] {
@@ -82,8 +86,10 @@ def TaskflowYieldOp
                                ParentOneOf<["TaskflowTaskOp"]>]> {
   let summary = "Yield operation for Taskflow task";
   let description = [{
-    Yields values from a task body. The number and types of operands
-    must match the result types of the parent taskflow.task operation.
+    Yields dependence-state and value results from a task body. Read results
+    are sparse: a task only needs to yield a read state when a later writer must
+    depend on that read for WAR ordering. The number and types of operands must
+    match the result types of the parent taskflow.task operation.
     
     Example:
       taskflow.task "Task_0" (%arg0, %arg1) {
