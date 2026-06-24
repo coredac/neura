@@ -90,6 +90,10 @@ module attributes {} {
       }
       affine.store %1, %alloca_5[%arg10] : memref<256xf32>
     }
+    // Softmax uses a third-order Taylor approximation for exp(x), not a math.exp
+    // op: exp(x) ~= 1 + x + 0.5*x^2 + (1/6)*x^3. The input is shifted by the
+    // row maximum for numerical stability, clamped to 1e-4, stored as the
+    // unnormalized probability, and accumulated into the row denominator.
     affine.for %arg10 = 0 to 256 {
       %0 = affine.load %alloca_5[%arg10] : memref<256xf32>
       %1 = affine.for %arg11 = 0 to 256 iter_args(%arg12 = %cst_4) -> (f32) {
@@ -110,6 +114,7 @@ module attributes {} {
       }
       affine.store %1, %alloca[%arg10] : memref<256xf32>
     }
+    // Normalize the Taylor-approximated softmax values by the row denominator.
     affine.for %arg10 = 0 to 256 {
       %0 = affine.load %alloca[%arg10] : memref<256xf32>
       affine.for %arg11 = 0 to 256 {
