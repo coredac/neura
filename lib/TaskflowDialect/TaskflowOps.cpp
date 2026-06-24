@@ -118,8 +118,9 @@ ParseResult TaskflowTaskOp::parse(OpAsmParser &parser, OperationState &result) {
 
   // Parses region.
   Region *body = result.addRegion();
-  if (parser.parseRegion(*body, /*args=*/{}, /*argTypes=*/{}))
+  if (parser.parseRegion(*body, /*args=*/{}, /*argTypes=*/{})) {
     return failure();
+  }
 
   // Adds operand segment sizes.
   result.addAttribute(
@@ -132,20 +133,21 @@ ParseResult TaskflowTaskOp::parse(OpAsmParser &parser, OperationState &result) {
            static_cast<int32_t>(original_write_operands.size())}));
 
   // Adds result segment sizes.
-  // dependency_read_out count matches dependency_read_in count (WAR dependency
-  // tracking).
-  size_t num_read_outputs = read_operands.size();
-  size_t num_write_outputs = 0;
+  // dependency_write_out count always equals dependency_write_in count.
+  // dependency_read_out count is the remaining MemRef results after
+  // subtracting write_out. It may be less than dependency_read_in count
+  // when not all read memrefs have a WAR dependency.
+  size_t num_write_outputs = write_operands.size();
   size_t num_value_outputs = 0;
+  size_t total_memref_results = 0;
   for (Type t : func_type.getResults()) {
-    if (isa<MemRefType>(t))
-      num_write_outputs++;
-    else
+    if (isa<MemRefType>(t)) {
+      total_memref_results++;
+    } else {
       num_value_outputs++;
+    }
   }
-  // Total memref results include both dependency_read_out and
-  // dependency_write_out.
-  num_write_outputs = num_write_outputs - num_read_outputs;
+  size_t num_read_outputs = total_memref_results - num_write_outputs;
   result.addAttribute("resultSegmentSizes",
                       parser.getBuilder().getDenseI32ArrayAttr(
                           {static_cast<int32_t>(num_read_outputs),
