@@ -13,6 +13,24 @@ module attributes {} {
     %cst_4 = arith.constant 0.000000e+00 : f32
     %alloca = memref.alloca() : memref<256xf32>
     %alloca_5 = memref.alloca() : memref<256xf32>
+    // PERFECT:        affine.for %arg10 = 0 to 256 {
+    // PERFECT-NEXT:      affine.for %arg11 = 0 to 64 {
+    // PERFECT-NEXT:        %0 = affine.for %arg12 = 0 to 64 iter_args(%arg13 = %cst_4) -> (f32) {
+    // PERFECT-NEXT:          %1 = affine.load %arg0[%arg12 + %arg10 * 64] : memref<?xf32>
+    // PERFECT-NEXT:          %2 = affine.load %arg1[%arg11 + %arg12 * 64] : memref<?xf32>
+    // PERFECT-NEXT:          %3 = arith.mulf %1, %2 : f32
+    // PERFECT-NEXT:          %4 = arith.addf %arg13, %3 : f32
+    // PERFECT-NEXT:          %c1 = arith.constant 1 : index
+    // PERFECT-NEXT:          %5 = arith.addi %arg12, %c1 : index
+    // PERFECT-NEXT:          %c64 = arith.constant 64 : index
+    // PERFECT-NEXT:          %6 = arith.cmpi sge, %5, %c64 : index
+    // PERFECT-NEXT:          scf.if %6 {
+    // PERFECT-NEXT:           affine.store %4, %arg4[%arg11 + %arg10 * 64] : memref<?xf32>
+    // PERFECT-NEXT:          }
+    // PERFECT-NEXT:          affine.yield %4 : f32
+    // PERFECT-NEXT:        }
+    // PERFECT-NEXT:      }
+    // PERFECT-NEXT:    }
     affine.for %arg10 = 0 to 256 {
       affine.for %arg11 = 0 to 64 {
         %0 = affine.for %arg12 = 0 to 64 iter_args(%arg13 = %cst_4) -> (f32) {
@@ -115,22 +133,3 @@ module attributes {} {
     return
   }
 }
-
-// PERFECT:        affine.for %arg10 = 0 to 256 {
-// PERFECT-NEXT:      affine.for %arg11 = 0 to 64 {
-// PERFECT-NEXT:        %0 = affine.for %arg12 = 0 to 64 iter_args(%arg13 = %cst_4) -> (f32) {
-// PERFECT-NEXT:          %1 = affine.load %arg0[%arg12 + %arg10 * 64] : memref<?xf32>
-// PERFECT-NEXT:          %2 = affine.load %arg1[%arg11 + %arg12 * 64] : memref<?xf32>
-// PERFECT-NEXT:          %3 = arith.mulf %1, %2 : f32
-// PERFECT-NEXT:          %4 = arith.addf %arg13, %3 : f32
-// PERFECT-NEXT:          %c1 = arith.constant 1 : index
-// PERFECT-NEXT:          %5 = arith.addi %arg12, %c1 : index
-// PERFECT-NEXT:          %c64 = arith.constant 64 : index
-// PERFECT-NEXT:          %6 = arith.cmpi sge, %5, %c64 : index
-// PERFECT-NEXT:          scf.if %6 {
-// PERFECT-NEXT:           affine.store %4, %arg4[%arg11 + %arg10 * 64] : memref<?xf32>
-// PERFECT-NEXT:          }
-// PERFECT-NEXT:          affine.yield %4 : f32
-// PERFECT-NEXT:        }
-// PERFECT-NEXT:      }
-// PERFECT-NEXT:    }
