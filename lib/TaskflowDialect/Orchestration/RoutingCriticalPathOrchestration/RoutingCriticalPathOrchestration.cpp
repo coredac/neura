@@ -1,8 +1,9 @@
-//===- RoutingCriticalPathAllocation.cpp - Routing-critical-path-first ----===//
+//===- RoutingCriticalPathOrchestration.cpp -===//
 //
-// Implements the RoutingCriticalPathAllocation strategy.  The core algorithm
+// Implements the RoutingCriticalPathOrchestration strategy.  The core algorithm
 // lives in the TaskOrchestrator class (internal to this file);
-// runAllocation() instantiates it and delegates to TaskOrchestrator::place().
+// runOrchestration() instantiates it and delegates to
+// TaskOrchestrator::place().
 //
 // Supports two orchestration modes (controlled by OrchestrationMode):
 //   Spatial         — places each task on a unique CGRA; asserts if tasks
@@ -26,8 +27,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "TaskflowDialect/Allocation/RoutingCriticalPathAllocation.h"
-#include "TaskflowDialect/Allocation/allocation_utils.h"
+#include "TaskflowDialect/Orchestration/RoutingCriticalPathOrchestration/RoutingCriticalPathOrchestration.h"
+#include "TaskflowDialect/Orchestration/orchestration_utils.h"
 #include "TaskflowDialect/TaskflowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/Builders.h"
@@ -55,7 +56,7 @@ namespace {
 //===----------------------------------------------------------------------===//
 // CGRA Grid Position (spatial + temporal)
 //===----------------------------------------------------------------------===//
-/// Represents a spatial-temporal allocation for a task on the 2D CGRA grid.
+/// Represents a spatial-temporal orchestration for a task on the 2D CGRA grid.
 ///
 /// A task assigned to (row, col) occupies that CGRA for the half-open interval
 /// [start_time, start_time + duration).  Two tasks may share the same CGRA as
@@ -479,12 +480,12 @@ public:
       // downstream passes can read the task duration without re-computing it.
       if (!task_node->op->hasAttr("profile_info")) {
         SmallVector<NamedAttribute, 1> profile_attrs;
-        profile_attrs.push_back(
-            NamedAttribute(StringAttr::get(func.getContext(), "duration"),
-                           builder.getI32IntegerAttr(task_node->getDuration())));
-        task_node->op->setAttr("profile_info",
-                               DictionaryAttr::get(func.getContext(),
-                                                   profile_attrs));
+        profile_attrs.push_back(NamedAttribute(
+            StringAttr::get(func.getContext(), "duration"),
+            builder.getI32IntegerAttr(task_node->getDuration())));
+        task_node->op->setAttr(
+            "profile_info",
+            DictionaryAttr::get(func.getContext(), profile_attrs));
       }
 
       // Removes upstream resource-binding attributes that have been consumed.
@@ -509,8 +510,7 @@ private:
       return !cgra_occupancy_[row][col].empty();
     }
     for (auto [occupied_start, occupied_end] : cgra_occupancy_[row][col]) {
-      if (start_time < occupied_end &&
-          start_time + duration > occupied_start) {
+      if (start_time < occupied_end && start_time + duration > occupied_start) {
         return true;
       }
     }
@@ -711,7 +711,8 @@ private:
       positions.push_back({col_off, row_off});
       pos = close + 1;
     }
-    return CgraShape{rows, cols, /*is_rectangular=*/false, std::move(positions)};
+    return CgraShape{rows, cols, /*is_rectangular=*/false,
+                     std::move(positions)};
   }
 
   SmallVector<CgraShape> rotationsOf(const CgraShape &base) {
@@ -743,9 +744,8 @@ private:
 
       auto sorted_positions = normalised_positions;
       llvm::sort(sorted_positions,
-                 [](const std::pair<int, int> &a, const std::pair<int, int> &b) {
-                   return a < b;
-                 });
+                 [](const std::pair<int, int> &a,
+                    const std::pair<int, int> &b) { return a < b; });
 
       int64_t position_hash = 0;
       for (auto &[col, row] : sorted_positions) {
@@ -785,8 +785,8 @@ private:
   int computeScore(TaskNode *task_node, const TaskPlacement &placement,
                    TaskMemoryGraph &graph) {
     // Weight constants (tunable).
-    constexpr int kAlpha = 10; // SSA proximity weight.
-    constexpr int kBeta = 50;  // Memory proximity weight (high priority).
+    constexpr int kAlpha = 10;   // SSA proximity weight.
+    constexpr int kBeta = 50;    // Memory proximity weight (high priority).
     constexpr int kGamma = 1000; // Context switch cost is higher than NoC.
 
     int ssa_score = 0, mem_score = 0, context_reuse_penalty = 0;
@@ -854,7 +854,7 @@ private:
   ///
   /// Routing Critical Path: the longest chain of dependent tasks in the
   /// task graph, where each edge represents an explicit taskflow dependency.
-  /// This is the allocation analogue of the critical path in scheduling: the
+  /// This is the orchestration analogue of the critical path in scheduling: the
   /// chain of tasks that constrains the minimum total inter-CGRA communication
   /// distance.
   ///
@@ -918,13 +918,13 @@ private:
 } // namespace
 
 //===----------------------------------------------------------------------===//
-// RoutingCriticalPathAllocation::runAllocation
+// RoutingCriticalPathOrchestration::runOrchestration
 //===----------------------------------------------------------------------===//
 
 namespace mlir {
 namespace taskflow {
 
-bool RoutingCriticalPathAllocation::runAllocation(func::FuncOp func) {
+bool RoutingCriticalPathOrchestration::runOrchestration(func::FuncOp func) {
   TaskOrchestrator orchestrator(grid_rows_, grid_cols_, mode_);
   orchestrator.place(func);
   return true;

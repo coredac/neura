@@ -1,6 +1,6 @@
-//===- RoutingCriticalPathAllocation.h - Routing-critical-path-first ------===//
+//===- RoutingCriticalPathOrchestration.h -===//
 //
-// Concrete Allocation strategy that places Taskflow tasks onto a 2D
+// Concrete Orchestration strategy that places Taskflow tasks onto a 2D
 // multi-CGRA grid using a routing-critical-path-first ordering.
 //
 // Tasks with the longest downstream dependency chains are placed first so
@@ -9,11 +9,11 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef TASKFLOW_ROUTING_CRITICAL_PATH_ALLOCATION_H
-#define TASKFLOW_ROUTING_CRITICAL_PATH_ALLOCATION_H
+#ifndef TASKFLOW_ROUTING_CRITICAL_PATH_ORCHESTRATION_H
+#define TASKFLOW_ROUTING_CRITICAL_PATH_ORCHESTRATION_H
 
-#include "TaskflowDialect/Allocation/Allocation.h"
-#include "TaskflowDialect/Allocation/allocation_utils.h"
+#include "TaskflowDialect/Orchestration/Orchestration.h"
+#include "TaskflowDialect/Orchestration/orchestration_utils.h"
 
 namespace mlir {
 namespace taskflow {
@@ -28,7 +28,7 @@ enum class OrchestrationMode {
   SpatialTemporal,
 };
 
-/// Concrete allocation strategy: routing-critical-path-first.
+/// Concrete orchestration strategy: routing-critical-path-first.
 ///
 /// Implements the two-phase fixed-point algorithm:
 ///   Phase 1: Places tasks in routing-critical-path-first order, scoring each
@@ -41,16 +41,16 @@ enum class OrchestrationMode {
 /// In SpatialTemporal mode each task also receives a start_time (ASAP
 /// scheduling) and duration (from profiling or analytical estimation).
 /// The output attribute on each taskflow.task op is `task_orchestration_info`.
-class RoutingCriticalPathAllocation : public Allocation {
+class RoutingCriticalPathOrchestration : public Orchestration {
 public:
-  RoutingCriticalPathAllocation(
+  RoutingCriticalPathOrchestration(
       int grid_rows = kCgraGridRows, int grid_cols = kCgraGridCols,
       OrchestrationMode mode = OrchestrationMode::SpatialTemporal)
       : grid_rows_(grid_rows), grid_cols_(grid_cols), mode_(mode) {}
 
   /// Places all taskflow.task ops in `func` onto the grid, annotating each
   /// with a `task_orchestration_info` attribute.  Returns true on success.
-  bool runAllocation(mlir::func::FuncOp func) override;
+  bool runOrchestration(mlir::func::FuncOp func) override;
 
   std::string getName() const override { return "routing-critical-path-first"; }
 
@@ -63,4 +63,4 @@ private:
 } // namespace taskflow
 } // namespace mlir
 
-#endif // TASKFLOW_ROUTING_CRITICAL_PATH_ALLOCATION_H
+#endif // TASKFLOW_ROUTING_CRITICAL_PATH_ORCHESTRATION_H

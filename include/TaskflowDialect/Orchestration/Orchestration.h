@@ -1,15 +1,16 @@
-//===- Allocation.h - Abstract base class for CGRA task allocation --------===//
+//===- Orchestration.h - Abstract base class for CGRA orchestration
+//--------===//
 //
-// Defines the abstract Allocation interface for mapping Taskflow tasks onto a
-// 2D multi-CGRA grid.  Concrete strategies (e.g. ProximityAllocation) derive
-// from this class and override runAllocation().
+// Defines the abstract Orchestration interface for mapping Taskflow tasks onto
+// a 2D multi-CGRA grid.  Concrete strategies derive from this class and
+// override runOrchestration().
 //
 // Modelled after include/NeuraDialect/Mapping/Mapping.h.
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef TASKFLOW_ALLOCATION_H
-#define TASKFLOW_ALLOCATION_H
+#ifndef TASKFLOW_ORCHESTRATION_H
+#define TASKFLOW_ORCHESTRATION_H
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 
@@ -19,27 +20,27 @@ namespace mlir {
 namespace taskflow {
 
 //===----------------------------------------------------------------------===//
-// Allocation — abstract base class
+// Orchestration — abstract base class
 //===----------------------------------------------------------------------===//
 
-/// Abstract base class for different CGRA task-allocation strategies.
+/// Abstract base class for different CGRA task-orchestration strategies.
 ///
-/// Subclasses implement runAllocation() to map every taskflow.task operation
+/// Subclasses implement runOrchestration() to map every taskflow.task operation
 /// inside `func` onto the physical 2D multi-CGRA grid.  The pass delegates to
 /// whichever concrete strategy is installed, making it straightforward to swap
 /// in alternative algorithms (e.g. ILP-based, simulated-annealing, etc.)
 /// without touching the pass infrastructure.
-class Allocation {
+class Orchestration {
 public:
-  virtual ~Allocation() = default;
+  virtual ~Orchestration() = default;
 
-  /// Runs the allocation strategy on `func`, annotating each
-  /// taskflow.task op with a `task_allocation_info` attribute that records
+  /// Runs the orchestration strategy on `func`, annotating each
+  /// taskflow.task op with a `task_orchestration_info` attribute that records
   /// the assigned CGRA positions and SRAM locations.
   ///
   /// Returns true on success, false if no valid placement could be found
   /// (e.g. the grid is too full).
-  virtual bool runAllocation(mlir::func::FuncOp func) = 0;
+  virtual bool runOrchestration(mlir::func::FuncOp func) = 0;
 
   /// Returns a human-readable name for this strategy (used in log messages).
   virtual std::string getName() const = 0;
@@ -48,4 +49,4 @@ public:
 } // namespace taskflow
 } // namespace mlir
 
-#endif // TASKFLOW_ALLOCATION_H
+#endif // TASKFLOW_ORCHESTRATION_H

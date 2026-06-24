@@ -8,13 +8,13 @@
 // 3. Assigns memrefs to SRAMs (each MemRef is assigned to exactly one SRAM,
 //    determined by proximity to the task that first accesses it).
 //
-// Implementation: RoutingCriticalPathAllocation in
-// lib/TaskflowDialect/Allocation/RoutingCriticalPathAllocation.cpp.
+// Implementation: RoutingCriticalPathOrchestration in
+// lib/TaskflowDialect/Orchestration/RoutingCriticalPathOrchestration/RoutingCriticalPathOrchestration.cpp.
 //
 //===----------------------------------------------------------------------===//
 
 #include "NeuraDialect/Architecture/Architecture.h"
-#include "TaskflowDialect/Allocation/RoutingCriticalPathAllocation.h"
+#include "TaskflowDialect/Orchestration/RoutingCriticalPathOrchestration/RoutingCriticalPathOrchestration.h"
 #include "TaskflowDialect/TaskflowPasses.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
@@ -52,10 +52,10 @@ struct OrchestrateTaskOnCgraPass
                                  ? OrchestrationMode::Spatial
                                  : OrchestrationMode::SpatialTemporal;
     const neura::Architecture &architecture = neura::getArchitecture();
-    RoutingCriticalPathAllocation strategy(architecture.getMultiCgraRows(),
-                                           architecture.getMultiCgraColumns(),
-                                           mode);
-    strategy.runAllocation(getOperation());
+    RoutingCriticalPathOrchestration strategy(
+        architecture.getMultiCgraRows(), architecture.getMultiCgraColumns(),
+        mode);
+    strategy.runOrchestration(getOperation());
   }
 };
 

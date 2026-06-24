@@ -1,4 +1,5 @@
-//===- allocation_utils.h - Shared CGRA allocation utilities --------------===//
+//===- orchestration_utils.h - Shared CGRA orchestration utilities
+//--------------===//
 //
 // Shared utility types and functions used by OrchestrateTaskOnCgraPass and
 // ResourceAwareTaskOptimizationPass for 2D multi-CGRA grid placement
@@ -6,8 +7,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef TASKFLOW_ALLOCATION_UTILS_H
-#define TASKFLOW_ALLOCATION_UTILS_H
+#ifndef TASKFLOW_ORCHESTRATION_UTILS_H
+#define TASKFLOW_ORCHESTRATION_UTILS_H
 
 #include "llvm/ADT/SmallVector.h"
 
@@ -25,7 +26,7 @@ constexpr int kCgraGridCols = 4;
 // CgraShape
 //===----------------------------------------------------------------------===//
 
-// Represents a CGRA allocation shape on the grid.
+// Represents a CGRA orchestration shape on the grid.
 //
 // For rectangular shapes: rows × cols == cgra_count, and `cgra_positions`
 // is empty (all cells in the bounding box are used).
@@ -93,4 +94,4 @@ bool canAllTasksFitOnGrid(llvm::ArrayRef<int> task_cgra_counts);
 } // namespace taskflow
 } // namespace mlir
 
-#endif // TASKFLOW_CGRA_PLACEMENT_UTILS_H
+#endif // TASKFLOW_ORCHESTRATION_UTILS_H

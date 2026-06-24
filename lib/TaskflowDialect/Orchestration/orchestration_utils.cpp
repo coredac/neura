@@ -1,15 +1,16 @@
-//===- allocation_utils.cpp - Shared CGRA allocation utilities ------------===//
+//===- orchestration_utils.cpp - Shared CGRA orchestration utilities
+//------------===//
 //
 // Implements shared utility functions for 2D multi-CGRA grid placement used
 // by OrchestrateTaskOnCgraPass and ResourceAwareTaskOptimizationPass.
 //
 //===----------------------------------------------------------------------===//
 
-#include "TaskflowDialect/Allocation/allocation_utils.h"
+#include "TaskflowDialect/Orchestration/orchestration_utils.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 
 #include <algorithm>
 #include <climits>
@@ -197,7 +198,7 @@ bool mlir::taskflow::canAllTasksFitOnGrid(ArrayRef<int> task_cgra_counts) {
   // Sorts tasks by descending cgra_count for better packing (largest-first
   // decreasing, a standard bin-packing heuristic).  Each task may have a
   // different cgra_count because the balance phase only increments one
-  // bottleneck at a time; this array reflects the heterogeneous allocation
+  // bottleneck at a time; this array reflects the heterogeneous orchestration
   // across all tasks in the current trial configuration.
   SmallVector<int> sorted_counts(task_cgra_counts.begin(),
                                  task_cgra_counts.end());
