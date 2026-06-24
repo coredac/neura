@@ -1,13 +1,4 @@
-//===- RoutingCriticalPathOrchestration.h -===//
-//
-// Concrete Orchestration strategy that places Taskflow tasks onto a 2D
-// multi-CGRA grid using a routing-critical-path-first ordering.
-//
-// Tasks with the longest downstream dependency chains are placed first so
-// that their successors can land on adjacent CGRAs, minimizing inter-task
-// communication distance along the critical path.
-//
-//===----------------------------------------------------------------------===//
+// Routing-critical-path CGRA orchestration.
 
 #ifndef TASKFLOW_ROUTING_CRITICAL_PATH_ORCHESTRATION_H
 #define TASKFLOW_ROUTING_CRITICAL_PATH_ORCHESTRATION_H
@@ -18,46 +9,56 @@
 namespace mlir {
 namespace taskflow {
 
-/// Controls whether a time-slot dimension is added to every CGRA assignment.
-enum class OrchestrationMode {
-  /// Each CGRA is assigned to at most one task.  Asserts if tasks exceed the
-  /// grid size.
-  Spatial,
-  /// Adds a time-slot dimension.  Tasks that would over-subscribe the grid
-  /// are scheduled at a later time slot, enabling temporal reuse of CGRAs.
-  SpatialTemporal,
-};
-
-/// Concrete orchestration strategy: routing-critical-path-first.
-///
-/// Implements the two-phase fixed-point algorithm:
-///   Phase 1: Places tasks in routing-critical-path-first order, scoring each
-///            candidate grid position by proximity to SSA predecessors /
-///            successors and assigned SRAMs.
-///   Phase 2: Assigns each MemRef to the SRAM nearest to the centroid of all
-///            CGRAs that access it.
-/// Iterates until SRAM assignments converge.
-///
-/// In SpatialTemporal mode each task also receives a start_time (ASAP
-/// scheduling) and duration (from profiling or analytical estimation).
-/// The output attribute on each taskflow.task op is `task_orchestration_info`.
+// Concrete orchestration strategy: routing-critical-path-first.
+//
+// Implements the two-phase fixed-point algorithm:
+//   Phase 1: Places tasks in routing-critical-path-first order, scoring each
+//            candidate grid position by proximity to SSA predecessors /
+//            successors and assigned SRAMs.
+//   Phase 2: Assigns each MemRef to the SRAM nearest to the centroid of all
+//            CGRAs that access it.
+// Iterates until SRAM assignments converge.
+//
+// In SpatialTemporal mode each task also receives a start_time (ASAP
+// scheduling) and duration (from profiling or analytical estimation).
+// The output attribute on each taskflow.task op is `task_orchestration_info`.
 class RoutingCriticalPathOrchestration : public Orchestration {
 public:
   RoutingCriticalPathOrchestration(
       int grid_rows = kCgraGridRows, int grid_cols = kCgraGridCols,
-      OrchestrationMode mode = OrchestrationMode::SpatialTemporal)
+      SchedulingMode mode = SchedulingMode::SpatialTemporal)
       : grid_rows_(grid_rows), grid_cols_(grid_cols), mode_(mode) {}
 
-  /// Places all taskflow.task ops in `func` onto the grid, annotating each
-  /// with a `task_orchestration_info` attribute.  Returns true on success.
-  bool runOrchestration(mlir::func::FuncOp func) override;
+  // Places all taskflow.task ops in `func` onto the grid, annotating each
+  // with a `task_orchestration_info` attribute.  Returns true on success.
+  bool runTaskOrchestration(mlir::func::FuncOp func) override;
 
   std::string getName() const override { return "routing-critical-path-first"; }
 
 private:
+  // Task successor graph: producer task operation -> direct consumer task
+  // operations.
+  using TaskSuccessorMap =
+      llvm::DenseMap<Operation *, llvm::SmallVector<Operation *>>;
+
+  // Adds one producer -> consumer edge to the task successor graph if it is
+  // valid and not already present.
+  void addDependencyEdge(TaskSuccessorMap &successors, Operation *producer,
+                         Operation *consumer) const;
+
+  // Computes the longest downstream dependency-chain length starting from
+  // `task`. This depth is used as the routing-critical-path priority.
+  int computeDependencyDepth(Operation *task, TaskSuccessorMap &successors,
+                             llvm::DenseMap<Operation *, int> &depth_cache,
+                             llvm::DenseSet<Operation *> &visiting) const;
+
+  // Builds the task dependency graph from Taskflow SSA/token operands and
+  // returns the priority map consumed by TaskScheduler.
+  TaskPriorityMap computeRoutingCriticalPathPriority(func::FuncOp func) const;
+
   int grid_rows_;
   int grid_cols_;
-  OrchestrationMode mode_;
+  SchedulingMode mode_;
 };
 
 } // namespace taskflow

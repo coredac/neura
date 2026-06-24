@@ -1,30 +1,26 @@
-//===- orchestration_utils.h - Shared CGRA orchestration utilities
-//--------------===//
-//
-// Shared utility types and functions used by OrchestrateTaskOnCgraPass and
-// ResourceAwareTaskOptimizationPass for 2D multi-CGRA grid placement
-// feasibility checks and task-to-CGRA mapping.
-//
-//===----------------------------------------------------------------------===//
+// Shared CGRA orchestration utilities.
 
 #ifndef TASKFLOW_ORCHESTRATION_UTILS_H
 #define TASKFLOW_ORCHESTRATION_UTILS_H
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
+
+#include <utility>
+#include <vector>
 
 namespace mlir {
 namespace taskflow {
 
-//===----------------------------------------------------------------------===//
-// Grid constants
-//===----------------------------------------------------------------------===//
+// Grid constants.
 
 constexpr int kCgraGridRows = 4;
 constexpr int kCgraGridCols = 4;
 
-//===----------------------------------------------------------------------===//
-// CgraShape
-//===----------------------------------------------------------------------===//
+// CgraShape.
 
 // Represents a CGRA orchestration shape on the grid.
 //
@@ -59,9 +55,7 @@ struct CgraShape {
   std::string irAttr() const;
 };
 
-//===----------------------------------------------------------------------===//
-// Shape Enumeration Utilities
-//===----------------------------------------------------------------------===//
+// Shape enumeration utilities.
 
 // Generates all placement-candidate shapes for `cgra_count` CGRAs, including
 // rotations. Rectangular shapes include both orientations (rows×cols and
@@ -74,9 +68,7 @@ struct CgraShape {
 //   2. Non-rectangular shapes (L, T, etc.) in all unique rotations.
 llvm::SmallVector<CgraShape> getAllPlacementShapes(int cgra_count);
 
-//===----------------------------------------------------------------------===//
-// Global Placement Feasibility
-//===----------------------------------------------------------------------===//
+// Global placement feasibility.
 
 // Simulates greedy placement of all tasks' shapes on the kCgraGridRows x
 // kCgraGridCols grid to verify that they physically fit without overlap.
@@ -90,6 +82,95 @@ llvm::SmallVector<CgraShape> getAllPlacementShapes(int cgra_count);
 //
 // Returns true if all tasks can be placed without overlap.
 bool canAllTasksFitOnGrid(llvm::ArrayRef<int> task_cgra_counts);
+
+// Task scheduling utilities.
+
+// Controls whether a time-slot dimension is added to every CGRA assignment.
+enum class SchedulingMode {
+  // Each CGRA is assigned to at most one task. Asserts if tasks exceed the
+  // grid size.
+  Spatial,
+  // Adds a time-slot dimension. Tasks that would over-subscribe the grid are
+  // scheduled at a later time slot, enabling temporal reuse of CGRAs.
+  SpatialTemporal,
+};
+
+// One scheduled CGRA cell assignment for a task.
+struct CgraPosition;
+
+// Complete CGRA placement chosen for one task.
+struct TaskPlacement;
+
+// Internal task node used by the scheduler's dependency graph.
+struct TaskNode;
+
+// Internal task/memory dependency graph built from one func.func.
+class TaskMemoryGraph;
+
+// Caller-provided task priority; higher values are scheduled earlier.
+using TaskPriorityMap = llvm::DenseMap<Operation *, int>;
+
+// Reusable one-shot scheduler/placer for Taskflow task graphs.
+//
+// Builds the task-memory graph, schedules tasks using the provided priority,
+// places them on the CGRA grid, assigns SRAM locations, and emits
+// task_orchestration_info/profile_info metadata.
+class TaskScheduler {
+public:
+  TaskScheduler(int grid_rows = kCgraGridRows, int grid_cols = kCgraGridCols,
+                SchedulingMode mode = SchedulingMode::SpatialTemporal);
+
+  // Schedules and places all Taskflow tasks in `func` using the caller-provided
+  // task priority map.
+  bool schedule(func::FuncOp func, const TaskPriorityMap &priority);
+
+private:
+  // Returns true if a CGRA grid coordinate is inside the configured grid.
+  bool posInBounds(const CgraPosition &pos) const;
+
+  // Returns true if a CGRA cell is already occupied during the requested
+  // time interval.
+  bool isOccupied(int row, int col, int start_time, int duration) const;
+
+  // Marks a CGRA cell as occupied for the half-open interval
+  // [start_time, start_time + duration).
+  void markOccupied(int row, int col, int start_time, int duration);
+
+  // Clears all task placements and CGRA occupancy state before another
+  // fixed-point placement iteration.
+  void resetTaskPlacements(TaskMemoryGraph &graph);
+
+  // Computes the earliest start time allowed by already-placed predecessor
+  // tasks.
+  int computeEarliestStartTime(const TaskNode *task_node) const;
+
+  // Assigns every memory node to the SRAM location closest to its accessing
+  // tasks and returns whether any assignment changed.
+  bool assignAllSrams(TaskMemoryGraph &graph);
+
+  // Searches legal grid positions and returns the best-scoring placement for
+  // one task under the current scheduling mode.
+  TaskPlacement findBestPlacement(TaskNode *task_node, int cgra_count,
+                                  TaskMemoryGraph &graph);
+
+  // Parses a cgra_shape attribute string into its base placement shape.
+  CgraShape parseCgraShapeToBase(StringRef cgra_shape, int cgra_count);
+
+  // Generates all unique rotations of a placement shape.
+  llvm::SmallVector<CgraShape> rotationsOf(const CgraShape &base);
+
+  // Scores a candidate placement using proximity to dependent tasks, assigned
+  // SRAMs, and context reuse cost.
+  int computeScore(TaskNode *task_node, const TaskPlacement &placement,
+                   TaskMemoryGraph &graph);
+
+  int grid_rows_;
+  int grid_cols_;
+  SchedulingMode mode_;
+  int total_task_count_ = 0;
+  std::vector<std::vector<llvm::SmallVector<std::pair<int, int>, 4>>>
+      cgra_occupancy_;
+};
 
 } // namespace taskflow
 } // namespace mlir

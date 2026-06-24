@@ -1,17 +1,4 @@
-//===- OrchestrateTaskOnCgraPass.cpp - Task to CGRA Orchestration Pass ---===//
-//
-// Implements the orchestrate-task-on-cgra pass, which maps Taskflow tasks
-// onto a 2D multi-CGRA grid array:
-// 1. Places tasks with SSA dependencies (producer-consumer pairs) on
-//    adjacent CGRAs to enable direct data forwarding.
-// 2. Adds spatial-temporal scheduling (context_id) per task.
-// 3. Assigns memrefs to SRAMs (each MemRef is assigned to exactly one SRAM,
-//    determined by proximity to the task that first accesses it).
-//
-// Implementation: RoutingCriticalPathOrchestration in
-// lib/TaskflowDialect/Orchestration/RoutingCriticalPathOrchestration/RoutingCriticalPathOrchestration.cpp.
-//
-//===----------------------------------------------------------------------===//
+// Orchestrate Taskflow tasks onto a multi-CGRA grid.
 
 #include "NeuraDialect/Architecture/Architecture.h"
 #include "TaskflowDialect/Orchestration/RoutingCriticalPathOrchestration/RoutingCriticalPathOrchestration.h"
@@ -39,23 +26,23 @@ struct OrchestrateTaskOnCgraPass
            "spatial-temporal)";
   }
 
-  Option<std::string> orchestrationMode{
-      *this, "orchestration-mode",
-      llvm::cl::desc("Task orchestration mode: 'spatial' (one task per CGRA, "
+  Option<std::string> schedulingMode{
+      *this, "scheduling-mode",
+      llvm::cl::desc("Task scheduling mode: 'spatial' (one task per CGRA, "
                      "asserts if tasks exceed the grid size) or "
                      "'spatial-temporal' (default, time-multiplexes CGRAs so "
                      "task count is not bounded by grid size)."),
       llvm::cl::init("spatial-temporal")};
 
   void runOnOperation() override {
-    OrchestrationMode mode = (orchestrationMode.getValue() == "spatial")
-                                 ? OrchestrationMode::Spatial
-                                 : OrchestrationMode::SpatialTemporal;
+    SchedulingMode mode = (schedulingMode.getValue() == "spatial")
+                              ? SchedulingMode::Spatial
+                              : SchedulingMode::SpatialTemporal;
     const neura::Architecture &architecture = neura::getArchitecture();
     RoutingCriticalPathOrchestration strategy(
         architecture.getMultiCgraRows(), architecture.getMultiCgraColumns(),
         mode);
-    strategy.runOrchestration(getOperation());
+    strategy.runTaskOrchestration(getOperation());
   }
 };
 
