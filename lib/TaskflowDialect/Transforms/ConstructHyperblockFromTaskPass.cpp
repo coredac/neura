@@ -295,8 +295,10 @@ createHyperblockFromLoopBody(OpBuilder &builder, Location loc,
   if (has_iter_args) {
     for (size_t i = 0; i < iter_args_types.size(); ++i) {
       size_t arg_idx = used_loop_indices.size() + i;
+      Value hyperblock_iter_arg = hyperblock_body->getArgument(arg_idx);
       mapper.map(deepest_perfect_loop.getRegionIterArgs()[i],
-                 hyperblock_body->getArgument(arg_idx));
+                 hyperblock_iter_arg);
+      mapper.map(iter_args_init_values[i], hyperblock_iter_arg);
     }
   }
 
