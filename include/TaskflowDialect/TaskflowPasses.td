@@ -127,20 +127,35 @@ def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
     Uses multi-CGRA dimensions from --architecture-spec. If no architecture
     spec is provided, the architecture parser supplies a default 4x4 grid.
   }];
-  let options = [
-    Option<
-        "schedulingMode", "scheduling-mode", "std::string",
-        /*default=*/"\"spatial-temporal\"",
-        "Task scheduling mode: 'spatial' (one task per CGRA, asserts if "
-        "tasks exceed the grid size) or 'spatial-temporal' (default, "
-        "time-multiplexes CGRAs so task count is not bounded by grid size).">,
-    Option<
-        "orchestrationStrategy", "orchestration-strategy", "std::string",
-        /*default=*/"\"routing-critical-path\"",
-        "Task orchestration strategy: 'routing-critical-path' (default) or "
-        "'throughput-guided'.">
-  ];
+  let options =
+      [Option<"schedulingMode", "scheduling-mode", "std::string",
+              /*default=*/"\"spatial-temporal\"",
+              "Task scheduling mode: 'spatial' (one task per CGRA, asserts if "
+              "tasks exceed the grid size) or 'spatial-temporal' (default, "
+              "time-multiplexes CGRAs so task count is not bounded by grid "
+              "size).">,
+       Option<
+           "orchestrationStrategy", "orchestration-strategy", "std::string",
+           /*default=*/"\"routing-critical-path\"",
+           "Task orchestration strategy: 'routing-critical-path' (default) or "
+           "'throughput-guided'.">];
   let constructor = "taskflow::createOrchestrateTaskOnCgraPass()";
+}
+
+def AnalyzeTaskPipelineInterval
+    : Pass<"analyze-task-pipeline-interval", "func::FuncOp"> {
+  let summary =
+      "Analyzes the pipeline interval of already-profiled and scheduled tasks";
+  let description = [{
+    Reads taskflow.task operations that already contain profile_info.duration
+    and task_orchestration_info.cgra_positions. The pass reconstructs the
+    concrete task schedule from task dependences and per-CGRA context order,
+    invokes TaskPipelineIntervalAnalyzer, and emits task_pipeline_interval_info
+    on the parent func.func.
+  }];
+  let constructor = "taskflow::createAnalyzeTaskPipelineIntervalPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::taskflow::TaskflowDialect"];
 }
 
 def FuseTask : Pass<"fuse-task", "func::FuncOp"> {
