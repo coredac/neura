@@ -158,153 +158,172 @@ private:
 };
 
 //==============================================================================
-// MCT Builder - Builds nested affine.for loops for the entire chain.
+// MCT Builder.
+//
+// MCT stands for "Minimized Canonicalized Task": a standalone affine loop nest
+// rebuilt from one root-to-leaf LoopChain extracted from the original SALT. If
+// a loop tree has multiple leaf loops, this pass serializes it into multiple
+// MCTs, one per root-to-leaf path.
 //==============================================================================
 class MCTBuilder {
 public:
   MCTBuilder(OpBuilder &builder, Location loc) : builder(builder), loc(loc) {}
 
-  // Builds the loop chain and returns the outermost loop.
-  // The built loops will be inserted at the builder's current insertion point.
-  affine::AffineForOp build(const LoopChain &chain) {
+  // Entry point for building one MCT. `buildNode` does the recursive work while
+  // this function owns the old-to-new value mapping for the whole chain.
+  FailureOr<affine::AffineForOp> build(const LoopChain &chain) {
     // Mapping from old values to new values.
     IRMapping mapping;
-
-    affine::AffineForOp outer_loop = nullptr;
-    Block *current_insert_block = nullptr;
-    SmallVector<affine::AffineForOp> created_loops;
-
-    // Iterate from root to leaf to build the nested loops.
-    for (size_t i = 0; i < chain.nodes.size(); ++i) {
-      SALTNode *node = chain.nodes[i];
-      bool is_first = (i == 0);
-
-      OpBuilder loop_builder(builder.getContext());
-      if (is_first) {
-        loop_builder = builder;
-      } else {
-        // We want to insert the nested loop at the end of the current block.
-        // If the block has a terminator (e.g. yield we just added/cloned?),
-        // we should insert before it?
-        // Actually, we remove default yield immediately after creation.
-        // So the block usually doesn't have a terminator when we are filling
-        // it, UNLESS we cloned a yield from body ops? SALT excludes Yields from
-        // body_operations. So current_insert_block should be terminator-free
-        // (or we removed it).
-        loop_builder = OpBuilder::atBlockEnd(current_insert_block);
-      }
-
-      // Prepares iter_args for the new loop.
-      SmallVector<Value> iter_args_init_values;
-      if (node->loop_op.getNumIterOperands() > 0) {
-        for (Value init : node->loop_op.getInits()) {
-          iter_args_init_values.push_back(mapping.lookupOrDefault(init));
-        }
-      }
-
-      // Creates new loop with same bounds and iter_args.
-      auto new_loop = loop_builder.create<affine::AffineForOp>(
-          loc, node->lower_bound, node->upper_bound, node->step,
-          iter_args_init_values);
-
-      created_loops.push_back(new_loop);
-
-      // Maps the old induction variable to the new one.
-      mapping.map(node->loop_op.getInductionVar(), new_loop.getInductionVar());
-
-      // Maps the old iter_args (block args) to the new iter_args (block args).
-      if (node->loop_op.getNumRegionIterArgs() > 0) {
-        for (auto [old_arg, new_arg] :
-             llvm::zip(node->loop_op.getRegionIterArgs(),
-                       new_loop.getRegionIterArgs())) {
-          mapping.map(old_arg, new_arg);
-        }
-      }
-
-      if (is_first) {
-        outer_loop = new_loop;
-      }
-
-      // Updates current insertion block to the body of the new loop.
-      current_insert_block = new_loop.getBody();
-
-      // Removes the default yield created by create<AffineForOp>.
-      if (!current_insert_block->empty() &&
-          isa<affine::AffineYieldOp>(current_insert_block->back()))
-        current_insert_block->back().erase();
-
-      // Clones body operations for THIS node.
-      OpBuilder body_builder = OpBuilder::atBlockEnd(current_insert_block);
-      for (Operation *op : node->body_operations) {
-        Operation *new_op = body_builder.clone(*op, mapping);
-        // Updates mapping with results of the new op.
-        for (auto [old_res, new_res] :
-             llvm::zip(op->getResults(), new_op->getResults())) {
-          mapping.map(old_res, new_res);
-        }
-      }
-    }
-
-    // Fixes up yields for non-leaf loops (bottom-up).
-    for (int i = created_loops.size() - 2; i >= 0; --i) {
-      affine::AffineForOp parent = created_loops[i];
-      affine::AffineForOp child = created_loops[i + 1];
-
-      OpBuilder yield_builder = OpBuilder::atBlockEnd(parent.getBody());
-
-      if (child.getNumResults() > 0) {
-        yield_builder.create<affine::AffineYieldOp>(loc, child.getResults());
-      } else {
-        yield_builder.create<affine::AffineYieldOp>(loc);
-      }
-    }
-
-    // For the LEAF loop, we cloned body operations (which excludes Yields).
-    // So the leaf loop likely has NO yield now.
-    // We must add a yield to the leaf loop that yields the results of the
-    // operations that produced results (mapped from original yield).
-    // SALTNode loop_op is the original loop.
-    // The original loop body had a yield.
-    // We need to find what the original yield yielded, map it, and yield it
-    // here.
-
-    // If SALT excludes Yield from body_operations, then we NEVER cloned
-    // the yield. So the leaf loop has no terminator. We must reconstruct the
-    // yield for the leaf loop.
-
-    if (!created_loops.empty()) {
-      affine::AffineForOp new_leaf = created_loops.back();
-      SALTNode *leaf_node = chain.getLeaf(); // or chain.nodes.back()
-
-      // Finds the yield op in the original leaf node.
-      Operation *original_yield = nullptr;
-      for (Operation &op : leaf_node->loop_op.getBody()->getOperations()) {
-        if (isa<affine::AffineYieldOp>(&op)) {
-          original_yield = &op;
-          break;
-        }
-      }
-
-      if (original_yield) {
-        OpBuilder leaf_yield_builder =
-            OpBuilder::atBlockEnd(new_leaf.getBody());
-        SmallVector<Value> yielded_values;
-        for (Value operand : original_yield->getOperands()) {
-          yielded_values.push_back(mapping.lookupOrDefault(operand));
-        }
-        leaf_yield_builder.create<affine::AffineYieldOp>(loc, yielded_values);
-      } else {
-        assert(false &&
-               "Original leaf loop must have a yield operation in its body.");
-      }
-    }
-
-    return outer_loop;
+    return buildNode(chain, /*index=*/0, mapping, builder,
+                     chain.getRoot()->loop_op.getOperation());
   }
 
 private:
   OpBuilder &builder;
   Location loc;
+
+  static bool isDefinedInside(Operation *root_op, Value value) {
+    if (auto block_arg = dyn_cast<BlockArgument>(value)) {
+      Region *region = block_arg.getParentRegion();
+      Operation *owner = region ? region->getParentOp() : nullptr;
+      while (owner) {
+        if (owner == root_op) {
+          return true;
+        }
+        owner = owner->getParentOp();
+      }
+      return false;
+    }
+
+    Operation *def = value.getDefiningOp();
+    while (def) {
+      if (def == root_op) {
+        return true;
+      }
+      def = def->getParentOp();
+    }
+    return false;
+  }
+
+  LogicalResult checkOperandsMapped(Operation *op, Operation *root_op,
+                                    const IRMapping &mapping) {
+    for (Value operand : op->getOperands()) {
+      if (isDefinedInside(root_op, operand) && !mapping.contains(operand)) {
+        return failure();
+      }
+    }
+    return success();
+  }
+
+  FailureOr<Value> lookupMappedValue(Operation *op, Value value,
+                                     Operation *root_op,
+                                     const IRMapping &mapping) {
+    if (isDefinedInside(root_op, value) && !mapping.contains(value)) {
+      return failure();
+    }
+    return mapping.lookupOrDefault(value);
+  }
+
+  // Recursively rebuilds `chain[index]` and its selected child.
+  //
+  // The original loop body order matters. A parent loop body may contain a
+  // child reduction followed by an operation that consumes the child result:
+  //
+  //   %sum = affine.for ... -> f32 { ... }
+  //   affine.store %sum, ...
+  //
+  // Rebuilding the selected child exactly where it appeared ensures `%sum` is
+  // mapped before later operations are cloned.
+  FailureOr<affine::AffineForOp> buildNode(const LoopChain &chain, size_t index,
+                                           IRMapping &mapping,
+                                           OpBuilder &insert_builder,
+                                           Operation *root_op) {
+    SALTNode *node = chain.nodes[index];
+    // The next node in the LoopChain is the only nested loop cloned at this
+    // level. Other sibling loops are serialized into their own MCTs.
+    SALTNode *selected_child =
+        (index + 1 < chain.nodes.size()) ? chain.nodes[index + 1] : nullptr;
+
+    SmallVector<Value> iter_args_init_values;
+    for (Value init : node->loop_op.getInits()) {
+      FailureOr<Value> mapped_init =
+          lookupMappedValue(node->loop_op, init, root_op, mapping);
+      if (failed(mapped_init)) {
+        return failure();
+      }
+      iter_args_init_values.push_back(*mapped_init);
+    }
+
+    auto new_loop = insert_builder.create<affine::AffineForOp>(
+        loc, node->lower_bound, node->upper_bound, node->step,
+        iter_args_init_values);
+
+    mapping.map(node->loop_op.getInductionVar(), new_loop.getInductionVar());
+
+    for (auto [old_arg, new_arg] : llvm::zip(node->loop_op.getRegionIterArgs(),
+                                             new_loop.getRegionIterArgs())) {
+      mapping.map(old_arg, new_arg);
+    }
+
+    for (auto [old_result, new_result] :
+         llvm::zip(node->loop_op.getResults(), new_loop.getResults())) {
+      mapping.map(old_result, new_result);
+    }
+
+    Block *body = new_loop.getBody();
+    if (!body->empty() && isa<affine::AffineYieldOp>(body->back())) {
+      body->back().erase();
+    }
+
+    // Clone the body in source order. This is what keeps child-loop results
+    // available before cloning later non-loop operations that consume them.
+    OpBuilder body_builder = OpBuilder::atBlockEnd(body);
+
+    for (Operation &op : node->loop_op.getBody()->getOperations()) {
+      // Rebuild yields explicitly because the default yield was removed above.
+      if (auto yield_op = dyn_cast<affine::AffineYieldOp>(&op)) {
+        SmallVector<Value> yielded_values;
+        for (Value operand : yield_op.getOperands()) {
+          FailureOr<Value> mapped_operand =
+              lookupMappedValue(yield_op, operand, root_op, mapping);
+          if (failed(mapped_operand)) {
+            new_loop.erase();
+            return failure();
+          }
+          yielded_values.push_back(*mapped_operand);
+        }
+        body_builder.create<affine::AffineYieldOp>(loc, yielded_values);
+        continue;
+      }
+
+      if (auto nested_for = dyn_cast<affine::AffineForOp>(&op)) {
+        // Only clone the selected child for this root-to-leaf chain.
+        if (selected_child && nested_for == selected_child->loop_op) {
+          if (failed(buildNode(chain, index + 1, mapping, body_builder,
+                               root_op))) {
+            new_loop.erase();
+            return failure();
+          }
+          body_builder = OpBuilder::atBlockEnd(body);
+        }
+        continue;
+      }
+
+      // Non-loop operations belong to this MCT and are cloned with the current
+      // mapping. Their results are then available to later operations.
+      if (failed(checkOperandsMapped(&op, root_op, mapping))) {
+        new_loop.erase();
+        return failure();
+      }
+      Operation *new_op = body_builder.clone(op, mapping);
+      for (auto [old_res, new_res] :
+           llvm::zip(op.getResults(), new_op->getResults())) {
+        mapping.map(old_res, new_res);
+      }
+    }
+
+    return new_loop;
+  }
 };
 
 //==============================================================================
@@ -391,22 +410,36 @@ private:
       }
 
       // Builds new chains.
+      bool serialized_root = true;
+      SmallVector<affine::AffineForOp> new_loops;
       for (const LoopChain &chain : root_chains) {
         MCTBuilder mct_builder(builder, loc);
-        affine::AffineForOp new_loop = mct_builder.build(chain);
-
-        // If the original root loop had results (iter_args), and the new loop
-        // has matching results, we must replace the uses of the original
-        // results with the new ones. NOTE: This assumes that for a loop
-        // defining values, there is a corresponding single chain that produces
-        // all the values (or at least the one we process). If a root with
-        // results is split into multiple chains, this simple logic might loop
-        // over them. However, for a reduction loop that is a single chain, this
-        // works.
-        if (root->loop_op.getNumResults() > 0 && new_loop &&
-            new_loop.getNumResults() == root->loop_op.getNumResults()) {
-          root->loop_op.replaceAllUsesWith(new_loop.getResults());
+        FailureOr<affine::AffineForOp> new_loop = mct_builder.build(chain);
+        if (failed(new_loop)) {
+          serialized_root = false;
+          break;
         }
+        new_loops.push_back(*new_loop);
+      }
+
+      if (!serialized_root) {
+        for (auto it = new_loops.rbegin(); it != new_loops.rend(); ++it) {
+          it->erase();
+        }
+        continue;
+      }
+
+      // If the original root loop had results (iter_args), and the new loop
+      // has matching results, we must replace the uses of the original
+      // results with the new ones. NOTE: This assumes that for a loop
+      // defining values, there is a corresponding single chain that produces
+      // all the values (or at least the one we process). If a root with
+      // results is split into multiple chains, this simple logic might loop
+      // over them. However, for a reduction loop that is a single chain, this
+      // works.
+      if (root->loop_op.getNumResults() > 0 && new_loops.size() == 1 &&
+          new_loops.front().getNumResults() == root->loop_op.getNumResults()) {
+        root->loop_op.replaceAllUsesWith(new_loops.front().getResults());
       }
 
       // Erases the original root loop.

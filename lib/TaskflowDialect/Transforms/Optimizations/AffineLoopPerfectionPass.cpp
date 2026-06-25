@@ -57,6 +57,150 @@ static bool hasSideEffect(Operation *op) {
   return true;
 }
 
+static Value
+resolveLoopResultToYieldOperand(Value value,
+                                ArrayRef<affine::AffineForOp> inner_loops) {
+  // When an epilogue op uses a nested loop result, sinking that op into the
+  // innermost loop would violate dominance.  At the last iteration, the loop
+  // result is exactly the corresponding affine.yield operand, so use that
+  // in-loop value instead.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+
+    for (affine::AffineForOp loop : inner_loops) {
+      auto yield_op =
+          dyn_cast<affine::AffineYieldOp>(loop.getBody()->getTerminator());
+      if (!yield_op) {
+        return nullptr;
+      }
+
+      for (auto [idx, result] : llvm::enumerate(loop.getResults())) {
+        if (value != result) {
+          continue;
+        }
+
+        if (idx >= yield_op.getNumOperands()) {
+          return nullptr;
+        }
+
+        value = yield_op.getOperand(idx);
+        changed = true;
+        break;
+      }
+
+      if (changed) {
+        break;
+      }
+    }
+  }
+
+  return value;
+}
+
+static LogicalResult
+remapLoopResultOperands(Operation *op,
+                        ArrayRef<affine::AffineForOp> inner_loops) {
+  for (OpOperand &operand : op->getOpOperands()) {
+    Value old_value = operand.get();
+    Value new_value = resolveLoopResultToYieldOperand(old_value, inner_loops);
+    if (!new_value) {
+      return failure();
+    }
+
+    if (new_value != old_value) {
+      operand.set(new_value);
+    }
+  }
+
+  return success();
+}
+
+static bool hasResultUsedByOperation(Operation *producer, Operation *user) {
+  return llvm::any_of(producer->getResults(), [&](Value result) {
+    return llvm::any_of(result.getUses(),
+                        [&](OpOperand &use) { return use.getOwner() == user; });
+  });
+}
+
+static LogicalResult checkLoopBandSupported(AffineLoopBand &loop_band) {
+  for (size_t i = loop_band.size() - 1; i > 0; i--) {
+    affine::AffineForOp loop = loop_band[i - 1];
+    affine::AffineForOp child_loop = loop_band[i];
+
+    bool is_prologue = true;
+    bool has_prologue_side_effect = false;
+    bool has_epilogue_side_effect = false;
+
+    for (Operation &op : loop.getRegion().front()) {
+      if (&op == child_loop) {
+        is_prologue = false;
+        continue;
+      }
+
+      if (isa<affine::AffineYieldOp>(&op)) {
+        continue;
+      }
+
+      if (llvm::any_of(op.getResultTypes(),
+                       [](Type type) { return isa<MemRefType>(type); })) {
+        llvm::errs() << "[LoopPerfection] Skipping unsupported loop band: "
+                        "memref-producing operation.\n";
+        return failure();
+      }
+
+      if (isa<func::CallOp>(&op)) {
+        llvm::errs() << "[LoopPerfection] Skipping unsupported loop band: "
+                        "function call operation.\n";
+        return failure();
+      }
+
+      if (is_prologue && hasResultUsedByOperation(&op, child_loop)) {
+        // Example: %init = affine.load ...; affine.for ... iter_args(%x =
+        // %init). Moving %init into the child loop would place the definition
+        // after the child loop operand use, so keep this band unchanged.
+        llvm::errs()
+            << "[LoopPerfection] Skipping unsupported loop band: prologue "
+               "operation is used by child loop operands.\n";
+        return failure();
+      }
+
+      if (hasSideEffect(&op)) {
+        if (is_prologue) {
+          has_prologue_side_effect = true;
+        } else {
+          has_epilogue_side_effect = true;
+        }
+      }
+    }
+
+    ArrayRef<affine::AffineForOp> inner_loops =
+        ArrayRef<affine::AffineForOp>(loop_band).drop_front(i);
+
+    if (has_prologue_side_effect) {
+      for (affine::AffineForOp inner_loop : inner_loops) {
+        if (!inner_loop.hasConstantLowerBound()) {
+          llvm::errs() << "[LoopPerfection] Skipping unsupported loop band: "
+                          "non-constant lower bound.\n";
+          return failure();
+        }
+      }
+    }
+
+    if (has_epilogue_side_effect) {
+      for (affine::AffineForOp inner_loop : inner_loops) {
+        if (!inner_loop.getStepAsInt() || !inner_loop.hasConstantUpperBound()) {
+          llvm::errs() << "[LoopPerfection] Skipping unsupported loop band: "
+                          "non-constant upper bound or step.\n";
+          return failure();
+        }
+      }
+    }
+  }
+
+  return success();
+}
+
 // Collects loop bands from a function.
 static void collectLoopBands(func::FuncOp func_op,
                              SmallVector<AffineLoopBand> &loop_bands) {
@@ -192,11 +336,15 @@ createEpilogueCondition(OpBuilder &builder, Location loc,
 // Sinks all operations into the innermost loop with condition execution.
 static LogicalResult applyLoopPerfection(AffineLoopBand &loop_band) {
   if (loop_band.empty()) {
-    return failure();
+    return success();
   }
 
   llvm::errs() << "[LoopPerfection] Processing loop band with "
                << loop_band.size() << " loops.\n";
+
+  if (failed(checkLoopBandSupported(loop_band))) {
+    return success();
+  }
 
   affine::AffineForOp innermost_loop = loop_band.back();
   OpBuilder builder(innermost_loop);
@@ -331,6 +479,11 @@ static LogicalResult applyLoopPerfection(AffineLoopBand &loop_band) {
       // if redundant).
       for (Operation *op : pure_ops) {
         op->moveBefore(insert_point);
+        if (failed(remapLoopResultOperands(op, inner_loops))) {
+          llvm::errs() << "[LoopPerfection] Failed to remap epilogue loop "
+                          "result operand.\n";
+          return failure();
+        }
       }
 
       // Moves side-effecting operations into the innermost loop with
@@ -347,6 +500,11 @@ static LogicalResult applyLoopPerfection(AffineLoopBand &loop_band) {
 
           for (Operation *op : side_effect_ops) {
             op->moveBefore(then_block->getTerminator());
+            if (failed(remapLoopResultOperands(op, inner_loops))) {
+              llvm::errs() << "[LoopPerfection] Failed to remap epilogue loop "
+                              "result operand.\n";
+              return failure();
+            }
           }
         } else {
           // If condition creation fails, returns failure to avoid
