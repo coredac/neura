@@ -9,8 +9,7 @@ namespace taskflow {
 
 bool ThroughputGuidedTaskOrchestration::runTaskOrchestration(
     func::FuncOp func) {
-  ResourceAssignmentState assignment_state =
-      ResourceAssignmentState::buildInitialResourceAssignment(func);
+  ResourceAssignmentState assignment_state(func);
   TaskPriorityMap priority = assignment_state.buildInitialTaskPriority();
   TaskScheduler scheduler(grid_rows_, grid_cols_, mode_);
   return scheduler.schedule(func, priority);

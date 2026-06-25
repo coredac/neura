@@ -37,10 +37,11 @@ struct TaskResourceAssignment {
 // Per-function static orchestration state used by throughput-guided search.
 class ResourceAssignmentState {
 public:
-  // Builds the baseline resource assignment: one standalone CGRA and one
-  // active replica for every task.
-  static ResourceAssignmentState
-  buildInitialResourceAssignment(func::FuncOp func);
+  // Creates a baseline resource assignment for every task in `func`.
+  //
+  // The baseline is intentionally conservative: one standalone CGRA and one
+  // active replica per task.
+  explicit ResourceAssignmentState(func::FuncOp func);
 
   // Returns all per-task resource assignments in deterministic IR walk order.
   llvm::ArrayRef<TaskResourceAssignment> getResourceAssignments() const {

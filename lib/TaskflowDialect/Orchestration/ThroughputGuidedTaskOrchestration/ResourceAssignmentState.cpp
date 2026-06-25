@@ -39,13 +39,10 @@ static TaskResourceAssignment buildTaskResourceAssignment(TaskflowTaskOp task) {
   return assignment;
 }
 
-ResourceAssignmentState
-ResourceAssignmentState::buildInitialResourceAssignment(func::FuncOp func) {
-  ResourceAssignmentState state;
+ResourceAssignmentState::ResourceAssignmentState(func::FuncOp func) {
   func.walk([&](TaskflowTaskOp task) {
-    state.resource_assignments_.push_back(buildTaskResourceAssignment(task));
+    resource_assignments_.push_back(buildTaskResourceAssignment(task));
   });
-  return state;
 }
 
 TaskPriorityMap ResourceAssignmentState::buildInitialTaskPriority() const {
