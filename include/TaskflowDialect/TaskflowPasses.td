@@ -92,16 +92,25 @@ def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
     scheduling: how many CGRAs each task uses, where those CGRAs are placed,
     and when tasks execute on reusable CGRA contexts.
 
-    Selects an orchestration strategy, computes task priorities, and invokes
-    the shared task scheduler to place Taskflow tasks on a 2D multi-CGRA grid.
-    The scheduling mode controls whether tasks use purely spatial placement or
-    spatial-temporal reuse.
+    Selects an orchestration strategy, computes task priorities or resource
+    assignments, and invokes the shared task scheduler to place Taskflow tasks
+    on a 2D multi-CGRA grid. The scheduling mode controls whether tasks use
+    purely spatial placement or spatial-temporal reuse.
 
-    The current strategy is RoutingCriticalPathOrchestration. It computes
-    priorities from longest downstream dependency chains, then calls the
-    shared TaskScheduler. Tasks with direct SSA dependencies are placed near
-    each other to enable direct data forwarding. Irregular multi-CGRA shapes
-    (rectangular, L, T) are supported through the cgra_shape attribute.
+    routing-critical-path (default):
+      Computes priorities from longest downstream dependency chains, then
+      calls the shared TaskScheduler.
+
+    throughput-guided:
+      Uses sample-input profiling to guide static task orchestration. It
+      jointly decides how many adjacent CGRAs should be composed into a larger
+      tile array for each task, how many static copies of a data-parallel task
+      should run, and when each task should execute, then emits the profiled
+      static orchestration for the task graph.
+
+    Tasks with direct SSA dependencies are placed near each other to enable
+    direct data forwarding. Irregular multi-CGRA shapes (rectangular, L, T)
+    are supported through the cgra_shape attribute.
 
     spatial:
       Each CGRA is assigned to at most one task.  Asserts when the number of
@@ -118,12 +127,19 @@ def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
     Uses multi-CGRA dimensions from --architecture-spec. If no architecture
     spec is provided, the architecture parser supplies a default 4x4 grid.
   }];
-  let options = [Option<
-      "schedulingMode", "scheduling-mode", "std::string",
-      /*default=*/"\"spatial-temporal\"",
-      "Task scheduling mode: 'spatial' (one task per CGRA, asserts if "
-      "tasks exceed the grid size) or 'spatial-temporal' (default, "
-      "time-multiplexes CGRAs so task count is not bounded by grid size).">];
+  let options = [
+    Option<
+        "schedulingMode", "scheduling-mode", "std::string",
+        /*default=*/"\"spatial-temporal\"",
+        "Task scheduling mode: 'spatial' (one task per CGRA, asserts if "
+        "tasks exceed the grid size) or 'spatial-temporal' (default, "
+        "time-multiplexes CGRAs so task count is not bounded by grid size).">,
+    Option<
+        "orchestrationStrategy", "orchestration-strategy", "std::string",
+        /*default=*/"\"routing-critical-path\"",
+        "Task orchestration strategy: 'routing-critical-path' (default) or "
+        "'throughput-guided'.">
+  ];
   let constructor = "taskflow::createOrchestrateTaskOnCgraPass()";
 }
 
