@@ -1,4 +1,5 @@
 add_mlir_library(MLIRTaskflowThroughputGuidedTaskOrchestration
+    ResourceAssignmentState.cpp
     ThroughputGuidedTaskOrchestration.cpp
 
     DEPENDS

@@ -30,10 +30,6 @@ public:
   std::string getName() const override { return "throughput-guided"; }
 
 private:
-  // Initial priority map for the baseline schedule. All tasks receive equal
-  // priority, so TaskScheduler falls back to deterministic task order.
-  TaskPriorityMap buildInitialPriority(func::FuncOp func) const;
-
   int grid_rows_;
   int grid_cols_;
   SchedulingMode mode_;
