@@ -92,7 +92,7 @@ module attributes {} {
 // TASKFLOW: module {
 // TASKFLOW-NEXT:   func.func @_Z6kernelPiS_S_(%arg0: memref<?xi32>, %arg1: memref<?xi32>, %arg2: memref<?xi32>) -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // TASKFLOW-NEXT:     %c0_i32 = arith.constant 0 : i32
-// TASKFLOW-NEXT:     %value_outputs = taskflow.task @Task_0 will_read(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
+// TASKFLOW-NEXT:     %value_outputs = taskflow.task @Task_0 will_reads(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
 // TASKFLOW-NEXT:     ^bb0(%arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // TASKFLOW-NEXT:       %0 = affine.for %arg6 = 0 to 32 iter_args(%arg7 = %arg5) -> (i32) {
 // TASKFLOW-NEXT:         %1 = affine.load %arg3[%arg6] : memref<?xi32>
@@ -110,7 +110,7 @@ module attributes {} {
 // HYPERBLOCK:      module {
 // HYPERBLOCK-NEXT:   func.func @_Z6kernelPiS_S_(%arg0: memref<?xi32>, %arg1: memref<?xi32>, %arg2: memref<?xi32>) -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // HYPERBLOCK-NEXT:     %c0_i32 = arith.constant 0 : i32
-// HYPERBLOCK-NEXT:     %value_outputs = taskflow.task @Task_0 will_read(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
+// HYPERBLOCK-NEXT:     %value_outputs = taskflow.task @Task_0 will_reads(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
 // HYPERBLOCK-NEXT:     ^bb0(%arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // HYPERBLOCK-NEXT:       %c0 = arith.constant 0 : index
 // HYPERBLOCK-NEXT:       %c32 = arith.constant 32 : index
@@ -133,7 +133,7 @@ module attributes {} {
 // KERNEL:      module {
 // KERNEL-NEXT:   func.func @_Z6kernelPiS_S_(%arg0: memref<?xi32>, %arg1: memref<?xi32>, %arg2: memref<?xi32>) -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // KERNEL-NEXT:     %c0_i32 = arith.constant 0 : i32
-// KERNEL-NEXT:     %value_outputs = taskflow.task @Task_0 will_read(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
+// KERNEL-NEXT:     %value_outputs = taskflow.task @Task_0 will_reads(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
 // KERNEL-NEXT:     ^bb0(%arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // KERNEL-NEXT:       %c0 = arith.constant 0 : index
 // KERNEL-NEXT:       %c32 = arith.constant 32 : index
@@ -160,7 +160,7 @@ module attributes {} {
 // NEURA:      module {
 // NEURA-NEXT:   func.func @_Z6kernelPiS_S_(%arg0: memref<?xi32>, %arg1: memref<?xi32>, %arg2: memref<?xi32>) -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // NEURA-NEXT:     %c0_i32 = arith.constant 0 : i32
-// NEURA-NEXT:     %value_outputs = taskflow.task @Task_0 will_read(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
+// NEURA-NEXT:     %value_outputs = taskflow.task @Task_0 will_reads(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
 // NEURA-NEXT:     ^bb0(%arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // NEURA-NEXT:       %c0 = arith.constant 0 : index
 // NEURA-NEXT:       %c32 = arith.constant 32 : index
@@ -187,7 +187,7 @@ module attributes {} {
 // DATAFLOW:      module {
 // DATAFLOW-NEXT:   func.func @_Z6kernelPiS_S_(%arg0: memref<?xi32>, %arg1: memref<?xi32>, %arg2: memref<?xi32>) -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // DATAFLOW-NEXT:     %c0_i32 = arith.constant 0 : i32
-// DATAFLOW-NEXT:     %value_outputs = taskflow.task @Task_0 will_read(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
+// DATAFLOW-NEXT:     %value_outputs = taskflow.task @Task_0 will_reads(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
 // DATAFLOW-NEXT:     ^bb0(%arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // DATAFLOW-NEXT:       %c0 = arith.constant 0 : index
 // DATAFLOW-NEXT:       %c32 = arith.constant 32 : index
@@ -219,7 +219,7 @@ module attributes {} {
 // MAPPED:      module {
 // MAPPED-NEXT:   func.func @_Z6kernelPiS_S_(%arg0: memref<?xi32>, %arg1: memref<?xi32>, %arg2: memref<?xi32>) -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // MAPPED-NEXT:     %c0_i32 = arith.constant 0 : i32
-// MAPPED-NEXT:     %value_outputs = taskflow.task @Task_0 will_read(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
+// MAPPED-NEXT:     %value_outputs = taskflow.task @Task_0 will_reads(%arg0, %arg2 : memref<?xi32>, memref<?xi32>) value_inputs(%c0_i32 : i32) [original_read_memrefs(%arg0, %arg2 : memref<?xi32>, memref<?xi32>)] : (memref<?xi32>, memref<?xi32>, i32) -> (i32) {
 // MAPPED-NEXT:     ^bb0(%arg3: memref<?xi32>, %arg4: memref<?xi32>, %arg5: i32):
 // MAPPED-NEXT:       %c0 = arith.constant 0 : index
 // MAPPED-NEXT:       %c32 = arith.constant 32 : index

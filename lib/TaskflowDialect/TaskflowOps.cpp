@@ -19,19 +19,19 @@ ParseResult TaskflowTaskOp::parse(OpAsmParser &parser, OperationState &result) {
     result.addAttribute("task_name", task_name);
   }
 
-  // Parses will_read(%arg0, %arg1 : memref<?xi32>, memref<?xi32>).
+  // Parses will_reads(%arg0, %arg1 : memref<?xi32>, memref<?xi32>).
   SmallVector<OpAsmParser::UnresolvedOperand> read_operands;
   SmallVector<Type> read_types;
-  if (succeeded(parser.parseOptionalKeyword("will_read"))) {
+  if (succeeded(parser.parseOptionalKeyword("will_reads"))) {
     if (parser.parseLParen() || parser.parseOperandList(read_operands) ||
         parser.parseColonTypeList(read_types) || parser.parseRParen())
       return failure();
   }
 
-  // Parses will_write(%arg5 : memref<?xi32>).
+  // Parses will_writes(%arg5 : memref<?xi32>).
   SmallVector<OpAsmParser::UnresolvedOperand> write_operands;
   SmallVector<Type> write_types;
-  if (succeeded(parser.parseOptionalKeyword("will_write"))) {
+  if (succeeded(parser.parseOptionalKeyword("will_writes"))) {
     if (parser.parseLParen() || parser.parseOperandList(write_operands) ||
         parser.parseColonTypeList(write_types) || parser.parseRParen())
       return failure();
@@ -132,15 +132,15 @@ ParseResult TaskflowTaskOp::parse(OpAsmParser &parser, OperationState &result) {
            static_cast<int32_t>(original_write_operands.size())}));
 
   // Adds result segment sizes. Read/write outputs are inferred from the
-  // terminator, because multiple will_write states may map to a single
-  // done_write state.
+  // terminator, because multiple will_writes states may map to a single
+  // done_writes state.
   size_t num_read_outputs = 0;
   size_t num_write_outputs = 0;
   if (!body->empty()) {
     if (auto yield_op =
             dyn_cast<TaskflowYieldOp>(body->front().getTerminator())) {
-      num_read_outputs = yield_op.getDoneRead().size();
-      num_write_outputs = yield_op.getDoneWrite().size();
+      num_read_outputs = yield_op.getDoneReads().size();
+      num_write_outputs = yield_op.getDoneWrites().size();
     }
   }
 
@@ -171,21 +171,21 @@ void TaskflowTaskOp::print(OpAsmPrinter &printer) {
   // Prints task name.
   printer << " @" << getTaskName();
 
-  // Prints will_read.
-  if (!getWillRead().empty()) {
-    printer << " will_read(";
-    llvm::interleaveComma(getWillRead(), printer);
+  // Prints will_reads.
+  if (!getWillReads().empty()) {
+    printer << " will_reads(";
+    llvm::interleaveComma(getWillReads(), printer);
     printer << " : ";
-    llvm::interleaveComma(getWillRead().getTypes(), printer);
+    llvm::interleaveComma(getWillReads().getTypes(), printer);
     printer << ")";
   }
 
-  // Prints will_write.
-  if (!getWillWrite().empty()) {
-    printer << " will_write(";
-    llvm::interleaveComma(getWillWrite(), printer);
+  // Prints will_writes.
+  if (!getWillWrites().empty()) {
+    printer << " will_writes(";
+    llvm::interleaveComma(getWillWrites(), printer);
     printer << " : ";
-    llvm::interleaveComma(getWillWrite().getTypes(), printer);
+    llvm::interleaveComma(getWillWrites().getTypes(), printer);
     printer << ")";
   }
 
@@ -233,14 +233,14 @@ void TaskflowTaskOp::print(OpAsmPrinter &printer) {
   // Prints function type.
   printer << " : (";
   llvm::interleaveComma(
-      llvm::concat<const Type>(getWillRead().getTypes(),
-                               getWillWrite().getTypes(),
+      llvm::concat<const Type>(getWillReads().getTypes(),
+                               getWillWrites().getTypes(),
                                getValueInputs().getTypes()),
       printer);
   printer << ") -> (";
   llvm::interleaveComma(
-      llvm::concat<const Type>(getDoneRead().getTypes(),
-                               getDoneWrite().getTypes(),
+      llvm::concat<const Type>(getDoneReads().getTypes(),
+                               getDoneWrites().getTypes(),
                                getValueOutputs().getTypes()),
       printer);
   printer << ")";
@@ -263,15 +263,15 @@ ParseResult TaskflowYieldOp::parse(OpAsmParser &parser,
   SmallVector<OpAsmParser::UnresolvedOperand> value_operands;
   SmallVector<Type> value_types;
 
-  // Parses done_read (WAR dependency passthrough).
-  if (succeeded(parser.parseOptionalKeyword("done_read"))) {
+  // Parses done_reads (WAR dependency passthrough).
+  if (succeeded(parser.parseOptionalKeyword("done_reads"))) {
     if (parser.parseLParen() || parser.parseOperandList(read_operands) ||
         parser.parseColonTypeList(read_types) || parser.parseRParen())
       return failure();
   }
 
-  // Parses done_write.
-  if (succeeded(parser.parseOptionalKeyword("done_write"))) {
+  // Parses done_writes.
+  if (succeeded(parser.parseOptionalKeyword("done_writes"))) {
     if (parser.parseLParen() || parser.parseOperandList(write_operands) ||
         parser.parseColonTypeList(write_types) || parser.parseRParen())
       return failure();
@@ -302,19 +302,19 @@ ParseResult TaskflowYieldOp::parse(OpAsmParser &parser,
 }
 
 void TaskflowYieldOp::print(OpAsmPrinter &printer) {
-  if (!getDoneRead().empty()) {
-    printer << " done_read(";
-    llvm::interleaveComma(getDoneRead(), printer);
+  if (!getDoneReads().empty()) {
+    printer << " done_reads(";
+    llvm::interleaveComma(getDoneReads(), printer);
     printer << " : ";
-    llvm::interleaveComma(getDoneRead().getTypes(), printer);
+    llvm::interleaveComma(getDoneReads().getTypes(), printer);
     printer << ")";
   }
 
-  if (!getDoneWrite().empty()) {
-    printer << " done_write(";
-    llvm::interleaveComma(getDoneWrite(), printer);
+  if (!getDoneWrites().empty()) {
+    printer << " done_writes(";
+    llvm::interleaveComma(getDoneWrites(), printer);
     printer << " : ";
-    llvm::interleaveComma(getDoneWrite().getTypes(), printer);
+    llvm::interleaveComma(getDoneWrites().getTypes(), printer);
     printer << ")";
   }
 

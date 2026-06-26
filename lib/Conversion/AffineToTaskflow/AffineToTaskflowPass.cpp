@@ -340,15 +340,15 @@ static TaskflowTaskOp convertLoopToTask(
   // Step 8: Creates the yield operation.
   //---------------------------------------------------------------
   task_builder.setInsertionPointToEnd(task_body);
-  SmallVector<Value> yield_for_done_read;
-  SmallVector<Value> yield_for_done_write;
+  SmallVector<Value> yield_for_done_reads;
+  SmallVector<Value> yield_for_done_writes;
   SmallVector<Value> value_yield_operands;
 
   // Read yield outputs: passthrough only sparse read states needed by later
   // writers.
   for (Value memref : read_output_memrefs) {
     if (input_to_block_arg.count(memref)) {
-      yield_for_done_read.push_back(input_to_block_arg[memref]);
+      yield_for_done_reads.push_back(input_to_block_arg[memref]);
     } else {
       assert(false && "Read memref not in inputs!");
     }
@@ -357,7 +357,7 @@ static TaskflowTaskOp convertLoopToTask(
   // Memory yield outputs: yield the written memrefs.
   for (Value memref : output_memrefs) {
     if (input_to_block_arg.count(memref)) {
-      yield_for_done_write.push_back(input_to_block_arg[memref]);
+      yield_for_done_writes.push_back(input_to_block_arg[memref]);
     } else {
       assert(false && "Written memref not in inputs!");
     }
@@ -367,8 +367,8 @@ static TaskflowTaskOp convertLoopToTask(
   for (Value result : cloned_loop->getResults()) {
     value_yield_operands.push_back(result);
   }
-  task_builder.create<TaskflowYieldOp>(loc, yield_for_done_read,
-                                       yield_for_done_write,
+  task_builder.create<TaskflowYieldOp>(loc, yield_for_done_reads,
+                                       yield_for_done_writes,
                                        value_yield_operands);
 
   //-------------------------------------------------------------------
@@ -378,14 +378,14 @@ static TaskflowTaskOp convertLoopToTask(
   // Read outputs: pending WAR states for future writers. These do not update
   // latest_write_out, so later readers of the same memref remain independent.
   for (auto [memref, task_read_output] :
-       llvm::zip(read_output_memrefs, task_op.getDoneRead())) {
+       llvm::zip(read_output_memrefs, task_op.getDoneReads())) {
     pending_read_outs[memref].push_back(task_read_output);
   }
 
   // Memory outputs (write): establishes RAW/WAW dependency chain and consumes
   // pending reads for that memref.
   for (auto [memref, task_output] :
-       llvm::zip(output_memrefs, task_op.getDoneWrite())) {
+       llvm::zip(output_memrefs, task_op.getDoneWrites())) {
     latest_write_out[memref] = task_output;
     pending_read_outs[memref].clear();
   }

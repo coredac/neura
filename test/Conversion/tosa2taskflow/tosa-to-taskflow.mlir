@@ -11,7 +11,7 @@ func.func @simple_add(%arg0: tensor<16xf32>, %arg1: tensor<16xf32>) -> tensor<16
 
 // CHECK:      func.func @simple_add(%arg0: memref<16xf32>, %arg1: memref<16xf32>) -> memref<16xf32> {
 // CHECK-NEXT:   %alloc = memref.alloc() {alignment = 64 : i64} : memref<16xf32>
-// CHECK-NEXT:   %done_write = taskflow.task @Task_0 will_read(%arg0, %arg1 : memref<16xf32>, memref<16xf32>) will_write(%alloc : memref<16xf32>) [original_read_memrefs(%arg0, %arg1 : memref<16xf32>, memref<16xf32>), original_write_memrefs(%alloc : memref<16xf32>)] : (memref<16xf32>, memref<16xf32>, memref<16xf32>) -> (memref<16xf32>) {
+// CHECK-NEXT:   %done_writes = taskflow.task @Task_0 will_reads(%arg0, %arg1 : memref<16xf32>, memref<16xf32>) will_writes(%alloc : memref<16xf32>) [original_read_memrefs(%arg0, %arg1 : memref<16xf32>, memref<16xf32>), original_write_memrefs(%alloc : memref<16xf32>)] : (memref<16xf32>, memref<16xf32>, memref<16xf32>) -> (memref<16xf32>) {
 // CHECK-NEXT:   ^bb0(%arg2: memref<16xf32>, %arg3: memref<16xf32>, %arg4: memref<16xf32>):
 // CHECK-NEXT:     affine.for %arg5 = 0 to 16 {
 // CHECK-NEXT:       %0 = affine.load %arg2[%arg5] : memref<16xf32>
@@ -19,7 +19,7 @@ func.func @simple_add(%arg0: tensor<16xf32>, %arg1: tensor<16xf32>) -> tensor<16
 // CHECK-NEXT:       %2 = arith.addf %0, %1 : f32
 // CHECK-NEXT:       affine.store %2, %arg4[%arg5] : memref<16xf32>
 // CHECK-NEXT:     }
-// CHECK-NEXT:     taskflow.yield done_write(%arg4 : memref<16xf32>)
+// CHECK-NEXT:     taskflow.yield done_writes(%arg4 : memref<16xf32>)
 // CHECK-NEXT:   }
-// CHECK-NEXT:   return %done_write : memref<16xf32>
+// CHECK-NEXT:   return %done_writes : memref<16xf32>
 // CHECK-NEXT: }

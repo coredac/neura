@@ -105,12 +105,12 @@ private:
   void extractMemrefAccesses(taskflow::TaskflowTaskOp task_op,
                              TaskInfo &task_info) {
     // Extracts read memrefs from the task operands.
-    for (Value memref : task_op.getWillRead()) {
+    for (Value memref : task_op.getWillReads()) {
       task_info.read_memrefs.push_back(memref);
     }
 
     // Extracts write memrefs from the task operands.
-    for (Value memref : task_op.getWillWrite()) {
+    for (Value memref : task_op.getWillWrites()) {
       task_info.write_memrefs.push_back(memref);
     }
 
@@ -146,10 +146,10 @@ private:
     for (auto task_op : tasks) {
       auto &task_info = task_map[task_op.getOperation()];
       // Map read_outputs for WAR dependency tracking.
-      for (Value ro : task_op.getDoneRead()) {
+      for (Value ro : task_op.getDoneReads()) {
         write_output_to_producer[ro] = &task_info;
       }
-      for (Value wo : task_op.getDoneWrite()) {
+      for (Value wo : task_op.getDoneWrites()) {
         write_output_to_producer[wo] = &task_info;
       }
     }
@@ -178,12 +178,12 @@ private:
       };
 
       // RAW: read_memrefs consuming a write_outputs value.
-      for (Value operand : task_op.getWillRead()) {
+      for (Value operand : task_op.getWillReads()) {
         addDependencyIfProduced(operand);
       }
 
       // WAW/WAR: write_memrefs consuming a write_outputs value.
-      for (Value operand : task_op.getWillWrite()) {
+      for (Value operand : task_op.getWillWrites()) {
         addDependencyIfProduced(operand);
       }
     }
@@ -443,7 +443,7 @@ public:
     for (Value v : fused_read_memrefs) {
       read_output_types.push_back(v.getType());
     }
-    for (Value v : reader_op.getDoneWrite()) {
+    for (Value v : reader_op.getDoneWrites()) {
       write_output_types.push_back(v.getType());
     }
     for (Value v : reader_op.getValueOutputs()) {
@@ -492,7 +492,7 @@ private:
 
     // read_memrefs = writer.reads ∪ reader.reads - intermediate
     DenseSet<Value> seen;
-    auto writer_reads = writer_op.getWillRead();
+    auto writer_reads = writer_op.getWillReads();
     auto writer_orig_reads = writer_op.getOriginalReadMemrefs();
     for (unsigned i = 0; i < writer_reads.size(); ++i) {
       Value orig = (i < writer_orig_reads.size()) ? writer_orig_reads[i]
@@ -502,7 +502,7 @@ private:
       }
     }
 
-    auto reader_reads = reader_op.getWillRead();
+    auto reader_reads = reader_op.getWillReads();
     auto reader_orig_reads = reader_op.getOriginalReadMemrefs();
     for (unsigned i = 0; i < reader_reads.size(); ++i) {
       Value orig = (i < reader_orig_reads.size()) ? reader_orig_reads[i]
@@ -514,7 +514,7 @@ private:
 
     // write_memrefs = reader.writes ∪ (writer.writes - intermediate)
     seen.clear();
-    auto reader_writes = reader_op.getWillWrite();
+    auto reader_writes = reader_op.getWillWrites();
     auto reader_orig_writes = reader_op.getOriginalWriteMemrefs();
     for (unsigned i = 0; i < reader_writes.size(); ++i) {
       Value orig = (i < reader_orig_writes.size()) ? reader_orig_writes[i]
@@ -524,7 +524,7 @@ private:
       }
     }
 
-    auto writer_writes = writer_op.getWillWrite();
+    auto writer_writes = writer_op.getWillWrites();
     auto writer_orig_writes = writer_op.getOriginalWriteMemrefs();
     for (unsigned i = 0; i < writer_writes.size(); ++i) {
       Value orig = (i < writer_orig_writes.size()) ? writer_orig_writes[i]
@@ -739,8 +739,8 @@ private:
         // contain SSA results, not the raw alloc.
         if (auto block_arg = dyn_cast<BlockArgument>(load_memref)) {
           unsigned arg_num = block_arg.getArgNumber();
-          unsigned total_reads = reader_op.getWillRead().size();
-          unsigned total_writes = reader_op.getWillWrite().size();
+          unsigned total_reads = reader_op.getWillReads().size();
+          unsigned total_writes = reader_op.getWillWrites().size();
 
           if (arg_num < total_reads) {
             // Use original_read_memrefs to check against intermediate.
@@ -797,7 +797,7 @@ private:
     }
 
     // Maps reader yield's memory results to fused block args.
-    for (Value v : reader_yield.getDoneWrite()) {
+    for (Value v : reader_yield.getDoneWrites()) {
       if (reader_mapping.contains(v)) {
         yield_writes.push_back(reader_mapping.lookup(v));
       } else {
@@ -826,8 +826,8 @@ private:
                     ArrayRef<Value> fused_values) {
 
     unsigned orig_arg_idx = 0;
-    unsigned num_reads = task_op.getWillRead().size();
-    unsigned num_writes = task_op.getWillWrite().size();
+    unsigned num_reads = task_op.getWillReads().size();
+    unsigned num_writes = task_op.getWillWrites().size();
     unsigned num_values = task_op.getValueInputs().size();
 
     // Maps read_memrefs block args.
@@ -837,14 +837,14 @@ private:
     for (unsigned i = 0; i < num_reads; ++i) {
       Value orig_memref = (i < orig_reads.size())
                               ? orig_reads[i]
-                              : task_op.getWillRead()[i];
+                              : task_op.getWillReads()[i];
       if (orig_memref == intermediate) {
         // Intermediate memref — no corresponding fused arg. Skip.
         orig_arg_idx++;
         continue;
       }
       // Finds the fused block arg for this outer memref.
-      Value outer_memref = task_op.getWillRead()[i];
+      Value outer_memref = task_op.getWillReads()[i];
       int fused_idx = findInFusedArgs(outer_memref, fused_reads, fused_writes,
                                       fused_values);
       if (fused_idx >= 0) {
@@ -859,12 +859,12 @@ private:
     for (unsigned i = 0; i < num_writes; ++i) {
       Value orig_memref = (i < orig_writes.size())
                               ? orig_writes[i]
-                              : task_op.getWillWrite()[i];
+                              : task_op.getWillWrites()[i];
       if (orig_memref == intermediate) {
         orig_arg_idx++;
         continue;
       }
-      Value outer_memref = task_op.getWillWrite()[i];
+      Value outer_memref = task_op.getWillWrites()[i];
       int fused_idx = findInFusedArgs(outer_memref, fused_reads, fused_writes,
                                       fused_values);
       if (fused_idx >= 0) {
@@ -941,8 +941,8 @@ private:
 
     // Helper: finds the index of an outer memref in fused_reads.
     auto findInFusedReads = [&](Value outer_memref) -> int {
-      for (unsigned i = 0; i < fused_task.getWillRead().size(); ++i) {
-        if (fused_task.getWillRead()[i] == outer_memref)
+      for (unsigned i = 0; i < fused_task.getWillReads().size(); ++i) {
+        if (fused_task.getWillReads()[i] == outer_memref)
           return i;
       }
       return -1;
@@ -951,34 +951,34 @@ private:
     // Replaces writer's read_outputs: map each to the fused task's
     // corresponding read_output by finding the writer's read_memref
     // in the fused task's read_memrefs.
-    for (unsigned i = 0; i < writer_op.getDoneRead().size(); ++i) {
-      Value writer_read_input = writer_op.getWillRead()[i];
+    for (unsigned i = 0; i < writer_op.getDoneReads().size(); ++i) {
+      Value writer_read_input = writer_op.getWillReads()[i];
       int fused_idx = findInFusedReads(writer_read_input);
       if (fused_idx >= 0) {
-        writer_op.getDoneRead()[i].replaceAllUsesWith(
-            fused_task.getDoneRead()[fused_idx]);
+        writer_op.getDoneReads()[i].replaceAllUsesWith(
+            fused_task.getDoneReads()[fused_idx]);
       }
     }
 
     // Replaces reader's read_outputs: skip intermediate, map others.
-    for (unsigned i = 0; i < reader_op.getDoneRead().size(); ++i) {
+    for (unsigned i = 0; i < reader_op.getDoneReads().size(); ++i) {
       Value orig = (i < reader_op.getOriginalReadMemrefs().size())
                        ? reader_op.getOriginalReadMemrefs()[i]
-                       : reader_op.getWillRead()[i];
+                       : reader_op.getWillReads()[i];
       if (orig == intermediate)
         continue; // Intermediate read_output is dead after fusion.
-      Value reader_read_input = reader_op.getWillRead()[i];
+      Value reader_read_input = reader_op.getWillReads()[i];
       int fused_idx = findInFusedReads(reader_read_input);
       if (fused_idx >= 0) {
-        reader_op.getDoneRead()[i].replaceAllUsesWith(
-            fused_task.getDoneRead()[fused_idx]);
+        reader_op.getDoneReads()[i].replaceAllUsesWith(
+            fused_task.getDoneReads()[fused_idx]);
       }
     }
 
     // Replaces reader's write_outputs with fused task's write_outputs.
-    for (unsigned i = 0; i < reader_op.getDoneWrite().size(); ++i) {
-      reader_op.getDoneWrite()[i].replaceAllUsesWith(
-          fused_task.getDoneWrite()[i]);
+    for (unsigned i = 0; i < reader_op.getDoneWrites().size(); ++i) {
+      reader_op.getDoneWrites()[i].replaceAllUsesWith(
+          fused_task.getDoneWrites()[i]);
     }
 
     // Replaces reader's value_outputs with fused task's value_outputs.

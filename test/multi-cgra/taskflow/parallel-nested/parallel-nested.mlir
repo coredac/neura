@@ -128,16 +128,16 @@ module {
 
 // TASKFLOW:      module {
 // TASKFLOW-NEXT:   func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// TASKFLOW-NEXT:     %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<16xf32>) will_write(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
+// TASKFLOW-NEXT:     %done_writes = taskflow.task @Task_0 will_reads(%arg0 : memref<16xf32>) will_writes(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
 // TASKFLOW-NEXT:     ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
 // TASKFLOW-NEXT:       affine.for %arg8 = 0 to 16 {
 // TASKFLOW-NEXT:         %0 = affine.load %arg6[%arg8] : memref<16xf32>
 // TASKFLOW-NEXT:         %1 = arith.mulf %0, %arg7 : f32
 // TASKFLOW-NEXT:         affine.store %1, %arg6[%arg8] : memref<16xf32>
 // TASKFLOW-NEXT:       }
-// TASKFLOW-NEXT:       taskflow.yield done_write(%arg6 : memref<16xf32>)
+// TASKFLOW-NEXT:       taskflow.yield done_writes(%arg6 : memref<16xf32>)
 // TASKFLOW-NEXT:     }
-// TASKFLOW-NEXT:     %done_write_0 = taskflow.task @Task_1 will_read(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_write(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
+// TASKFLOW-NEXT:     %done_writes_0 = taskflow.task @Task_1 will_reads(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_writes(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
 // TASKFLOW-NEXT:     ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
 // TASKFLOW-NEXT:       affine.for %arg8 = 0 to 8 {
 // TASKFLOW-NEXT:         affine.for %arg9 = 0 to 8 {
@@ -147,7 +147,7 @@ module {
 // TASKFLOW-NEXT:           affine.store %2, %arg7[%arg8, %arg9] : memref<8x8xf32>
 // TASKFLOW-NEXT:         }
 // TASKFLOW-NEXT:       }
-// TASKFLOW-NEXT:       taskflow.yield done_write(%arg7 : memref<8x8xf32>)
+// TASKFLOW-NEXT:       taskflow.yield done_writes(%arg7 : memref<8x8xf32>)
 // TASKFLOW-NEXT:     }
 // TASKFLOW-NEXT:     return
 // TASKFLOW-NEXT:   }
@@ -155,7 +155,7 @@ module {
 
 // HYPERBLOCK:      module {
 // HYPERBLOCK-NEXT:   func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// HYPERBLOCK-NEXT:     %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<16xf32>) will_write(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
+// HYPERBLOCK-NEXT:     %done_writes = taskflow.task @Task_0 will_reads(%arg0 : memref<16xf32>) will_writes(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
 // HYPERBLOCK-NEXT:     ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
 // HYPERBLOCK-NEXT:       %c0 = arith.constant 0 : index
 // HYPERBLOCK-NEXT:       %c16 = arith.constant 16 : index
@@ -168,9 +168,9 @@ module {
 // HYPERBLOCK-NEXT:         memref.store %2, %arg6[%arg8] : memref<16xf32>
 // HYPERBLOCK-NEXT:         taskflow.hyperblock.yield
 // HYPERBLOCK-NEXT:       }) : (index) -> ()
-// HYPERBLOCK-NEXT:       taskflow.yield done_write(%arg6 : memref<16xf32>)
+// HYPERBLOCK-NEXT:       taskflow.yield done_writes(%arg6 : memref<16xf32>)
 // HYPERBLOCK-NEXT:     }
-// HYPERBLOCK-NEXT:     %done_write_0 = taskflow.task @Task_1 will_read(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_write(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
+// HYPERBLOCK-NEXT:     %done_writes_0 = taskflow.task @Task_1 will_reads(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_writes(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
 // HYPERBLOCK-NEXT:     ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
 // HYPERBLOCK-NEXT:       %c0 = arith.constant 0 : index
 // HYPERBLOCK-NEXT:       %c8 = arith.constant 8 : index
@@ -185,7 +185,7 @@ module {
 // HYPERBLOCK-NEXT:         memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
 // HYPERBLOCK-NEXT:         taskflow.hyperblock.yield
 // HYPERBLOCK-NEXT:       }) : (index, index) -> ()
-// HYPERBLOCK-NEXT:       taskflow.yield done_write(%arg7 : memref<8x8xf32>)
+// HYPERBLOCK-NEXT:       taskflow.yield done_writes(%arg7 : memref<8x8xf32>)
 // HYPERBLOCK-NEXT:     }
 // HYPERBLOCK-NEXT:     return
 // HYPERBLOCK-NEXT:   }
@@ -194,7 +194,7 @@ module {
 
 // MAP-SPATIAL-TEMPORAL-4x4:     module {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:  func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<16xf32>) will_write(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_writes = taskflow.task @Task_0 will_reads(%arg0 : memref<16xf32>) will_writes(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c16 = arith.constant 16 : index
@@ -207,9 +207,9 @@ module {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %2, %arg6[%arg8] : memref<16xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg6 : memref<16xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_writes(%arg6 : memref<16xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_0 = taskflow.task @Task_1 will_read(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_write(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_writes_0 = taskflow.task @Task_1 will_reads(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_writes(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c8 = arith.constant 8 : index
@@ -224,7 +224,7 @@ module {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg7 : memref<8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_writes(%arg7 : memref<8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    return
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:  }
@@ -232,7 +232,7 @@ module {
 
 // MAP-SPATIAL-TEMPORAL-1x1:     module {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:  func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<16xf32>) will_write(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_writes = taskflow.task @Task_0 will_reads(%arg0 : memref<16xf32>) will_writes(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c16 = arith.constant 16 : index
@@ -245,9 +245,9 @@ module {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %2, %arg6[%arg8] : memref<16xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg6 : memref<16xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_writes(%arg6 : memref<16xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_0 = taskflow.task @Task_1 will_read(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_write(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_writes_0 = taskflow.task @Task_1 will_reads(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_writes(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c8 = arith.constant 8 : index
@@ -262,7 +262,7 @@ module {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg7 : memref<8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_writes(%arg7 : memref<8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    return
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:  }
@@ -270,7 +270,7 @@ module {
 
 // MAP-SPATIAL-TEMPORAL-1x2:     module {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:  func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<16xf32>) will_write(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_writes = taskflow.task @Task_0 will_reads(%arg0 : memref<16xf32>) will_writes(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c16 = arith.constant 16 : index
@@ -283,9 +283,9 @@ module {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %2, %arg6[%arg8] : memref<16xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg6 : memref<16xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_writes(%arg6 : memref<16xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_0 = taskflow.task @Task_1 will_read(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_write(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_writes_0 = taskflow.task @Task_1 will_reads(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_writes(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c8 = arith.constant 8 : index
@@ -300,7 +300,7 @@ module {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg7 : memref<8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_writes(%arg7 : memref<8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    return
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:  }
@@ -308,7 +308,7 @@ module {
 
 // MAP-SPATIAL:     module {
 // MAP-SPATIAL-NEXT:  func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// MAP-SPATIAL-NEXT:    %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<16xf32>) will_write(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
+// MAP-SPATIAL-NEXT:    %done_writes = taskflow.task @Task_0 will_reads(%arg0 : memref<16xf32>) will_writes(%arg0 : memref<16xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0 : memref<16xf32>), original_write_memrefs(%arg0 : memref<16xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<16xf32>, memref<16xf32>, f32) -> (memref<16xf32>) {
 // MAP-SPATIAL-NEXT:    ^bb0(%arg5: memref<16xf32>, %arg6: memref<16xf32>, %arg7: f32):
 // MAP-SPATIAL-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-NEXT:      %c16 = arith.constant 16 : index
@@ -321,9 +321,9 @@ module {
 // MAP-SPATIAL-NEXT:        memref.store %2, %arg6[%arg8] : memref<16xf32>
 // MAP-SPATIAL-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-NEXT:      }) : (index) -> ()
-// MAP-SPATIAL-NEXT:      taskflow.yield done_write(%arg6 : memref<16xf32>)
+// MAP-SPATIAL-NEXT:      taskflow.yield done_writes(%arg6 : memref<16xf32>)
 // MAP-SPATIAL-NEXT:    }
-// MAP-SPATIAL-NEXT:    %done_write_0 = taskflow.task @Task_1 will_read(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_write(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
+// MAP-SPATIAL-NEXT:    %done_writes_0 = taskflow.task @Task_1 will_reads(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>) will_writes(%arg3 : memref<8x8xf32>) [original_read_memrefs(%arg1, %arg2 : memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg3 : memref<8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<8x8xf32>, memref<8x8xf32>, memref<8x8xf32>) -> (memref<8x8xf32>) {
 // MAP-SPATIAL-NEXT:    ^bb0(%arg5: memref<8x8xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>):
 // MAP-SPATIAL-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-NEXT:      %c8 = arith.constant 8 : index
@@ -338,7 +338,7 @@ module {
 // MAP-SPATIAL-NEXT:        memref.store %4, %arg7[%arg8, %arg9] : memref<8x8xf32>
 // MAP-SPATIAL-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-NEXT:      }) : (index, index) -> ()
-// MAP-SPATIAL-NEXT:      taskflow.yield done_write(%arg7 : memref<8x8xf32>)
+// MAP-SPATIAL-NEXT:      taskflow.yield done_writes(%arg7 : memref<8x8xf32>)
 // MAP-SPATIAL-NEXT:    }
 // MAP-SPATIAL-NEXT:    return
 // MAP-SPATIAL-NEXT:  }
@@ -347,7 +347,7 @@ module {
 
 // RESOPT:      module {
 // RESOPT-NEXT:   func.func @parallel_nested_example(%arg0: memref<16xf32>, %arg1: memref<8x8xf32>, %arg2: memref<8x8xf32>, %arg3: memref<8x8xf32>, %arg4: f32) {
-// RESOPT-NEXT:     %done_read:3, %done_write:2 = taskflow.task @Task_0_Task_1_utilfused will_read(%arg0, %arg1, %arg2 : memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>) will_write(%arg0, %arg3 : memref<16xf32>, memref<8x8xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0, %arg1, %arg2 : memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg0, %arg3 : memref<16xf32>, memref<8x8xf32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 2 : i32, profile_info = {duration = 4 : i32}, trip_count = 64 : i32} : (memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>, memref<16xf32>, memref<8x8xf32>, f32) -> (memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>, memref<16xf32>, memref<8x8xf32>) {
+// RESOPT-NEXT:     %done_reads:3, %done_writes:2 = taskflow.task @Task_0_Task_1_utilfused will_reads(%arg0, %arg1, %arg2 : memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>) will_writes(%arg0, %arg3 : memref<16xf32>, memref<8x8xf32>) value_inputs(%arg4 : f32) [original_read_memrefs(%arg0, %arg1, %arg2 : memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>), original_write_memrefs(%arg0, %arg3 : memref<16xf32>, memref<8x8xf32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 2 : i32, profile_info = {duration = 4 : i32}, trip_count = 64 : i32} : (memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>, memref<16xf32>, memref<8x8xf32>, f32) -> (memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>, memref<16xf32>, memref<8x8xf32>) {
 // RESOPT-NEXT:     ^bb0(%arg5: memref<16xf32>, %arg6: memref<8x8xf32>, %arg7: memref<8x8xf32>, %arg8: memref<16xf32>, %arg9: memref<8x8xf32>, %arg10: f32):
 // RESOPT-NEXT:       %c0 = arith.constant 0 : index
 // RESOPT-NEXT:       %c16 = arith.constant 16 : index
@@ -372,7 +372,7 @@ module {
 // RESOPT-NEXT:       %c1_1 = arith.constant 1 : index
 // RESOPT-NEXT:       %1 = taskflow.counter from %c0_0 to %c8 step %c1_1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "root", counter_id = 0 : i32} : index
 // RESOPT-NEXT:       %2 = taskflow.counter parent(%1 : index) from %c0_0 to %c8 step %c1_1 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
-// RESOPT-NEXT:       taskflow.yield done_read(%arg5, %arg6, %arg7 : memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>) done_write(%arg8, %arg9 : memref<16xf32>, memref<8x8xf32>)
+// RESOPT-NEXT:       taskflow.yield done_reads(%arg5, %arg6, %arg7 : memref<16xf32>, memref<8x8xf32>, memref<8x8xf32>) done_writes(%arg8, %arg9 : memref<16xf32>, memref<8x8xf32>)
 // RESOPT-NEXT:     }
 // RESOPT-NEXT:     return
 // RESOPT-NEXT:   }
