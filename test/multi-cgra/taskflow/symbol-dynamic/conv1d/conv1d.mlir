@@ -36,7 +36,7 @@
 // AFFINE-NEXT:       }
 // AFFINE-NEXT:     }
 
-// TASKFLOW:          %dependency_write_out_0 = taskflow.task @Task_1 dependency_read_in(%arg0, %0, %dependency_write_out : memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>) dependency_write_in(%dependency_write_out : memref<1x16x?xf32>) value_inputs(%5 : index) [original_read_memrefs(%arg0, %0, %alloc : memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>), original_write_memrefs(%alloc : memref<1x16x?xf32>)] : (memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>, memref<1x16x?xf32>, index) -> (memref<1x16x?xf32>) {
+// TASKFLOW:          %done_writes_0 = taskflow.task @Task_1 will_reads(%arg0, %0, %done_writes : memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>) will_writes(%done_writes : memref<1x16x?xf32>) value_inputs(%5 : index) [original_read_memrefs(%arg0, %0, %alloc : memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>), original_write_memrefs(%alloc : memref<1x16x?xf32>)] : (memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>, memref<1x16x?xf32>, index) -> (memref<1x16x?xf32>) {
 // TASKFLOW-NEXT:     ^bb0(%arg1: memref<1x1x?xf32>, %arg2: memref<16x1x3xf32>, %arg3: memref<1x16x?xf32>, %arg4: memref<1x16x?xf32>, %arg5: index):
 // TASKFLOW-NEXT:       affine.for %arg6 = 0 to 1 {
 // TASKFLOW-NEXT:         affine.for %arg7 = 0 to 16 {
@@ -54,10 +54,10 @@
 // TASKFLOW-NEXT:           }
 // TASKFLOW-NEXT:         }
 // TASKFLOW-NEXT:       }
-// TASKFLOW-NEXT:       taskflow.yield writes(%arg4 : memref<1x16x?xf32>)
+// TASKFLOW-NEXT:       taskflow.yield done_writes(%arg4 : memref<1x16x?xf32>)
 // TASKFLOW-NEXT:     }
 
-// NEURA:      %dependency_write_out_0 = taskflow.task @Task_1 dependency_read_in(%arg0, %0, %dependency_write_out : memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>) dependency_write_in(%dependency_write_out : memref<1x16x?xf32>) value_inputs(%5 : index) [original_read_memrefs(%arg0, %0, %alloc : memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>), original_write_memrefs(%alloc : memref<1x16x?xf32>)] {dlp_replicable = true, runtime_managable = true} : (memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>, memref<1x16x?xf32>, index) -> (memref<1x16x?xf32>) {
+// NEURA:      %done_writes_0 = taskflow.task @Task_1 will_reads(%arg0, %0, %done_writes : memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>) will_writes(%done_writes : memref<1x16x?xf32>) value_inputs(%5 : index) [original_read_memrefs(%arg0, %0, %alloc : memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>), original_write_memrefs(%alloc : memref<1x16x?xf32>)] {dlp_replicable = true, runtime_managable = true} : (memref<1x1x?xf32>, memref<16x1x3xf32>, memref<1x16x?xf32>, memref<1x16x?xf32>, index) -> (memref<1x16x?xf32>) {
 // NEURA-NEXT:     ^bb0(%arg1: memref<1x1x?xf32>, %arg2: memref<16x1x3xf32>, %arg3: memref<1x16x?xf32>, %arg4: memref<1x16x?xf32>, %arg5: index):
 // NEURA-NEXT:       %c3 = arith.constant 3 : index
 // NEURA-NEXT:       %c16 = arith.constant 16 : index
@@ -88,5 +88,5 @@
 // NEURA-NEXT:         memref.store %23, %arg8[%13, %14, %15] : memref<1x16x?xf32>
 // NEURA-NEXT:         neura.yield
 // NEURA-NEXT:       }
-// NEURA-NEXT:       taskflow.yield writes(%arg4 : memref<1x16x?xf32>)
+// NEURA-NEXT:       taskflow.yield done_writes(%arg4 : memref<1x16x?xf32>)
 // NEURA-NEXT:     }
