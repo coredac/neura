@@ -204,8 +204,7 @@ module attributes {} {
 // PERFECT-NEXT:   }
 // PERFECT-NEXT: }
 
-// TASKFLOW: #set = affine_set<(d0, d1) : (d0 - 3 == 0, d1 - 7 == 0)>
-// TASKFLOW-NEXT: module {
+// TASKFLOW:      module {
 // TASKFLOW-NEXT:   func.func @_Z21irregularLoopExample1v() -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // TASKFLOW-NEXT:     %c2_i32 = arith.constant 2 : i32
 // TASKFLOW-NEXT:     %c8_i32 = arith.constant 8 : i32
@@ -234,7 +233,7 @@ module attributes {} {
 // TASKFLOW-NEXT:       }
 // TASKFLOW-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>)
 // TASKFLOW-NEXT:     }
-// TASKFLOW-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// TASKFLOW-NEXT:     %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<i32>) {
 // TASKFLOW-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // TASKFLOW-NEXT:       affine.for %arg5 = 0 to 4 {
 // TASKFLOW-NEXT:         %1 = arith.index_cast %arg5 : index to i32
@@ -249,14 +248,14 @@ module attributes {} {
 // TASKFLOW-NEXT:           }
 // TASKFLOW-NEXT:         }
 // TASKFLOW-NEXT:       }
-// TASKFLOW-NEXT:       taskflow.yield reads(%arg0 : memref<4x8xi32>) writes(%arg1 : memref<i32>)
+// TASKFLOW-NEXT:       taskflow.yield writes(%arg1 : memref<i32>)
 // TASKFLOW-NEXT:     }
 // TASKFLOW-NEXT:     %0 = affine.load %dependency_write_out_1[] : memref<i32>
 // TASKFLOW-NEXT:     return %0 : i32
 // TASKFLOW-NEXT:   }
 // TASKFLOW-NEXT: }
 
-// KERNEL: module {
+// KERNEL:      module {
 // KERNEL-NEXT:   func.func @_Z21irregularLoopExample1v() -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // KERNEL-NEXT:     %c2_i32 = arith.constant 2 : i32
 // KERNEL-NEXT:     %c8_i32 = arith.constant 8 : i32
@@ -299,7 +298,7 @@ module attributes {} {
 // KERNEL-NEXT:       }
 // KERNEL-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>)
 // KERNEL-NEXT:     }
-// KERNEL-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// KERNEL-NEXT:     %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<i32>) {
 // KERNEL-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // KERNEL-NEXT:       affine.for %arg5 = 0 to 4 {
 // KERNEL-NEXT:         neura.kernel inputs(%arg0, %arg5, %arg3, %arg1, %arg4 : memref<4x8xi32>, index, i32, memref<i32>, i32) {
@@ -326,7 +325,7 @@ module attributes {} {
 // KERNEL-NEXT:           neura.yield
 // KERNEL-NEXT:         }
 // KERNEL-NEXT:       }
-// KERNEL-NEXT:       taskflow.yield reads(%arg0 : memref<4x8xi32>) writes(%arg1 : memref<i32>)
+// KERNEL-NEXT:       taskflow.yield writes(%arg1 : memref<i32>)
 // KERNEL-NEXT:     }
 // KERNEL-NEXT:     %0 = affine.load %dependency_write_out_1[] : memref<i32>
 // KERNEL-NEXT:     return %0 : i32
@@ -376,7 +375,7 @@ module attributes {} {
 // HYPERBLOCK-NEXT:       }) : (index) -> ()
 // HYPERBLOCK-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>)
 // HYPERBLOCK-NEXT:     }
-// HYPERBLOCK-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// HYPERBLOCK-NEXT:     %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<i32>) {
 // HYPERBLOCK-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // HYPERBLOCK-NEXT:       %c0 = arith.constant 0 : index
 // HYPERBLOCK-NEXT:       %c4 = arith.constant 4 : index
@@ -408,7 +407,7 @@ module attributes {} {
 // HYPERBLOCK-NEXT:         }
 // HYPERBLOCK-NEXT:         taskflow.hyperblock.yield
 // HYPERBLOCK-NEXT:       }) : (index) -> ()
-// HYPERBLOCK-NEXT:       taskflow.yield reads(%arg0 : memref<4x8xi32>) writes(%arg1 : memref<i32>)
+// HYPERBLOCK-NEXT:       taskflow.yield writes(%arg1 : memref<i32>)
 // HYPERBLOCK-NEXT:     }
 // HYPERBLOCK-NEXT:     %0 = affine.load %dependency_write_out_1[] : memref<i32>
 // HYPERBLOCK-NEXT:     return %0 : i32
@@ -416,7 +415,7 @@ module attributes {} {
 // HYPERBLOCK-NEXT: }
 
 
-// MAP-SPATIAL-TEMPORAL-4x4: module {
+// MAP-SPATIAL-TEMPORAL-4x4:      module {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:   func.func @_Z21irregularLoopExample1v() -> i32 attributes {llvm.linkage = #llvm.linkage<external>} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:     %c2_i32 = arith.constant 2 : i32
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:     %c8_i32 = arith.constant 8 : i32
@@ -459,7 +458,7 @@ module attributes {} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:       }) : (index) -> ()
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 2 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:     %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 2 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<i32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:       %c4 = arith.constant 4 : index
@@ -491,7 +490,7 @@ module attributes {} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:         }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:         taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:       }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       taskflow.yield reads(%arg0 : memref<4x8xi32>) writes(%arg1 : memref<i32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:       taskflow.yield writes(%arg1 : memref<i32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:     }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:     %0 = affine.load %dependency_write_out_1[] : memref<i32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:     return %0 : i32
@@ -541,7 +540,7 @@ module attributes {} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:       }) : (index) -> ()
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 2 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:     %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 2 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<i32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:       %c4 = arith.constant 4 : index
@@ -573,7 +572,7 @@ module attributes {} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:         }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:         taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:       }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       taskflow.yield reads(%arg0 : memref<4x8xi32>) writes(%arg1 : memref<i32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:       taskflow.yield writes(%arg1 : memref<i32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:     }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:     %0 = affine.load %dependency_write_out_1[] : memref<i32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:     return %0 : i32
@@ -623,7 +622,7 @@ module attributes {} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:       }) : (index) -> ()
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:     }
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:     %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<i32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:       %c4 = arith.constant 4 : index
@@ -655,7 +654,7 @@ module attributes {} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:         }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:         taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:       }) : (index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       taskflow.yield reads(%arg0 : memref<4x8xi32>) writes(%arg1 : memref<i32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:       taskflow.yield writes(%arg1 : memref<i32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:     }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:     %0 = affine.load %dependency_write_out_1[] : memref<i32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:     return %0 : i32
@@ -705,7 +704,7 @@ module attributes {} {
 // MAP-SPATIAL-NEXT:       }) : (index) -> ()
 // MAP-SPATIAL-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>)
 // MAP-SPATIAL-NEXT:     }
-// MAP-SPATIAL-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 2 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// MAP-SPATIAL-NEXT:     %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [{col = 2 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<i32>) {
 // MAP-SPATIAL-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // MAP-SPATIAL-NEXT:       %c0 = arith.constant 0 : index
 // MAP-SPATIAL-NEXT:       %c4 = arith.constant 4 : index
@@ -737,7 +736,7 @@ module attributes {} {
 // MAP-SPATIAL-NEXT:         }
 // MAP-SPATIAL-NEXT:         taskflow.hyperblock.yield
 // MAP-SPATIAL-NEXT:       }) : (index) -> ()
-// MAP-SPATIAL-NEXT:       taskflow.yield reads(%arg0 : memref<4x8xi32>) writes(%arg1 : memref<i32>)
+// MAP-SPATIAL-NEXT:       taskflow.yield writes(%arg1 : memref<i32>)
 // MAP-SPATIAL-NEXT:     }
 // MAP-SPATIAL-NEXT:     %0 = affine.load %dependency_write_out_1[] : memref<i32>
 // MAP-SPATIAL-NEXT:     return %0 : i32
@@ -788,7 +787,7 @@ module attributes {} {
 // RESOPT-NEXT:       %4 = taskflow.counter parent(%3 : index) from %c0_2 to %c8 step %c1_3 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 1 : i32} : index
 // RESOPT-NEXT:       taskflow.yield writes(%arg0 : memref<4x8xi32>) values(%2 : i32)
 // RESOPT-NEXT:     }
-// RESOPT-NEXT:     %dependency_read_out, %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 2 : i32, dlp_replicable = true, profile_info = {duration = 7 : i32}, trip_count = 32 : i32} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<4x8xi32>, memref<i32>) {
+// RESOPT-NEXT:     %dependency_write_out_1 = taskflow.task @Task_2 dependency_read_in(%dependency_write_out : memref<4x8xi32>) dependency_write_in(%alloca : memref<i32>) value_inputs(%c8_i32, %value_outputs, %c2_i32 : i32, i32, i32) [original_read_memrefs(%alloca_0 : memref<4x8xi32>), original_write_memrefs(%alloca : memref<i32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 2 : i32, dlp_replicable = true, profile_info = {duration = 7 : i32}, trip_count = 32 : i32} : (memref<4x8xi32>, memref<i32>, i32, i32, i32) -> (memref<i32>) {
 // RESOPT-NEXT:     ^bb0(%arg0: memref<4x8xi32>, %arg1: memref<i32>, %arg2: i32, %arg3: i32, %arg4: i32):
 // RESOPT-NEXT:       %c8 = arith.constant 8 : index
 // RESOPT-NEXT:       %c0 = arith.constant 0 : index
@@ -813,7 +812,7 @@ module attributes {} {
 // RESOPT-NEXT:         neura.store_indexed %13 to [ : ]  {rhs_value = "%input2"} : !neura.data<i32, i1>
 // RESOPT-NEXT:         neura.yield {yield_type = "void"}
 // RESOPT-NEXT:       }
-// RESOPT-NEXT:       taskflow.yield reads(%arg0 : memref<4x8xi32>) writes(%arg1 : memref<i32>)
+// RESOPT-NEXT:       taskflow.yield writes(%arg1 : memref<i32>)
 // RESOPT-NEXT:     }
 // RESOPT-NEXT:     %0 = memref.load %dependency_write_out_1[] : memref<i32>
 // RESOPT-NEXT:     return %0 : i32

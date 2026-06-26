@@ -118,8 +118,9 @@ ParseResult TaskflowTaskOp::parse(OpAsmParser &parser, OperationState &result) {
 
   // Parses region.
   Region *body = result.addRegion();
-  if (parser.parseRegion(*body, /*args=*/{}, /*argTypes=*/{}))
+  if (parser.parseRegion(*body, /*args=*/{}, /*argTypes=*/{})) {
     return failure();
+  }
 
   // Adds operand segment sizes.
   result.addAttribute(
@@ -131,21 +132,33 @@ ParseResult TaskflowTaskOp::parse(OpAsmParser &parser, OperationState &result) {
            static_cast<int32_t>(original_read_operands.size()),
            static_cast<int32_t>(original_write_operands.size())}));
 
-  // Adds result segment sizes.
-  // dependency_read_out count matches dependency_read_in count (WAR dependency
-  // tracking).
-  size_t num_read_outputs = read_operands.size();
+  // Adds result segment sizes. Read/write outputs are inferred from the
+  // terminator, because multiple dependency_write_in states may map to a
+  // single dependency_write_out state.
+  size_t num_read_outputs = 0;
   size_t num_write_outputs = 0;
-  size_t num_value_outputs = 0;
-  for (Type t : func_type.getResults()) {
-    if (isa<MemRefType>(t))
-      num_write_outputs++;
-    else
-      num_value_outputs++;
+  if (!body->empty()) {
+    if (auto yield_op =
+            dyn_cast<TaskflowYieldOp>(body->front().getTerminator())) {
+      num_read_outputs = yield_op.getReadResults().size();
+      num_write_outputs = yield_op.getMemoryResults().size();
+    }
   }
-  // Total memref results include both dependency_read_out and
-  // dependency_write_out.
-  num_write_outputs = num_write_outputs - num_read_outputs;
+
+  size_t num_value_outputs = 0;
+  size_t total_memref_results = 0;
+  for (Type t : func_type.getResults()) {
+    if (isa<MemRefType>(t)) {
+      total_memref_results++;
+    } else {
+      num_value_outputs++;
+    }
+  }
+  if (total_memref_results != num_read_outputs + num_write_outputs) {
+    return parser.emitError(parser.getCurrentLocation(),
+                            "taskflow.yield memref result count does not "
+                            "match task function result type");
+  }
   result.addAttribute("resultSegmentSizes",
                       parser.getBuilder().getDenseI32ArrayAttr(
                           {static_cast<int32_t>(num_read_outputs),
