@@ -262,7 +262,7 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // AFFINE-NEXT:   }
 // AFFINE-NEXT: }
 
-// KERNEL:          %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<1x64x8x8xf32>) dependency_write_in(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] {dlp_replicable = true} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// KERNEL:          %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<1x64x8x8xf32>) will_write(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] {dlp_replicable = true} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // KERNEL-NEXT:     ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // KERNEL-NEXT:       %c64 = arith.constant 64 : index
 // KERNEL-NEXT:       %c8 = arith.constant 8 : index
@@ -286,7 +286,7 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // KERNEL-NEXT:         memref.store %8, %arg4[%4, %5, %6, %7] : memref<1x8x8x64xf32>
 // KERNEL-NEXT:         neura.yield
 // KERNEL-NEXT:       }
-// KERNEL-NEXT:       taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// KERNEL-NEXT:       taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // KERNEL-NEXT:     }
 
 
@@ -300,7 +300,7 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:     %cst_1 = arith.constant 3.40282347E+38 : f32
 // STREAM-NEXT:     %cst_2 = arith.constant 0.000000e+00 : f32
 // STREAM-NEXT:     %alloc = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// STREAM-NEXT:     %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<1x64x8x8xf32>) dependency_write_in(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// STREAM-NEXT:     %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<1x64x8x8xf32>) will_write(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // STREAM-NEXT:       affine.for %arg3 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg4 = 0 to 8 {
@@ -312,10 +312,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// STREAM-NEXT:       taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // STREAM-NEXT:     }
 // STREAM-NEXT:     %alloc_3 = memref.alloc() {alignment = 64 : i64} : memref<1x10x10x64xf32>
-// STREAM-NEXT:     %dependency_write_out_4 = taskflow.task @Task_1 dependency_write_in(%alloc_3 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_3 : memref<1x10x10x64xf32>)] : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
+// STREAM-NEXT:     %done_write_4 = taskflow.task @Task_1 will_write(%alloc_3 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_3 : memref<1x10x10x64xf32>)] : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: f32):
 // STREAM-NEXT:       affine.for %arg3 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg4 = 0 to 10 {
@@ -326,10 +326,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield writes(%arg1 : memref<1x10x10x64xf32>)
+// STREAM-NEXT:       taskflow.yield done_write(%arg1 : memref<1x10x10x64xf32>)
 // STREAM-NEXT:     }
 // STREAM-NEXT:     %alloc_5 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// STREAM-NEXT:     %dependency_write_out_6 = taskflow.task @Task_2 dependency_write_in(%alloc_5 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// STREAM-NEXT:     %done_write_6 = taskflow.task @Task_2 will_write(%alloc_5 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: f32):
 // STREAM-NEXT:       affine.for %arg3 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg4 = 0 to 8 {
@@ -340,9 +340,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield writes(%arg1 : memref<1x8x8x64xf32>)
+// STREAM-NEXT:       taskflow.yield done_write(%arg1 : memref<1x8x8x64xf32>)
 // STREAM-NEXT:     }
-// STREAM-NEXT:     %dependency_write_out_7 = taskflow.task @Task_3 dependency_read_in(%dependency_write_out_4, %dependency_write_out_6 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) dependency_write_in(%dependency_write_out_6 : memref<1x8x8x64xf32>) value_inputs(%cst_0 : f32) [original_read_memrefs(%alloc_3, %alloc_5 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// STREAM-NEXT:     %done_write_7 = taskflow.task @Task_3 will_read(%done_write_4, %done_write_6 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) will_write(%done_write_6 : memref<1x8x8x64xf32>) value_inputs(%cst_0 : f32) [original_read_memrefs(%alloc_3, %alloc_5 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: memref<1x8x8x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: f32):
 // STREAM-NEXT:       affine.for %arg5 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg6 = 0 to 8 {
@@ -363,10 +363,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield writes(%arg3 : memref<1x8x8x64xf32>)
+// STREAM-NEXT:       taskflow.yield done_write(%arg3 : memref<1x8x8x64xf32>)
 // STREAM-NEXT:     }
 // STREAM-NEXT:     %alloc_8 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// STREAM-NEXT:     %dependency_read_out, %dependency_write_out_9 = taskflow.task @Task_4_Task_5_fused dependency_read_in(%dependency_write_out_7 : memref<1x8x8x64xf32>) dependency_write_in(%alloc_8 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_5 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_8 : memref<1x64x8x8xf32>)] : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) {
+// STREAM-NEXT:     %done_read, %done_write_9 = taskflow.task @Task_4_Task_5_fused will_read(%done_write_7 : memref<1x8x8x64xf32>) will_write(%alloc_8 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_5 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_8 : memref<1x64x8x8xf32>)] : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: f32, %arg4: f32):
 // STREAM-NEXT:       affine.for %arg5 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg6 = 0 to 64 {
@@ -380,10 +380,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield reads(%arg1 : memref<1x8x8x64xf32>) writes(%arg2 : memref<1x64x8x8xf32>)
+// STREAM-NEXT:       taskflow.yield done_read(%arg1 : memref<1x8x8x64xf32>) done_write(%arg2 : memref<1x64x8x8xf32>)
 // STREAM-NEXT:     }
 // STREAM-NEXT:     %alloc_10 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// STREAM-NEXT:     %dependency_write_out_11 = taskflow.task @Task_6 dependency_read_in(%dependency_write_out_9 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_10 : memref<1x8x8x64xf32>) [original_read_memrefs(%alloc_8 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_10 : memref<1x8x8x64xf32>)] : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// STREAM-NEXT:     %done_write_11 = taskflow.task @Task_6 will_read(%done_write_9 : memref<1x64x8x8xf32>) will_write(%alloc_10 : memref<1x8x8x64xf32>) [original_read_memrefs(%alloc_8 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_10 : memref<1x8x8x64xf32>)] : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // STREAM-NEXT:       affine.for %arg3 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg4 = 0 to 8 {
@@ -395,10 +395,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// STREAM-NEXT:       taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // STREAM-NEXT:     }
 // STREAM-NEXT:     %alloc_12 = memref.alloc() {alignment = 64 : i64} : memref<1x10x10x64xf32>
-// STREAM-NEXT:     %dependency_write_out_13 = taskflow.task @Task_7 dependency_write_in(%alloc_12 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_12 : memref<1x10x10x64xf32>)] : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
+// STREAM-NEXT:     %done_write_13 = taskflow.task @Task_7 will_write(%alloc_12 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_12 : memref<1x10x10x64xf32>)] : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: f32):
 // STREAM-NEXT:       affine.for %arg3 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg4 = 0 to 10 {
@@ -409,10 +409,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield writes(%arg1 : memref<1x10x10x64xf32>)
+// STREAM-NEXT:       taskflow.yield done_write(%arg1 : memref<1x10x10x64xf32>)
 // STREAM-NEXT:     }
 // STREAM-NEXT:     %alloc_14 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// STREAM-NEXT:     %dependency_write_out_15 = taskflow.task @Task_8 dependency_write_in(%alloc_14 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_14 : memref<1x8x8x64xf32>)] : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// STREAM-NEXT:     %done_write_15 = taskflow.task @Task_8 will_write(%alloc_14 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_14 : memref<1x8x8x64xf32>)] : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: f32):
 // STREAM-NEXT:       affine.for %arg3 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg4 = 0 to 8 {
@@ -423,9 +423,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield writes(%arg1 : memref<1x8x8x64xf32>)
+// STREAM-NEXT:       taskflow.yield done_write(%arg1 : memref<1x8x8x64xf32>)
 // STREAM-NEXT:     }
-// STREAM-NEXT:     %dependency_write_out_16 = taskflow.task @Task_9 dependency_read_in(%dependency_write_out_13, %dependency_write_out_15 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) dependency_write_in(%dependency_write_out_15 : memref<1x8x8x64xf32>) value_inputs(%cst : f32) [original_read_memrefs(%alloc_12, %alloc_14 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_14 : memref<1x8x8x64xf32>)] : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// STREAM-NEXT:     %done_write_16 = taskflow.task @Task_9 will_read(%done_write_13, %done_write_15 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) will_write(%done_write_15 : memref<1x8x8x64xf32>) value_inputs(%cst : f32) [original_read_memrefs(%alloc_12, %alloc_14 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_14 : memref<1x8x8x64xf32>)] : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: memref<1x8x8x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: f32):
 // STREAM-NEXT:       affine.for %arg5 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg6 = 0 to 8 {
@@ -446,10 +446,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield writes(%arg3 : memref<1x8x8x64xf32>)
+// STREAM-NEXT:       taskflow.yield done_write(%arg3 : memref<1x8x8x64xf32>)
 // STREAM-NEXT:     }
 // STREAM-NEXT:     %alloc_17 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// STREAM-NEXT:     %dependency_read_out_18:2, %dependency_write_out_19 = taskflow.task @Task_10_Task_11_Task_12_fused_fused dependency_read_in(%dependency_write_out_16, %arg0 : memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) dependency_write_in(%alloc_17 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_14, %arg0 : memref<1x8x8x64xf32>, memref<1x64x8x8xf32>), original_write_memrefs(%alloc_17 : memref<1x64x8x8xf32>)] : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) {
+// STREAM-NEXT:     %done_read_18:2, %done_write_19 = taskflow.task @Task_10_Task_11_Task_12_fused_fused will_read(%done_write_16, %arg0 : memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) will_write(%alloc_17 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_14, %arg0 : memref<1x8x8x64xf32>, memref<1x64x8x8xf32>), original_write_memrefs(%alloc_17 : memref<1x64x8x8xf32>)] : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) {
 // STREAM-NEXT:     ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: memref<1x64x8x8xf32>, %arg4: f32, %arg5: f32):
 // STREAM-NEXT:       affine.for %arg6 = 0 to 1 {
 // STREAM-NEXT:         affine.for %arg7 = 0 to 64 {
@@ -465,9 +465,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // STREAM-NEXT:           }
 // STREAM-NEXT:         }
 // STREAM-NEXT:       }
-// STREAM-NEXT:       taskflow.yield reads(%arg1, %arg2 : memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) writes(%arg3 : memref<1x64x8x8xf32>)
+// STREAM-NEXT:       taskflow.yield done_read(%arg1, %arg2 : memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) done_write(%arg3 : memref<1x64x8x8xf32>)
 // STREAM-NEXT:     }
-// STREAM-NEXT:     return %dependency_write_out_19 : memref<1x64x8x8xf32>
+// STREAM-NEXT:     return %done_write_19 : memref<1x64x8x8xf32>
 // STREAM-NEXT:   }
 // STREAM-NEXT: }
 
@@ -481,7 +481,7 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %cst_1 = arith.constant 3.40282347E+38 : f32
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %cst_2 = arith.constant 0.000000e+00 : f32
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<1x64x8x8xf32>) dependency_write_in(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 2 : i32}], read_sram_locations = [{col = 2 : i32, row = 3 : i32}], write_sram_locations = [{col = 0 : i32, row = 2 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<1x64x8x8xf32>) will_write(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 2 : i32}], read_sram_locations = [{col = 2 : i32, row = 3 : i32}], write_sram_locations = [{col = 0 : i32, row = 2 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -497,10 +497,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_3 = memref.alloc() {alignment = 64 : i64} : memref<1x10x10x64xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_4 = taskflow.task @Task_1 dependency_write_in(%alloc_3 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_3 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 1 : i32}], read_sram_locations = [], write_sram_locations = [{col = 1 : i32, row = 1 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_4 = taskflow.task @Task_1 will_write(%alloc_3 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_3 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 1 : i32}], read_sram_locations = [], write_sram_locations = [{col = 1 : i32, row = 1 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -515,10 +515,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x10x10x64xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg1 : memref<1x10x10x64xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg1 : memref<1x10x10x64xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_5 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_6 = taskflow.task @Task_2 dependency_write_in(%alloc_5 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 1 : i32, row = 1 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_6 = taskflow.task @Task_2 will_write(%alloc_5 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 1 : i32, row = 1 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -533,9 +533,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg1 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg1 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_7 = taskflow.task @Task_3 dependency_read_in(%dependency_write_out_4, %dependency_write_out_6 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) dependency_write_in(%dependency_write_out_6 : memref<1x8x8x64xf32>) value_inputs(%cst_0 : f32) [original_read_memrefs(%alloc_3, %alloc_5 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 1 : i32}], read_sram_locations = [{col = 1 : i32, row = 1 : i32}, {col = 1 : i32, row = 1 : i32}], write_sram_locations = [{col = 1 : i32, row = 1 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_7 = taskflow.task @Task_3 will_read(%done_write_4, %done_write_6 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) will_write(%done_write_6 : memref<1x8x8x64xf32>) value_inputs(%cst_0 : f32) [original_read_memrefs(%alloc_3, %alloc_5 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 1 : i32}], read_sram_locations = [{col = 1 : i32, row = 1 : i32}, {col = 1 : i32, row = 1 : i32}], write_sram_locations = [{col = 1 : i32, row = 1 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: memref<1x8x8x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -560,10 +560,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %12, %arg3[%arg5, %arg6, %arg7, %arg8] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg3 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg3 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_8 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_9 = taskflow.task @Task_4 dependency_read_in(%dependency_write_out_7 : memref<1x8x8x64xf32>) dependency_write_in(%alloc_8 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_5 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_8 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 2 : i32}], read_sram_locations = [{col = 1 : i32, row = 1 : i32}], write_sram_locations = [{col = 2 : i32, row = 2 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_9 = taskflow.task @Task_4 will_read(%done_write_7 : memref<1x8x8x64xf32>) will_write(%alloc_8 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_5 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_8 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 2 : i32}], read_sram_locations = [{col = 1 : i32, row = 1 : i32}], write_sram_locations = [{col = 2 : i32, row = 2 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -579,10 +579,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_10 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_11 = taskflow.task @Task_5 dependency_read_in(%dependency_write_out_9 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_10 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_8 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_10 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 2 : i32, context_id = 0 : i32, row = 2 : i32}], read_sram_locations = [{col = 2 : i32, row = 2 : i32}], write_sram_locations = [{col = 2 : i32, row = 3 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_11 = taskflow.task @Task_5 will_read(%done_write_9 : memref<1x64x8x8xf32>) will_write(%alloc_10 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_8 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_10 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 2 : i32, context_id = 0 : i32, row = 2 : i32}], read_sram_locations = [{col = 2 : i32, row = 2 : i32}], write_sram_locations = [{col = 2 : i32, row = 3 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: f32, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -600,10 +600,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %6, %arg2[%arg5, %arg6, %arg7, %arg8] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_12 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_13 = taskflow.task @Task_6 dependency_read_in(%dependency_write_out_11 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_12 : memref<1x8x8x64xf32>) [original_read_memrefs(%alloc_10 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_12 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 2 : i32, context_id = 0 : i32, row = 3 : i32}], read_sram_locations = [{col = 2 : i32, row = 3 : i32}], write_sram_locations = [{col = 2 : i32, row = 3 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_13 = taskflow.task @Task_6 will_read(%done_write_11 : memref<1x64x8x8xf32>) will_write(%alloc_12 : memref<1x8x8x64xf32>) [original_read_memrefs(%alloc_10 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_12 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 2 : i32, context_id = 0 : i32, row = 3 : i32}], read_sram_locations = [{col = 2 : i32, row = 3 : i32}], write_sram_locations = [{col = 2 : i32, row = 3 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -619,10 +619,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_14 = memref.alloc() {alignment = 64 : i64} : memref<1x10x10x64xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_15 = taskflow.task @Task_7 dependency_write_in(%alloc_14 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_14 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 3 : i32, context_id = 0 : i32, row = 1 : i32}], read_sram_locations = [], write_sram_locations = [{col = 3 : i32, row = 1 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_15 = taskflow.task @Task_7 will_write(%alloc_14 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_14 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 3 : i32, context_id = 0 : i32, row = 1 : i32}], read_sram_locations = [], write_sram_locations = [{col = 3 : i32, row = 1 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -637,10 +637,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x10x10x64xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg1 : memref<1x10x10x64xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg1 : memref<1x10x10x64xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_16 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_17 = taskflow.task @Task_8 dependency_write_in(%alloc_16 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 3 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 3 : i32, row = 1 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_17 = taskflow.task @Task_8 will_write(%alloc_16 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 3 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 3 : i32, row = 1 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -655,9 +655,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg1 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg1 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_18 = taskflow.task @Task_9 dependency_read_in(%dependency_write_out_15, %dependency_write_out_17 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) dependency_write_in(%dependency_write_out_17 : memref<1x8x8x64xf32>) value_inputs(%cst : f32) [original_read_memrefs(%alloc_14, %alloc_16 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 2 : i32, context_id = 0 : i32, row = 1 : i32}], read_sram_locations = [{col = 3 : i32, row = 1 : i32}, {col = 3 : i32, row = 1 : i32}], write_sram_locations = [{col = 3 : i32, row = 1 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_18 = taskflow.task @Task_9 will_read(%done_write_15, %done_write_17 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) will_write(%done_write_17 : memref<1x8x8x64xf32>) value_inputs(%cst : f32) [original_read_memrefs(%alloc_14, %alloc_16 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 2 : i32, context_id = 0 : i32, row = 1 : i32}], read_sram_locations = [{col = 3 : i32, row = 1 : i32}, {col = 3 : i32, row = 1 : i32}], write_sram_locations = [{col = 3 : i32, row = 1 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: memref<1x8x8x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -682,10 +682,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %12, %arg3[%arg5, %arg6, %arg7, %arg8] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg3 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg3 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_19 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_20 = taskflow.task @Task_10 dependency_read_in(%dependency_write_out_18 : memref<1x8x8x64xf32>) dependency_write_in(%alloc_19 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_16 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_19 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 3 : i32, context_id = 0 : i32, row = 2 : i32}], read_sram_locations = [{col = 3 : i32, row = 1 : i32}], write_sram_locations = [{col = 3 : i32, row = 3 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_20 = taskflow.task @Task_10 will_read(%done_write_18 : memref<1x8x8x64xf32>) will_write(%alloc_19 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_16 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_19 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 3 : i32, context_id = 0 : i32, row = 2 : i32}], read_sram_locations = [{col = 3 : i32, row = 1 : i32}], write_sram_locations = [{col = 3 : i32, row = 3 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -701,10 +701,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_21 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_22 = taskflow.task @Task_11 dependency_read_in(%dependency_write_out_20, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) dependency_write_in(%alloc_21 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_19, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>), original_write_memrefs(%alloc_21 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 3 : i32, context_id = 0 : i32, row = 3 : i32}], read_sram_locations = [{col = 3 : i32, row = 3 : i32}, {col = 2 : i32, row = 3 : i32}], write_sram_locations = [{col = 2 : i32, row = 3 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_22 = taskflow.task @Task_11 will_read(%done_write_20, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) will_write(%alloc_21 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_19, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>), original_write_memrefs(%alloc_21 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 3 : i32, context_id = 0 : i32, row = 3 : i32}], read_sram_locations = [{col = 3 : i32, row = 3 : i32}, {col = 2 : i32, row = 3 : i32}], write_sram_locations = [{col = 2 : i32, row = 3 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -722,10 +722,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %6, %arg3[%arg4, %arg5, %arg6, %arg7] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg3 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg3 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %alloc_23 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %dependency_write_out_24 = taskflow.task @Task_12 dependency_read_in(%dependency_write_out_22 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_23 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_21 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_23 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 3 : i32}], read_sram_locations = [{col = 2 : i32, row = 3 : i32}], write_sram_locations = [{col = 1 : i32, row = 3 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    %done_write_24 = taskflow.task @Task_12 will_read(%done_write_22 : memref<1x64x8x8xf32>) will_write(%alloc_23 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_21 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_23 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 3 : i32}], read_sram_locations = [{col = 2 : i32, row = 3 : i32}], write_sram_locations = [{col = 1 : i32, row = 3 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: f32, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      %c1 = arith.constant 1 : index
@@ -743,9 +743,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        memref.store %6, %arg2[%arg5, %arg6, %arg7, %arg8] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    return %dependency_write_out_24 : memref<1x64x8x8xf32>
+// MAP-SPATIAL-TEMPORAL-4x4-NEXT:    return %done_write_24 : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:  }
 // MAP-SPATIAL-TEMPORAL-4x4-NEXT:}
 
@@ -759,7 +759,7 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %cst_1 = arith.constant 3.40282347E+38 : f32
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %cst_2 = arith.constant 0.000000e+00 : f32
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<1x64x8x8xf32>) dependency_write_in(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 10 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<1x64x8x8xf32>) will_write(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 10 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -775,10 +775,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_3 = memref.alloc() {alignment = 64 : i64} : memref<1x10x10x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_4 = taskflow.task @Task_1 dependency_write_in(%alloc_3 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_3 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_4 = taskflow.task @Task_1 will_write(%alloc_3 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_3 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -793,10 +793,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x10x10x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg1 : memref<1x10x10x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg1 : memref<1x10x10x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_5 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_6 = taskflow.task @Task_2 dependency_write_in(%alloc_5 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_6 = taskflow.task @Task_2 will_write(%alloc_5 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -811,9 +811,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg1 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg1 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_7 = taskflow.task @Task_3 dependency_read_in(%dependency_write_out_4, %dependency_write_out_6 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) dependency_write_in(%dependency_write_out_6 : memref<1x8x8x64xf32>) value_inputs(%cst_0 : f32) [original_read_memrefs(%alloc_3, %alloc_5 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 4 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_7 = taskflow.task @Task_3 will_read(%done_write_4, %done_write_6 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) will_write(%done_write_6 : memref<1x8x8x64xf32>) value_inputs(%cst_0 : f32) [original_read_memrefs(%alloc_3, %alloc_5 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 4 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: memref<1x8x8x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -838,10 +838,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %12, %arg3[%arg5, %arg6, %arg7, %arg8] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg3 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg3 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_8 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_9 = taskflow.task @Task_4 dependency_read_in(%dependency_write_out_7 : memref<1x8x8x64xf32>) dependency_write_in(%alloc_8 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_5 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_8 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 6 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_9 = taskflow.task @Task_4 will_read(%done_write_7 : memref<1x8x8x64xf32>) will_write(%alloc_8 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_5 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_8 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 6 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -857,10 +857,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_10 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_11 = taskflow.task @Task_5 dependency_read_in(%dependency_write_out_9 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_10 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_8 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_10 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 8 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_11 = taskflow.task @Task_5 will_read(%done_write_9 : memref<1x64x8x8xf32>) will_write(%alloc_10 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_8 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_10 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 8 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: f32, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -878,10 +878,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %6, %arg2[%arg5, %arg6, %arg7, %arg8] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_12 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_13 = taskflow.task @Task_6 dependency_read_in(%dependency_write_out_11 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_12 : memref<1x8x8x64xf32>) [original_read_memrefs(%alloc_10 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_12 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 11 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_13 = taskflow.task @Task_6 will_read(%done_write_11 : memref<1x64x8x8xf32>) will_write(%alloc_12 : memref<1x8x8x64xf32>) [original_read_memrefs(%alloc_10 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_12 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 11 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -897,10 +897,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_14 = memref.alloc() {alignment = 64 : i64} : memref<1x10x10x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_15 = taskflow.task @Task_7 dependency_write_in(%alloc_14 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_14 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 2 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_15 = taskflow.task @Task_7 will_write(%alloc_14 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_14 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 2 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -915,10 +915,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x10x10x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg1 : memref<1x10x10x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg1 : memref<1x10x10x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_16 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_17 = taskflow.task @Task_8 dependency_write_in(%alloc_16 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 3 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_17 = taskflow.task @Task_8 will_write(%alloc_16 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 3 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -933,9 +933,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg1 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg1 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_18 = taskflow.task @Task_9 dependency_read_in(%dependency_write_out_15, %dependency_write_out_17 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) dependency_write_in(%dependency_write_out_17 : memref<1x8x8x64xf32>) value_inputs(%cst : f32) [original_read_memrefs(%alloc_14, %alloc_16 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 5 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_18 = taskflow.task @Task_9 will_read(%done_write_15, %done_write_17 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) will_write(%done_write_17 : memref<1x8x8x64xf32>) value_inputs(%cst : f32) [original_read_memrefs(%alloc_14, %alloc_16 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 5 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: memref<1x8x8x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -960,10 +960,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %12, %arg3[%arg5, %arg6, %arg7, %arg8] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg3 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg3 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_19 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_20 = taskflow.task @Task_10 dependency_read_in(%dependency_write_out_18 : memref<1x8x8x64xf32>) dependency_write_in(%alloc_19 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_16 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_19 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 7 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_20 = taskflow.task @Task_10 will_read(%done_write_18 : memref<1x8x8x64xf32>) will_write(%alloc_19 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_16 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_19 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 7 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -979,10 +979,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_21 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_22 = taskflow.task @Task_11 dependency_read_in(%dependency_write_out_20, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) dependency_write_in(%alloc_21 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_19, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>), original_write_memrefs(%alloc_21 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 9 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_22 = taskflow.task @Task_11 will_read(%done_write_20, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) will_write(%alloc_21 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_19, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>), original_write_memrefs(%alloc_21 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 9 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -1000,10 +1000,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %6, %arg3[%arg4, %arg5, %arg6, %arg7] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg3 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg3 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %alloc_23 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %dependency_write_out_24 = taskflow.task @Task_12 dependency_read_in(%dependency_write_out_22 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_23 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_21 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_23 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 12 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    %done_write_24 = taskflow.task @Task_12 will_read(%done_write_22 : memref<1x64x8x8xf32>) will_write(%alloc_23 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_21 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_23 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 12 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: f32, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      %c1 = arith.constant 1 : index
@@ -1021,9 +1021,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        memref.store %6, %arg2[%arg5, %arg6, %arg7, %arg8] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    return %dependency_write_out_24 : memref<1x64x8x8xf32>
+// MAP-SPATIAL-TEMPORAL-1x1-NEXT:    return %done_write_24 : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:  }
 // MAP-SPATIAL-TEMPORAL-1x1-NEXT:}
 
@@ -1037,7 +1037,7 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %cst_1 = arith.constant 3.40282347E+38 : f32
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %cst_2 = arith.constant 0.000000e+00 : f32
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out = taskflow.task @Task_0 dependency_read_in(%arg0 : memref<1x64x8x8xf32>) dependency_write_in(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 5 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write = taskflow.task @Task_0 will_read(%arg0 : memref<1x64x8x8xf32>) will_write(%alloc : memref<1x8x8x64xf32>) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 5 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1053,10 +1053,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_3 = memref.alloc() {alignment = 64 : i64} : memref<1x10x10x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_4 = taskflow.task @Task_1 dependency_write_in(%alloc_3 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_3 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_4 = taskflow.task @Task_1 will_write(%alloc_3 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_3 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1071,10 +1071,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x10x10x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg1 : memref<1x10x10x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg1 : memref<1x10x10x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_5 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_6 = taskflow.task @Task_2 dependency_write_in(%alloc_5 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_6 = taskflow.task @Task_2 will_write(%alloc_5 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 0 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1089,9 +1089,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg1 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg1 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_7 = taskflow.task @Task_3 dependency_read_in(%dependency_write_out_4, %dependency_write_out_6 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) dependency_write_in(%dependency_write_out_6 : memref<1x8x8x64xf32>) value_inputs(%cst_0 : f32) [original_read_memrefs(%alloc_3, %alloc_5 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 2 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_7 = taskflow.task @Task_3 will_read(%done_write_4, %done_write_6 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) will_write(%done_write_6 : memref<1x8x8x64xf32>) value_inputs(%cst_0 : f32) [original_read_memrefs(%alloc_3, %alloc_5 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_5 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 2 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}, {col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: memref<1x8x8x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1116,10 +1116,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %12, %arg3[%arg5, %arg6, %arg7, %arg8] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg3 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg3 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_8 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_9 = taskflow.task @Task_4 dependency_read_in(%dependency_write_out_7 : memref<1x8x8x64xf32>) dependency_write_in(%alloc_8 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_5 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_8 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 3 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_9 = taskflow.task @Task_4 will_read(%done_write_7 : memref<1x8x8x64xf32>) will_write(%alloc_8 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_5 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_8 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 3 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 0 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1135,10 +1135,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_10 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_11 = taskflow.task @Task_5 dependency_read_in(%dependency_write_out_9 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_10 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_8 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_10 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 4 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_11 = taskflow.task @Task_5 will_read(%done_write_9 : memref<1x64x8x8xf32>) will_write(%alloc_10 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_8 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_10 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 4 : i32, row = 0 : i32}], read_sram_locations = [{col = 0 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: f32, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1156,10 +1156,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %6, %arg2[%arg5, %arg6, %arg7, %arg8] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_12 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_13 = taskflow.task @Task_6 dependency_read_in(%dependency_write_out_11 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_12 : memref<1x8x8x64xf32>) [original_read_memrefs(%alloc_10 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_12 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 5 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_13 = taskflow.task @Task_6 will_read(%done_write_11 : memref<1x64x8x8xf32>) will_write(%alloc_12 : memref<1x8x8x64xf32>) [original_read_memrefs(%alloc_10 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_12 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 5 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x8x8x64xf32>) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x8x8x64xf32>):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1175,10 +1175,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg2 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg2 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_14 = memref.alloc() {alignment = 64 : i64} : memref<1x10x10x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_15 = taskflow.task @Task_7 dependency_write_in(%alloc_14 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_14 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_15 = taskflow.task @Task_7 will_write(%alloc_14 : memref<1x10x10x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_14 : memref<1x10x10x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, f32) -> (memref<1x10x10x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1193,10 +1193,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x10x10x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg1 : memref<1x10x10x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg1 : memref<1x10x10x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_16 = memref.alloc() {alignment = 64 : i64} : memref<1x8x8x64xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_17 = taskflow.task @Task_8 dependency_write_in(%alloc_16 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_17 = taskflow.task @Task_8 will_write(%alloc_16 : memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 0 : i32, context_id = 1 : i32, row = 0 : i32}], read_sram_locations = [], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1211,9 +1211,9 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %arg2, %arg1[%arg3, %arg4, %arg5, %arg6] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg1 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg1 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_18 = taskflow.task @Task_9 dependency_read_in(%dependency_write_out_15, %dependency_write_out_17 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) dependency_write_in(%dependency_write_out_17 : memref<1x8x8x64xf32>) value_inputs(%cst : f32) [original_read_memrefs(%alloc_14, %alloc_16 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 2 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_18 = taskflow.task @Task_9 will_read(%done_write_15, %done_write_17 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>) will_write(%done_write_17 : memref<1x8x8x64xf32>) value_inputs(%cst : f32) [original_read_memrefs(%alloc_14, %alloc_16 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>), original_write_memrefs(%alloc_16 : memref<1x8x8x64xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 2 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x8x8x64xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x10x10x64xf32>, %arg2: memref<1x8x8x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1238,10 +1238,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %12, %arg3[%arg5, %arg6, %arg7, %arg8] : memref<1x8x8x64xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg3 : memref<1x8x8x64xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg3 : memref<1x8x8x64xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_19 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_20 = taskflow.task @Task_10 dependency_read_in(%dependency_write_out_18 : memref<1x8x8x64xf32>) dependency_write_in(%alloc_19 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_16 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_19 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 3 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_20 = taskflow.task @Task_10 will_read(%done_write_18 : memref<1x8x8x64xf32>) will_write(%alloc_19 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_16 : memref<1x8x8x64xf32>), original_write_memrefs(%alloc_19 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 3 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x8x8x64xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x8x8x64xf32>, %arg2: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1257,10 +1257,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %4, %arg2[%arg3, %arg4, %arg5, %arg6] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_21 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_22 = taskflow.task @Task_11 dependency_read_in(%dependency_write_out_20, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) dependency_write_in(%alloc_21 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_19, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>), original_write_memrefs(%alloc_21 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 4 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_22 = taskflow.task @Task_11 will_read(%done_write_20, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) will_write(%alloc_21 : memref<1x64x8x8xf32>) [original_read_memrefs(%alloc_19, %arg0 : memref<1x64x8x8xf32>, memref<1x64x8x8xf32>), original_write_memrefs(%alloc_21 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 4 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}, {col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, memref<1x64x8x8xf32>) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: memref<1x64x8x8xf32>):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1278,10 +1278,10 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %6, %arg3[%arg4, %arg5, %arg6, %arg7] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg3 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg3 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %alloc_23 = memref.alloc() {alignment = 64 : i64} : memref<1x64x8x8xf32>
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %dependency_write_out_24 = taskflow.task @Task_12 dependency_read_in(%dependency_write_out_22 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_23 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_21 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_23 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 6 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    %done_write_24 = taskflow.task @Task_12 will_read(%done_write_22 : memref<1x64x8x8xf32>) will_write(%alloc_23 : memref<1x64x8x8xf32>) value_inputs(%cst_1, %cst_2 : f32, f32) [original_read_memrefs(%alloc_21 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_23 : memref<1x64x8x8xf32>)] {profile_info = {duration = 1 : i32}, task_orchestration_info = {cgra_positions = [{col = 1 : i32, context_id = 6 : i32, row = 0 : i32}], read_sram_locations = [{col = 1 : i32, row = 0 : i32}], write_sram_locations = [{col = 1 : i32, row = 0 : i32}]}} : (memref<1x64x8x8xf32>, memref<1x64x8x8xf32>, f32, f32) -> (memref<1x64x8x8xf32>) {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x64x8x8xf32>, %arg3: f32, %arg4: f32):
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c0 = arith.constant 0 : index
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      %c1 = arith.constant 1 : index
@@ -1299,13 +1299,13 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        memref.store %6, %arg2[%arg5, %arg6, %arg7, %arg8] : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:        taskflow.hyperblock.yield
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:      }) : (index, index, index, index) -> ()
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield writes(%arg2 : memref<1x64x8x8xf32>)
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:      taskflow.yield done_write(%arg2 : memref<1x64x8x8xf32>)
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:    }
-// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    return %dependency_write_out_24 : memref<1x64x8x8xf32>
+// MAP-SPATIAL-TEMPORAL-1x2-NEXT:    return %done_write_24 : memref<1x64x8x8xf32>
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:  }
 // MAP-SPATIAL-TEMPORAL-1x2-NEXT:}
 
-// RESOPT:          %dependency_read_out, %dependency_write_out:3 = taskflow.task @Task_1_Task_0_Task_2_utilfused_utilfused dependency_read_in(%arg0 : memref<1x64x8x8xf32>) dependency_write_in(%alloc_3, %alloc, %alloc_4 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_3, %alloc, %alloc_4 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 5 : i32, profile_info = {duration = 3 : i32}, trip_count = 6400 : i32} : (memref<1x64x8x8xf32>, memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x64x8x8xf32>, memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>) {
+// RESOPT:          %done_read, %done_write:3 = taskflow.task @Task_1_Task_0_Task_2_utilfused_utilfused will_read(%arg0 : memref<1x64x8x8xf32>) will_write(%alloc_3, %alloc, %alloc_4 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>) value_inputs(%cst_2 : f32) [original_read_memrefs(%arg0 : memref<1x64x8x8xf32>), original_write_memrefs(%alloc_3, %alloc, %alloc_4 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>)] {cgra_count = 2 : i32, cgra_shape = "1x2", compiled_ii = 5 : i32, profile_info = {duration = 3 : i32}, trip_count = 6400 : i32} : (memref<1x64x8x8xf32>, memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>, f32) -> (memref<1x64x8x8xf32>, memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>) {
 // RESOPT-NEXT:     ^bb0(%arg1: memref<1x64x8x8xf32>, %arg2: memref<1x10x10x64xf32>, %arg3: memref<1x8x8x64xf32>, %arg4: memref<1x8x8x64xf32>, %arg5: f32):
 // RESOPT-NEXT:       %c64 = arith.constant 64 : index
 // RESOPT-NEXT:       %c10 = arith.constant 10 : index
@@ -1353,5 +1353,5 @@ module attributes {torch.debug_module_name = "SimpleResNetBlock"} {
 // RESOPT-NEXT:       %9 = taskflow.counter parent(%8 : index) from %c0_23 to %c8_22 step %c1_24 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "relay", counter_id = 1 : i32} : index
 // RESOPT-NEXT:       %10 = taskflow.counter parent(%9 : index) from %c0_23 to %c8_22 step %c1_24 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "relay", counter_id = 2 : i32} : index
 // RESOPT-NEXT:       %11 = taskflow.counter parent(%10 : index) from %c0_23 to %c64_21 step %c1_24 attributes {counter_dynamism = "constant_bound", counter_hierarchy = "leaf", counter_id = 3 : i32} : index
-// RESOPT-NEXT:       taskflow.yield reads(%arg1 : memref<1x64x8x8xf32>) writes(%arg2, %arg3, %arg4 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>)
+// RESOPT-NEXT:       taskflow.yield done_read(%arg1 : memref<1x64x8x8xf32>) done_write(%arg2, %arg3, %arg4 : memref<1x10x10x64xf32>, memref<1x8x8x64xf32>, memref<1x8x8x64xf32>)
 // RESOPT-NEXT:     }

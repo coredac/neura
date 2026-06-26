@@ -212,7 +212,7 @@ public:
 
     // Phase 3: Build explicit task dependency edges. Keep scalar/value SSA
     // dependencies visible through value_inputs, and also scan all operands to
-    // catch taskflow dependency_read_in/dependency_write_in token edges.
+    // catch taskflow will_read/will_write token edges.
     for (auto &consumer_node : task_nodes) {
       for (Value value_input : consumer_node->op.getValueInputs()) {
         addProducerDependency(value_input, consumer_node.get());

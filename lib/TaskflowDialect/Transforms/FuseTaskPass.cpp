@@ -49,15 +49,15 @@ namespace {
 //===----------------------------------------------------------------------===//
 
 // Resolves a value through a task's WAR/RAW dependency chain.
-// If v is a dependency_read_out or dependency_write_out of the task,
+// If v is a done_read or done_write of the task,
 // returns the corresponding input; otherwise returns v unchanged.
 static Value resolveThrough(Value v, TaskflowTaskOp task) {
-  for (unsigned i = 0; i < task.getDependencyReadOut().size(); ++i)
-    if (v == task.getDependencyReadOut()[i])
-      return task.getDependencyReadIn()[i];
-  for (unsigned i = 0; i < task.getDependencyWriteOut().size(); ++i)
-    if (v == task.getDependencyWriteOut()[i])
-      return task.getDependencyWriteIn()[i];
+  for (unsigned i = 0; i < task.getDoneRead().size(); ++i)
+    if (v == task.getDoneRead()[i])
+      return task.getWillRead()[i];
+  for (unsigned i = 0; i < task.getDoneWrite().size(); ++i)
+    if (v == task.getDoneWrite()[i])
+      return task.getWillWrite()[i];
   return v;
 }
 
@@ -175,11 +175,11 @@ static bool canFuseTasks(TaskflowTaskOp t1, TaskflowTaskOp t2) {
 // Returns true if any write output of the producer feeds the consumer.
 static bool hasProducerConsumerRelation(TaskflowTaskOp producer,
                                         TaskflowTaskOp consumer) {
-  for (Value r : producer.getDependencyWriteOut()) {
-    for (Value in : consumer.getDependencyReadIn())
+  for (Value r : producer.getDoneWrite()) {
+    for (Value in : consumer.getWillRead())
       if (r == in)
         return true;
-    for (Value in : consumer.getDependencyWriteIn())
+    for (Value in : consumer.getWillWrite())
       if (r == in)
         return true;
   }
@@ -191,18 +191,18 @@ static bool hasProducerConsumerRelation(TaskflowTaskOp producer,
 }
 
 // Returns true if tasks share at least one input with no data dependency.
-// Resolves WAR chains: if t2's input is t1's dependency_read_out, traces
+// Resolves WAR chains: if t2's input is t1's done_read, traces
 // back to the original memref for comparison.
 static bool areSiblingTasks(TaskflowTaskOp t1, TaskflowTaskOp t2) {
   llvm::SmallPtrSet<Value, 8> t1_mem;
-  for (Value v : t1.getDependencyReadIn())
+  for (Value v : t1.getWillRead())
     t1_mem.insert(v);
-  for (Value v : t1.getDependencyWriteIn())
+  for (Value v : t1.getWillWrite())
     t1_mem.insert(v);
   llvm::SmallPtrSet<Value, 8> t1_val(t1.getValueInputs().begin(),
                                      t1.getValueInputs().end());
   bool share = false;
-  for (Value v : t2.getDependencyReadIn()) {
+  for (Value v : t2.getWillRead()) {
     Value resolved = resolveThrough(v, t1);
     if (t1_mem.count(resolved)) {
       share = true;
@@ -210,7 +210,7 @@ static bool areSiblingTasks(TaskflowTaskOp t1, TaskflowTaskOp t2) {
     }
   }
   if (!share)
-    for (Value v : t2.getDependencyWriteIn()) {
+    for (Value v : t2.getWillWrite()) {
       Value resolved = resolveThrough(v, t1);
       if (t1_mem.count(resolved)) {
         share = true;
@@ -231,9 +231,9 @@ static bool areSiblingTasks(TaskflowTaskOp t1, TaskflowTaskOp t2) {
 static bool hasInterveningUses(TaskflowTaskOp producer,
                                TaskflowTaskOp consumer) {
   llvm::SmallPtrSet<Value, 8> results;
-  for (Value v : producer.getDependencyReadOut())
+  for (Value v : producer.getDoneRead())
     results.insert(v);
-  for (Value v : producer.getDependencyWriteOut())
+  for (Value v : producer.getDoneWrite())
     results.insert(v);
   for (Value v : producer.getValueOutputs())
     results.insert(v);
@@ -255,10 +255,10 @@ static bool hasInterveningUses(TaskflowTaskOp producer,
 
 // Returns true if all outputs of the task have at most one use.
 static bool hasOnlySingleUseOutputs(TaskflowTaskOp task) {
-  for (Value r : task.getDependencyReadOut())
+  for (Value r : task.getDoneRead())
     if (!r.hasOneUse() && !r.use_empty())
       return false;
-  for (Value r : task.getDependencyWriteOut())
+  for (Value r : task.getDoneWrite())
     if (!r.hasOneUse() && !r.use_empty())
       return false;
   for (Value r : task.getValueOutputs())
@@ -315,11 +315,11 @@ static TaskflowTaskOp fuseProducerConsumerTasks(TaskflowTaskOp producer,
                                                 Value intermediate_memref,
                                                 OpBuilder &builder) {
   Location loc = consumer.getLoc();
-  auto prod_read = producer.getDependencyReadIn();
-  auto prod_write = producer.getDependencyWriteIn();
+  auto prod_read = producer.getWillRead();
+  auto prod_write = producer.getWillWrite();
   auto prod_val = producer.getValueInputs();
-  auto cons_read = consumer.getDependencyReadIn();
-  auto cons_write = consumer.getDependencyWriteIn();
+  auto cons_read = consumer.getWillRead();
+  auto cons_write = consumer.getWillWrite();
   auto cons_val = consumer.getValueInputs();
 
   // Collects fused inputs, keeping intermediate in write_memrefs for
@@ -347,7 +347,7 @@ static TaskflowTaskOp fuseProducerConsumerTasks(TaskflowTaskOp producer,
 
   // Write/value output types come from the consumer only.
   SmallVector<Type> write_out_types(
-      consumer.getDependencyWriteOut().getTypes());
+      consumer.getDoneWrite().getTypes());
   SmallVector<Type> val_out_types(consumer.getValueOutputs().getTypes());
 
   SmallVector<Value> orig_reads, orig_writes;
@@ -394,8 +394,8 @@ static TaskflowTaskOp fuseProducerConsumerTasks(TaskflowTaskOp producer,
   // finds which write output index it corresponds to, then gets the matching
   // write memref block arg.
   BlockArgument prod_intermediate_arg = nullptr;
-  for (unsigned i = 0; i < producer.getDependencyWriteOut().size(); ++i)
-    if (producer.getDependencyWriteOut()[i] == intermediate_memref)
+  for (unsigned i = 0; i < producer.getDoneWrite().size(); ++i)
+    if (producer.getDoneWrite()[i] == intermediate_memref)
       prod_intermediate_arg = prod_body.getArgument(prod_read.size() + i);
 
   OpBuilder::InsertionGuard guard(builder);
@@ -575,7 +575,7 @@ static TaskflowTaskOp fuseProducerConsumerTasks(TaskflowTaskOp producer,
     yield_reads.push_back(body->getArgument(i));
 
   SmallVector<Value> yield_mem, yield_val;
-  for (Value v : cons_yield.getMemoryResults())
+  for (Value v : cons_yield.getDoneWrite())
     yield_mem.push_back(mapping.lookupOrDefault(v));
   for (Value v : cons_yield.getValueResults())
     yield_val.push_back(mapping.lookupOrDefault(v));
@@ -596,9 +596,9 @@ static TaskflowTaskOp fuseSiblingTasks(TaskflowTaskOp t1, TaskflowTaskOp t2,
   // Resolves t2's inputs through t1's WAR chains so that the fused task
   // references original memrefs rather than t1's passthrough results.
   SmallVector<Value> t2_read, t2_write, t2_val;
-  for (Value v : t2.getDependencyReadIn())
+  for (Value v : t2.getWillRead())
     t2_read.push_back(resolveThrough(v, t1));
-  for (Value v : t2.getDependencyWriteIn())
+  for (Value v : t2.getWillWrite())
     t2_write.push_back(resolveThrough(v, t1));
   for (Value v : t2.getValueInputs())
     t2_val.push_back(resolveThrough(v, t1));
@@ -606,8 +606,8 @@ static TaskflowTaskOp fuseSiblingTasks(TaskflowTaskOp t1, TaskflowTaskOp t2,
   // Deduplicates inputs across both tasks.
   SmallVector<Value> fused_read, fused_write, fused_val;
   llvm::SmallDenseMap<Value, unsigned> read_idx, write_idx, val_idx;
-  collectUnique(t1.getDependencyReadIn(), t2_read, fused_read, read_idx);
-  collectUnique(t1.getDependencyWriteIn(), t2_write, fused_write, write_idx);
+  collectUnique(t1.getWillRead(), t2_read, fused_read, read_idx);
+  collectUnique(t1.getWillWrite(), t2_write, fused_write, write_idx);
   collectUnique(t1.getValueInputs(), t2_val, fused_val, val_idx);
 
   // Read output types: passthrough of fused read inputs for WAR tracking.
@@ -617,10 +617,10 @@ static TaskflowTaskOp fuseSiblingTasks(TaskflowTaskOp t1, TaskflowTaskOp t2,
 
   // Combined write/value output types.
   SmallVector<Type> write_out_types, val_out_types;
-  write_out_types.append(t1.getDependencyWriteOut().getTypes().begin(),
-                         t1.getDependencyWriteOut().getTypes().end());
-  write_out_types.append(t2.getDependencyWriteOut().getTypes().begin(),
-                         t2.getDependencyWriteOut().getTypes().end());
+  write_out_types.append(t1.getDoneWrite().getTypes().begin(),
+                         t1.getDoneWrite().getTypes().end());
+  write_out_types.append(t2.getDoneWrite().getTypes().begin(),
+                         t2.getDoneWrite().getTypes().end());
   val_out_types.append(t1.getValueOutputs().getTypes().begin(),
                        t1.getValueOutputs().getTypes().end());
   val_out_types.append(t2.getValueOutputs().getTypes().begin(),
@@ -656,8 +656,8 @@ static TaskflowTaskOp fuseSiblingTasks(TaskflowTaskOp t1, TaskflowTaskOp t2,
   // When is_t2 is true, resolves inputs through t1's WAR chains for lookup.
   auto mapBlockArgs = [&](TaskflowTaskOp task, IRMapping &m, bool is_t2) {
     Block &tb = task.getBody().front();
-    auto r = task.getDependencyReadIn();
-    auto w = task.getDependencyWriteIn();
+    auto r = task.getWillRead();
+    auto w = task.getWillWrite();
     auto v = task.getValueInputs();
     for (unsigned i = 0; i < r.size(); ++i) {
       Value key = is_t2 ? resolveThrough(r[i], t1) : r[i];
@@ -788,11 +788,11 @@ static TaskflowTaskOp fuseSiblingTasks(TaskflowTaskOp t1, TaskflowTaskOp t2,
     all_reads.push_back(body->getArgument(i));
 
   SmallVector<Value> all_mem, all_val;
-  for (Value v : t1_yield.getMemoryResults())
+  for (Value v : t1_yield.getDoneWrite())
     all_mem.push_back(mapping.lookupOrDefault(v));
   for (Value v : t1_yield.getValueResults())
     all_val.push_back(mapping.lookupOrDefault(v));
-  for (Value v : t2_yield.getMemoryResults())
+  for (Value v : t2_yield.getDoneWrite())
     all_mem.push_back(mapping2.lookupOrDefault(v));
   for (Value v : t2_yield.getValueResults())
     all_val.push_back(mapping2.lookupOrDefault(v));
@@ -1163,7 +1163,7 @@ struct ProducerConsumerTaskFusion : public OpRewritePattern<TaskflowTaskOp> {
         auto def = in.getDefiningOp<TaskflowTaskOp>();
         // Only write outputs represent true producer-consumer (RAW) links.
         // Read outputs are WAR dependency chains and must be skipped.
-        if (!def || !llvm::is_contained(def.getDependencyWriteOut(), in))
+        if (!def || !llvm::is_contained(def.getDoneWrite(), in))
           continue;
         if (!canFuseTasks(def, consumer) || !hasOnlySingleUseOutputs(def) ||
             hasInterveningUses(def, consumer) ||
@@ -1176,41 +1176,41 @@ struct ProducerConsumerTaskFusion : public OpRewritePattern<TaskflowTaskOp> {
       }
       return false;
     };
-    if (!tryFindProducer(consumer.getDependencyReadIn()) &&
-        !tryFindProducer(consumer.getDependencyWriteIn()))
+    if (!tryFindProducer(consumer.getWillRead()) &&
+        !tryFindProducer(consumer.getWillWrite()))
       return failure();
 
     auto fused =
         fuseProducerConsumerTasks(producer, consumer, intermediate, rewriter);
 
-    // Replaces producer's dependency_read_out results.
-    for (unsigned i = 0; i < producer.getDependencyReadOut().size(); ++i) {
-      Value orig_read = producer.getDependencyReadIn()[i];
-      for (unsigned j = 0; j < fused.getDependencyReadIn().size(); ++j) {
-        if (fused.getDependencyReadIn()[j] == orig_read) {
-          producer.getDependencyReadOut()[i].replaceAllUsesWith(
-              fused.getDependencyReadOut()[j]);
+    // Replaces producer's done_read results.
+    for (unsigned i = 0; i < producer.getDoneRead().size(); ++i) {
+      Value orig_read = producer.getWillRead()[i];
+      for (unsigned j = 0; j < fused.getWillRead().size(); ++j) {
+        if (fused.getWillRead()[j] == orig_read) {
+          producer.getDoneRead()[i].replaceAllUsesWith(
+              fused.getDoneRead()[j]);
           break;
         }
       }
     }
-    // Replaces consumer's dependency_read_out results.
-    for (unsigned i = 0; i < consumer.getDependencyReadOut().size(); ++i) {
-      Value orig_read = consumer.getDependencyReadIn()[i];
+    // Replaces consumer's done_read results.
+    for (unsigned i = 0; i < consumer.getDoneRead().size(); ++i) {
+      Value orig_read = consumer.getWillRead()[i];
       if (orig_read == intermediate)
         continue;
       Value resolved = resolveThrough(orig_read, producer);
-      for (unsigned j = 0; j < fused.getDependencyReadIn().size(); ++j) {
-        if (fused.getDependencyReadIn()[j] == resolved) {
-          consumer.getDependencyReadOut()[i].replaceAllUsesWith(
-              fused.getDependencyReadOut()[j]);
+      for (unsigned j = 0; j < fused.getWillRead().size(); ++j) {
+        if (fused.getWillRead()[j] == resolved) {
+          consumer.getDoneRead()[i].replaceAllUsesWith(
+              fused.getDoneRead()[j]);
           break;
         }
       }
     }
     // Replaces consumer's write and value outputs.
-    for (auto [o, n] : llvm::zip(consumer.getDependencyWriteOut(),
-                                 fused.getDependencyWriteOut()))
+    for (auto [o, n] : llvm::zip(consumer.getDoneWrite(),
+                                 fused.getDoneWrite()))
       o.replaceAllUsesWith(n);
     for (auto [o, n] :
          llvm::zip(consumer.getValueOutputs(), fused.getValueOutputs()))
@@ -1244,40 +1244,40 @@ struct SiblingTaskFusion : public OpRewritePattern<TaskflowTaskOp> {
 
     auto fused = fuseSiblingTasks(t1, t2, rewriter);
 
-    // Replaces dependency_read_out for both tasks.
-    for (unsigned i = 0; i < t1.getDependencyReadOut().size(); ++i) {
-      Value orig_read = t1.getDependencyReadIn()[i];
-      for (unsigned j = 0; j < fused.getDependencyReadIn().size(); ++j) {
-        if (fused.getDependencyReadIn()[j] == orig_read) {
-          t1.getDependencyReadOut()[i].replaceAllUsesWith(
-              fused.getDependencyReadOut()[j]);
+    // Replaces done_read for both tasks.
+    for (unsigned i = 0; i < t1.getDoneRead().size(); ++i) {
+      Value orig_read = t1.getWillRead()[i];
+      for (unsigned j = 0; j < fused.getWillRead().size(); ++j) {
+        if (fused.getWillRead()[j] == orig_read) {
+          t1.getDoneRead()[i].replaceAllUsesWith(
+              fused.getDoneRead()[j]);
           break;
         }
       }
     }
-    for (unsigned i = 0; i < t2.getDependencyReadOut().size(); ++i) {
-      Value orig_read = t2.getDependencyReadIn()[i];
+    for (unsigned i = 0; i < t2.getDoneRead().size(); ++i) {
+      Value orig_read = t2.getWillRead()[i];
       Value resolved = resolveThrough(orig_read, t1);
-      for (unsigned j = 0; j < fused.getDependencyReadIn().size(); ++j) {
-        if (fused.getDependencyReadIn()[j] == resolved) {
-          t2.getDependencyReadOut()[i].replaceAllUsesWith(
-              fused.getDependencyReadOut()[j]);
+      for (unsigned j = 0; j < fused.getWillRead().size(); ++j) {
+        if (fused.getWillRead()[j] == resolved) {
+          t2.getDoneRead()[i].replaceAllUsesWith(
+              fused.getDoneRead()[j]);
           break;
         }
       }
     }
 
-    // Replaces dependency_write_out and value_outputs.
-    unsigned t1_wo = t1.getDependencyWriteOut().size();
+    // Replaces done_write and value_outputs.
+    unsigned t1_wo = t1.getDoneWrite().size();
     unsigned t1_vo = t1.getValueOutputs().size();
     for (unsigned i = 0; i < t1_wo; ++i)
-      t1.getDependencyWriteOut()[i].replaceAllUsesWith(
-          fused.getDependencyWriteOut()[i]);
+      t1.getDoneWrite()[i].replaceAllUsesWith(
+          fused.getDoneWrite()[i]);
     for (unsigned i = 0; i < t1_vo; ++i)
       t1.getValueOutputs()[i].replaceAllUsesWith(fused.getValueOutputs()[i]);
-    for (unsigned i = 0; i < t2.getDependencyWriteOut().size(); ++i)
-      t2.getDependencyWriteOut()[i].replaceAllUsesWith(
-          fused.getDependencyWriteOut()[t1_wo + i]);
+    for (unsigned i = 0; i < t2.getDoneWrite().size(); ++i)
+      t2.getDoneWrite()[i].replaceAllUsesWith(
+          fused.getDoneWrite()[t1_wo + i]);
     for (unsigned i = 0; i < t2.getValueOutputs().size(); ++i)
       t2.getValueOutputs()[i].replaceAllUsesWith(
           fused.getValueOutputs()[t1_vo + i]);
