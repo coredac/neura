@@ -160,7 +160,7 @@ static SmallVector<CgraShape> getNonRectangularShapes(int cgra_count) {
 //
 // TODO: This function only picks a localized shape for an idealized single task
 // mapping. Global placement and conflict resolution across multiple tasks is
-// legitimately deferred to downstream map-on-cgra pass, as speculative
+// legitimately deferred to the downstream orchestration pass, as speculative
 // profiling assumes unconstrained placement.
 static CgraShape pickBestShape(int cgra_count) {
   // For cgra_count == 3, the 2x2 L-shape has a smaller maximum physical routing
@@ -867,14 +867,14 @@ public:
       // Check if incrementing cgra_count is feasible on the 4×4 grid.
       // TODO: This currently only checks the capacity (total CGRA count).
       // Ideally, we should invoke a global placement pass (aka
-      // OrchestrateTaskOnCgraPass) here to verify if the speculatively
+      // OrchestrateTasksOnAcceleratorsPass) here to verify if the speculatively
       // increased CGRA count and its proposed shape actually fit on the 4x4
       // grid alongside other previously allocated tasks.
       //
-      // Currently, OrchestrateTaskOnCgraPass does not support multi-CGRA task
-      // placement. Once it does, we should call it here; if global placement
-      // fails for the "best" shape, we should backtrack and try alternative
-      // shapes before saturating the node.
+      // Currently, OrchestrateTasksOnAcceleratorsPass does not support
+      // multi-CGRA task placement. Once it does, we should call it here; if
+      // global placement fails for the "best" shape, we should backtrack and
+      // try alternative shapes before saturating the node.
       if (!canFitOnGrid(new_cgra_count)) {
         saturated_nodes.insert(bottleneck);
         continue;
@@ -1618,8 +1618,7 @@ private:
       Value orig_result = orig_task.getDoneReads()[i];
       Value orig_read = orig_task.getWillReads()[i];
       unsigned fused_idx = findOperandIndex(merged_read_memrefs, orig_read);
-      orig_result.replaceAllUsesWith(
-          fused_task.getDoneReads()[fused_idx]);
+      orig_result.replaceAllUsesWith(fused_task.getDoneReads()[fused_idx]);
     }
     // Writes outputs: maps by matching the original write memref to its
     // position in the merged write memrefs list.
@@ -1627,8 +1626,7 @@ private:
       Value orig_result = orig_task.getDoneWrites()[i];
       Value orig_write = orig_task.getWillWrites()[i];
       unsigned fused_idx = findOperandIndex(merged_write_memrefs, orig_write);
-      orig_result.replaceAllUsesWith(
-          fused_task.getDoneWrites()[fused_idx]);
+      orig_result.replaceAllUsesWith(fused_task.getDoneWrites()[fused_idx]);
     }
     // Value outputs: each original task's value_output[i] maps to
     // fused_task.getValueOutputs()[value_output_offset + i].

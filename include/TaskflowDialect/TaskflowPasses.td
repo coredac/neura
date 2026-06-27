@@ -85,7 +85,7 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
                            "mlir::taskflow::TaskflowDialect"];
 }
 
-def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
+def OrchestrateTasksOnAccelerators : Pass<"orchestrate-tasks-on-accelerators", "func::FuncOp"> {
   let summary = "Orchestrates Taskflow tasks onto a 2D multi-CGRA grid";
   let description = [{
     Orchestration means jointly deciding task resource allocation and task
@@ -124,7 +124,7 @@ def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
       "Task scheduling mode: 'spatial' (one task per CGRA, asserts if "
       "tasks exceed the grid size) or 'spatial-temporal' (default, "
       "time-multiplexes CGRAs so task count is not bounded by grid size).">];
-  let constructor = "taskflow::createOrchestrateTaskOnCgraPass()";
+  let constructor = "taskflow::createOrchestrateTasksOnAcceleratorsPass()";
 }
 
 def FuseTask : Pass<"fuse-task", "func::FuncOp"> {

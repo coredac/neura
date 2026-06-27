@@ -1,4 +1,4 @@
-// Tests that orchestrate-task-on-cgra correctly handles pre-annotated
+// Tests that orchestrate-tasks-on-accelerators correctly handles pre-annotated
 // resource-binding attributes (cgra_count, cgra_shape) and produces
 // task_mapping_info while removing the consumed attributes.
 //
@@ -8,7 +8,7 @@
 //   Task_2 (cgra_count=1) reads %B — SSA-dependent on Task_1.
 // The three tasks form a linear chain: Task_0 → Task_1 → Task_2.
 
-// RUN: mlir-neura-opt %s --orchestrate-task-on-cgra \
+// RUN: mlir-neura-opt %s --orchestrate-tasks-on-accelerators \
 // RUN:   --architecture-spec=%S/../../../arch_spec/architecture_4x4.yaml \
 // RUN:   -o %t.allocated_4x4.mlir
 // RUN: FileCheck %s --input-file=%t.allocated_4x4.mlir
