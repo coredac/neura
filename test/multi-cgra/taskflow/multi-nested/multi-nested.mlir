@@ -62,7 +62,7 @@
 // RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
 // RUN: --convert-affine-to-taskflow \
 // RUN: --construct-hyperblock-from-task \
-// RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
+// RUN: '--orchestrate-tasks-on-accelerators=scheduling-mode=spatial-temporal' \
 // RUN: --architecture-spec=%S/../../../arch_spec/architecture_4x4.yaml \
 // RUN: -o %t.map_4x4_spatial_temporal.mlir
 // RUN: FileCheck %s --input-file=%t.map_4x4_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-4x4
@@ -72,7 +72,7 @@
 // RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
 // RUN: --convert-affine-to-taskflow \
 // RUN: --construct-hyperblock-from-task \
-// RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
+// RUN: '--orchestrate-tasks-on-accelerators=scheduling-mode=spatial-temporal' \
 // RUN: --architecture-spec=%S/../../../arch_spec/architecture_with_counter.yaml \
 // RUN: -o %t.map_1x1_spatial_temporal.mlir
 // RUN: FileCheck %s --input-file=%t.map_1x1_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-1x1
@@ -82,7 +82,7 @@
 // RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
 // RUN: --convert-affine-to-taskflow \
 // RUN: --construct-hyperblock-from-task \
-// RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial-temporal' \
+// RUN: '--orchestrate-tasks-on-accelerators=scheduling-mode=spatial-temporal' \
 // RUN: --architecture-spec=%S/../../../arch_spec/architecture_1x2.yaml \
 // RUN: -o %t.map_1x2_spatial_temporal.mlir
 // RUN: FileCheck %s --input-file=%t.map_1x2_spatial_temporal.mlir --check-prefixes=MAP-SPATIAL-TEMPORAL-1x2
@@ -90,7 +90,7 @@
 // RUN: mlir-neura-opt %s --affine-loop-tree-serialization \
 // RUN: --convert-affine-to-taskflow \
 // RUN: --construct-hyperblock-from-task \
-// RUN: '--orchestrate-task-on-cgra=orchestration-mode=spatial' \
+// RUN: '--orchestrate-tasks-on-accelerators=scheduling-mode=spatial' \
 // RUN: --architecture-spec=%S/../../../arch_spec/architecture_4x4.yaml \
 // RUN: -o %t.map_4x4_spatial.mlir
 // RUN: FileCheck %s --input-file=%t.map_4x4_spatial.mlir --check-prefixes=MAP-SPATIAL

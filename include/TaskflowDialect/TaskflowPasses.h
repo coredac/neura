@@ -3,7 +3,7 @@
 #ifndef TASKFLOW_PASSES_H
 #define TASKFLOW_PASSES_H
 
-#include "TaskflowDialect/Allocation/allocation_utils.h"
+#include "TaskflowDialect/Orchestration/orchestration_utils.h"
 #include "TaskflowDialect/TaskflowDialect.h"
 #include "TaskflowDialect/TaskflowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -24,7 +24,7 @@ void registerLinalgToAffineConversionPassPipeline();
 #include "TaskflowDialect/TaskflowPasses.h.inc"
 std::unique_ptr<mlir::Pass> createConstructHyperblockFromTaskPass();
 std::unique_ptr<mlir::Pass> createClassifyTaskAndCounterPass();
-std::unique_ptr<mlir::Pass> createOrchestrateTaskOnCgraPass();
+std::unique_ptr<mlir::Pass> createOrchestrateTasksOnAcceleratorsPass();
 std::unique_ptr<mlir::Pass> createFuseTaskPass();
 
 //=========================================================//

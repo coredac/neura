@@ -85,20 +85,23 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
                            "mlir::taskflow::TaskflowDialect"];
 }
 
-def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
-  let summary = "Orchestrates Taskflow tasks onto a 2D multi-CGRA grid "
-                "(spatial or spatial-temporal)";
+def OrchestrateTasksOnAccelerators : Pass<"orchestrate-tasks-on-accelerators", "func::FuncOp"> {
+  let summary = "Orchestrates Taskflow tasks onto a 2D multi-CGRA grid";
   let description = [{
-    Maps Taskflow tasks onto a 2D multi-CGRA grid using a
-    routing-critical-path-first placement strategy combined with either a
-    purely spatial or a spatial-temporal orchestration mode.
+    Orchestration means jointly deciding task resource allocation and task
+    scheduling: how many CGRAs each task uses, where those CGRAs are placed,
+    and when tasks execute on reusable CGRA contexts.
 
-    Placement: Tasks with the longest downstream dependency chains are placed
-    first so that their successors can land on adjacent CGRAs, minimising
-    inter-task communication distance.  Tasks with direct SSA dependencies
-    are placed on adjacent CGRAs to enable direct data forwarding.  Irregular
-    multi-CGRA shapes (rectangular, L, T) are supported via the cgra_shape
-    attribute set by the upstream ResourceAwareTaskOptimization pass.
+    Selects an orchestration strategy, computes task priorities, and invokes
+    the shared task scheduler to place Taskflow tasks on a 2D multi-CGRA grid.
+    The scheduling mode controls whether tasks use purely spatial placement or
+    spatial-temporal reuse.
+
+    The current strategy is RoutingCriticalPathOrchestration. It computes
+    priorities from longest downstream dependency chains, then calls the
+    shared TaskScheduler. Tasks with direct SSA dependencies are placed near
+    each other to enable direct data forwarding. Irregular multi-CGRA shapes
+    (rectangular, L, T) are supported through the cgra_shape attribute.
 
     spatial:
       Each CGRA is assigned to at most one task.  Asserts when the number of
@@ -116,12 +119,12 @@ def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
     spec is provided, the architecture parser supplies a default 4x4 grid.
   }];
   let options = [Option<
-      "orchestrationMode", "orchestration-mode", "std::string",
+      "schedulingMode", "scheduling-mode", "std::string",
       /*default=*/"\"spatial-temporal\"",
-      "Task orchestration mode: 'spatial' (one task per CGRA, asserts if "
+      "Task scheduling mode: 'spatial' (one task per CGRA, asserts if "
       "tasks exceed the grid size) or 'spatial-temporal' (default, "
       "time-multiplexes CGRAs so task count is not bounded by grid size).">];
-  let constructor = "taskflow::createOrchestrateTaskOnCgraPass()";
+  let constructor = "taskflow::createOrchestrateTasksOnAcceleratorsPass()";
 }
 
 def FuseTask : Pass<"fuse-task", "func::FuncOp"> {

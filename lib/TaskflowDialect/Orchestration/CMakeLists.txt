@@ -1,6 +1,6 @@
-add_mlir_library(MLIRTaskflowAllocation
-    allocation_utils.cpp
-    RoutingCriticalPathAllocation.cpp
+add_mlir_library(MLIRTaskflowOrchestration
+    orchestration_utils.cpp
+    RoutingCriticalPathOrchestration/RoutingCriticalPathOrchestration.cpp
 
     DEPENDS
     MLIRTaskflowTransformsIncGen
