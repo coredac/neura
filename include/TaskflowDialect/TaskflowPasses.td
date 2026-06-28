@@ -127,6 +127,22 @@ def OrchestrateTasksOnAccelerators : Pass<"orchestrate-tasks-on-accelerators", "
   let constructor = "taskflow::createOrchestrateTasksOnAcceleratorsPass()";
 }
 
+def AnalyzeTaskPipelineInterval
+    : Pass<"analyze-task-pipeline-interval", "func::FuncOp"> {
+  let summary =
+      "Analyzes the pipeline interval of already-profiled and scheduled tasks";
+  let description = [{
+    Reads taskflow.task operations that already contain profile_info.duration
+    and task_orchestration_info.cgra_positions. The pass reconstructs the
+    concrete task schedule from task dependences and per-CGRA context order,
+    invokes TaskPipelineIntervalAnalyzer, and emits task_pipeline_interval_info
+    on the parent func.func.
+  }];
+  let constructor = "taskflow::createAnalyzeTaskPipelineIntervalPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::taskflow::TaskflowDialect"];
+}
+
 def FuseTask : Pass<"fuse-task", "func::FuncOp"> {
   let summary =
       "Fuses Taskflow tasks using producer-consumer and sibling strategies";

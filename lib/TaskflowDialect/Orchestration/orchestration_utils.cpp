@@ -14,6 +14,7 @@
 #include <cassert>
 #include <climits>
 #include <cmath>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -463,6 +464,165 @@ private:
   }
 };
 
+// TaskPipelineIntervalAnalyzer
+
+TaskPipelineIntervalAnalyzer::TaskPipelineIntervalAnalyzer(
+    ArrayRef<TaskScheduleResult> schedule_result)
+    : schedule_result_(schedule_result) {}
+
+TaskPipelineIntervalResult TaskPipelineIntervalAnalyzer::analyze() {
+  TaskPipelineIntervalResult result;
+  if (schedule_result_.empty()) {
+    return result;
+  }
+
+  buildTaskIndex();
+  task_graph_.resize(schedule_result_.size());
+  buildDataDependenceEdges();
+  buildCgraExecutionOrderEdgesAndPipelineCycles();
+  return computeLongestPipelineCycle();
+}
+
+int TaskPipelineIntervalAnalyzer::getTaskDuration(int task_idx) const {
+  return std::max(1, schedule_result_[task_idx].duration);
+}
+
+int64_t TaskPipelineIntervalAnalyzer::encodeCgraLocation(
+    const TaskScheduleResult::CgraOccupancy &occupancy) const {
+  return (static_cast<int64_t>(occupancy.row) << 32) |
+         static_cast<uint32_t>(occupancy.col);
+}
+
+void TaskPipelineIntervalAnalyzer::addExecutionOrderEdge(int task,
+                                                         int next_task) {
+  if (task < 0 || next_task < 0 || task == next_task) {
+    return;
+  }
+  task_graph_[task].push_back({next_task, getTaskDuration(task)});
+}
+
+void TaskPipelineIntervalAnalyzer::buildTaskIndex() {
+  for (auto [idx, task_result] : llvm::enumerate(schedule_result_)) {
+    TaskflowTaskOp task = task_result.task;
+    task_to_index_[task.getOperation()] = static_cast<int>(idx);
+  }
+}
+
+void TaskPipelineIntervalAnalyzer::buildDataDependenceEdges() {
+  for (auto [task_idx, task_result] : llvm::enumerate(schedule_result_)) {
+    for (TaskflowTaskOp pred : task_result.predecessor_tasks) {
+      auto pred_it = task_to_index_.find(pred.getOperation());
+      if (pred_it == task_to_index_.end()) {
+        continue;
+      }
+      addExecutionOrderEdge(pred_it->second, static_cast<int>(task_idx));
+    }
+  }
+}
+
+void TaskPipelineIntervalAnalyzer::
+    buildCgraExecutionOrderEdgesAndPipelineCycles() {
+  DenseMap<int64_t, SmallVector<int>> cgra_location_to_tasks;
+  for (auto [idx, task_result] : llvm::enumerate(schedule_result_)) {
+    for (const TaskScheduleResult::CgraOccupancy &occupancy :
+         task_result.cgra_occupancies) {
+      cgra_location_to_tasks[encodeCgraLocation(occupancy)].push_back(
+          static_cast<int>(idx));
+    }
+  }
+
+  for (auto &entry : cgra_location_to_tasks) {
+    SmallVector<int> &tasks = entry.second;
+    llvm::sort(tasks, [&](int lhs, int rhs) {
+      const TaskScheduleResult &lhs_result = schedule_result_[lhs];
+      const TaskScheduleResult &rhs_result = schedule_result_[rhs];
+      if (lhs_result.start_time != rhs_result.start_time) {
+        return lhs_result.start_time < rhs_result.start_time;
+      }
+      return lhs < rhs;
+    });
+
+    for (size_t i = 1; i < tasks.size(); ++i) {
+      addExecutionOrderEdge(tasks[i - 1], tasks[i]);
+    }
+
+    int first = tasks.front();
+    int last = tasks.back();
+    cgra_pipeline_cycles_.push_back({last, first, getTaskDuration(last)});
+  }
+}
+
+TaskPipelineIntervalAnalyzer::LongestExecutionPath
+TaskPipelineIntervalAnalyzer::findLongestPathToTarget(
+    int current, int target, DenseSet<int> &visiting) const {
+  if (current == target) {
+    LongestExecutionPath result;
+    result.found = true;
+    result.path.push_back(current);
+    return result;
+  }
+
+  if (visiting.contains(current)) {
+    return LongestExecutionPath();
+  }
+
+  visiting.insert(current);
+  LongestExecutionPath best;
+  for (const ExecutionOrderEdge &edge : task_graph_[current]) {
+    LongestExecutionPath suffix =
+        findLongestPathToTarget(edge.next_task, target, visiting);
+    if (!suffix.found) {
+      continue;
+    }
+
+    int total_latency = edge.latency + suffix.total_latency;
+    if (!best.found || total_latency > best.total_latency) {
+      best.found = true;
+      best.total_latency = total_latency;
+      best.path.clear();
+      best.path.push_back(current);
+      best.path.append(suffix.path.begin(), suffix.path.end());
+    }
+  }
+  visiting.erase(current);
+  return best;
+}
+
+TaskPipelineIntervalResult
+TaskPipelineIntervalAnalyzer::computeLongestPipelineCycle() const {
+  TaskPipelineIntervalResult result;
+  for (const CgraPipelineCycle &pipeline_cycle : cgra_pipeline_cycles_) {
+    DenseSet<int> visiting;
+    LongestExecutionPath path = findLongestPathToTarget(
+        pipeline_cycle.first_task, pipeline_cycle.last_task, visiting);
+    if (!path.found) {
+      continue;
+    }
+
+    int interval = path.total_latency + pipeline_cycle.latency;
+    if (interval <= result.pipeline_interval) {
+      continue;
+    }
+
+    result.pipeline_interval = interval;
+    result.critical_path.clear();
+
+    int bottleneck_idx = pipeline_cycle.last_task;
+    int bottleneck_duration = getTaskDuration(bottleneck_idx);
+    for (int idx : path.path) {
+      const TaskScheduleResult &task_result = schedule_result_[idx];
+      result.critical_path.push_back(task_result.task);
+      int duration = getTaskDuration(idx);
+      if (duration > bottleneck_duration) {
+        bottleneck_idx = idx;
+        bottleneck_duration = duration;
+      }
+    }
+    result.bottleneck_task = schedule_result_[bottleneck_idx].task;
+  }
+  return result;
+}
+
 // TaskScheduler
 // Orchestrates a task-memory graph onto a 2D multi-CGRA grid using the
 // priority provided by the caller.
@@ -487,6 +647,8 @@ TaskScheduler::TaskScheduler(int grid_rows, int grid_cols, SchedulingMode mode)
 // Schedules all tasks and performs iterative SRAM assignment for `func`.
 bool TaskScheduler::schedule(func::FuncOp func,
                              const TaskPriorityMap &priority) {
+  schedule_result_.clear();
+
   SmallVector<TaskflowTaskOp> tasks;
   func.walk([&](TaskflowTaskOp task) { tasks.push_back(task); });
 
@@ -608,6 +770,8 @@ bool TaskScheduler::schedule(func::FuncOp func,
     }
   }
 
+  recordScheduleResult(graph);
+
   // Write output attributes.
   OpBuilder builder(func.getContext());
   for (auto &task_node : graph.task_nodes) {
@@ -697,6 +861,39 @@ bool TaskScheduler::schedule(func::FuncOp func,
     task_node->op->removeAttr("cgra_shape");
   }
   return true;
+}
+
+void TaskScheduler::recordScheduleResult(const TaskMemoryGraph &graph) {
+  schedule_result_.clear();
+  for (const auto &task_node : graph.task_nodes) {
+    if (task_node->placement.empty()) {
+      continue;
+    }
+
+    TaskScheduleResult task_result;
+    task_result.task = task_node->op;
+    task_result.start_time = task_node->placement.front().start_time;
+    task_result.duration = task_node->placement.front().duration;
+    task_result.end_time = task_result.start_time + task_result.duration;
+
+    for (const CgraPosition &pos : task_node->placement) {
+      task_result.start_time = std::min(task_result.start_time, pos.start_time);
+      task_result.end_time =
+          std::max(task_result.end_time, pos.start_time + pos.duration);
+      task_result.cgra_occupancies.push_back(
+          {pos.row, pos.col, pos.start_time, pos.duration, pos.context_id});
+    }
+    task_result.duration = task_result.end_time - task_result.start_time;
+
+    for (TaskNode *pred : task_node->ssa_operands) {
+      task_result.predecessor_tasks.push_back(pred->op);
+    }
+    for (TaskNode *succ : task_node->ssa_users) {
+      task_result.successor_tasks.push_back(succ->op);
+    }
+
+    schedule_result_.push_back(std::move(task_result));
+  }
 }
 
 bool TaskScheduler::posInBounds(const CgraPosition &pos) const {
