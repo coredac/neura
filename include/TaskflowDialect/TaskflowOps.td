@@ -37,9 +37,9 @@ def TaskflowTaskOp
 
     Tasks has two types of inputs/outputs:
     1. Memory dependence states: memref SSA versions that the task reads or
-       writes. A dependency_read_out or dependency_write_out is still the same
-       underlying memref, but represents the state after this task has observed
-       or modified it.
+       writes. The done_reads and done_writes results still refer to the same
+       underlying memrefs, but represent the states after this task has observed
+       or modified them.
     2. Value dependencies: SSA values from producer tasks
 
     The `original_read_memrefs` and `original_write_memrefs` operands record
@@ -50,8 +50,8 @@ def TaskflowTaskOp
     Example:
       // Memory state inputs: %mem_state, %out_state. Value input: %val.
       $out_mem, %out_val = taskflow.task "Task_0"
-        dependency_read_in(%mem_state : memref<4xi32>)
-        dependency_write_in(%out_state : memref<?xi32>)
+        will_reads(%mem_state : memref<4xi32>)
+        will_writes(%out_state : memref<?xi32>)
         value_inputs(%val : i32)
         [original_read_memrefs(%arg0 : memref<?x8x6xi32>),
          original_write_memrefs(%arg5 : memref<?xi32>)] {
@@ -61,17 +61,17 @@ def TaskflowTaskOp
           %sum = arith.addi %v, %a2 : i32
           affine.store %sum, %a1[%i] : memref<?xi32>
         }
-        taskflow.yield reads(%a0 : memref<4xi32>) writes(%a1 : memref<?xi32>) values(%a2 : i32)
+        taskflow.yield done_reads(%a0 : memref<4xi32>) done_writes(%a1 : memref<?xi32>) values(%a2 : i32)
       } : (memref<4xi32>, memref<?xi32>, i32) -> (memref<4xi32>, memref<?xi32>, i32)
   }];
 
-  let arguments = (ins Variadic<AnyMemRef>:$dependency_read_in,
-      Variadic<AnyMemRef>:$dependency_write_in, Variadic<AnyType>:$value_inputs,
+  let arguments = (ins Variadic<AnyMemRef>:$will_reads,
+      Variadic<AnyMemRef>:$will_writes, Variadic<AnyType>:$value_inputs,
       StrAttr:$task_name, Variadic<AnyMemRef>:$original_read_memrefs,
       Variadic<AnyMemRef>:$original_write_memrefs);
 
-  let results = (outs Variadic<AnyMemRef>:$dependency_read_out,
-      Variadic<AnyMemRef>:$dependency_write_out,
+  let results = (outs Variadic<AnyMemRef>:$done_reads,
+      Variadic<AnyMemRef>:$done_writes,
       Variadic<AnyType>:$value_outputs);
 
   let regions = (region SizedRegion<1>:$body);
@@ -92,14 +92,14 @@ def TaskflowYieldOp
     match the result types of the parent taskflow.task operation.
     
     Example:
-      taskflow.task "Task_0" (%arg0, %arg1) {
+      taskflow.task "Task_0" will_reads(%arg0 : memref<4xi32>) value_inputs(%arg1 : i32) {
         ...
-        taskflow.yield %a0 : memref<4xi32>
+        taskflow.yield done_reads(%a0 : memref<4xi32>)
       } : (memref<4xi32>, i32) -> memref<4xi32>
   }];
 
-  let arguments = (ins Variadic<AnyMemRef>:$read_results,
-      Variadic<AnyMemRef>:$memory_results, Variadic<AnyType>:$value_results);
+  let arguments = (ins Variadic<AnyMemRef>:$done_reads,
+      Variadic<AnyMemRef>:$done_writes, Variadic<AnyType>:$value_results);
 
   let hasCustomAssemblyFormat = 1;
 

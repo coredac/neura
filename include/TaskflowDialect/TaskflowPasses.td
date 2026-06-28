@@ -85,7 +85,7 @@ def ClassifyTaskAndCounter : Pass<"classify-task-and-counter", "ModuleOp"> {
                            "mlir::taskflow::TaskflowDialect"];
 }
 
-def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
+def OrchestrateTasksOnAccelerators : Pass<"orchestrate-tasks-on-accelerators", "func::FuncOp"> {
   let summary = "Orchestrates Taskflow tasks onto a 2D multi-CGRA grid";
   let description = [{
     Orchestration means jointly deciding task resource allocation and task
@@ -139,7 +139,7 @@ def OrchestrateTaskOnCgra : Pass<"orchestrate-task-on-cgra", "func::FuncOp"> {
            /*default=*/"\"routing-critical-path\"",
            "Task orchestration strategy: 'routing-critical-path' (default) or "
            "'throughput-guided'.">];
-  let constructor = "taskflow::createOrchestrateTaskOnCgraPass()";
+  let constructor = "taskflow::createOrchestrateTasksOnAcceleratorsPass()";
 }
 
 def AnalyzeTaskPipelineInterval

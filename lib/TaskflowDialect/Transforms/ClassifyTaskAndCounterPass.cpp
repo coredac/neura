@@ -138,8 +138,8 @@ static BoundKind classifyCounterBoundValue(Value v, TaskflowTaskOp task_op) {
   }
 
   // Block args layout: [dep_read_in…] [dep_write_in…] [value_inputs…]
-  unsigned num_dep_read = task_op.getDependencyReadIn().size();
-  unsigned num_dep_write = task_op.getDependencyWriteIn().size();
+  unsigned num_dep_read = task_op.getWillReads().size();
+  unsigned num_dep_write = task_op.getWillWrites().size();
   unsigned value_input_start = num_dep_read + num_dep_write;
   unsigned arg_idx = block_arg.getArgNumber();
 

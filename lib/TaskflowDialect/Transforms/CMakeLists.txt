@@ -2,7 +2,7 @@ get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 
 add_mlir_library(MLIRTaskflowTransforms
     AnalyzeTaskPipelineIntervalPass.cpp
-    OrchestrateTaskOnCgraPass.cpp
+    OrchestrateTasksOnAcceleratorsPass.cpp
     ConstructHyperblockFromTaskPass.cpp
     ClassifyTaskAndCounterPass.cpp
     FuseTaskPass.cpp

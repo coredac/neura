@@ -26,16 +26,20 @@ createOrchestrationStrategy(StringRef strategy_name, int grid_rows,
       .Default(nullptr);
 }
 
-struct OrchestrateTaskOnCgraPass
-    : public PassWrapper<OrchestrateTaskOnCgraPass,
+struct OrchestrateTasksOnAcceleratorsPass
+    : public PassWrapper<OrchestrateTasksOnAcceleratorsPass,
                          OperationPass<func::FuncOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(OrchestrateTaskOnCgraPass)
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(
+      OrchestrateTasksOnAcceleratorsPass)
 
-  OrchestrateTaskOnCgraPass() = default;
-  OrchestrateTaskOnCgraPass(const OrchestrateTaskOnCgraPass &other)
+  OrchestrateTasksOnAcceleratorsPass() = default;
+  OrchestrateTasksOnAcceleratorsPass(
+      const OrchestrateTasksOnAcceleratorsPass &other)
       : PassWrapper(other) {}
 
-  StringRef getArgument() const override { return "orchestrate-task-on-cgra"; }
+  StringRef getArgument() const override {
+    return "orchestrate-tasks-on-accelerators";
+  }
   StringRef getDescription() const override {
     return "Orchestrates Taskflow tasks onto a 2D multi-CGRA grid (spatial or "
            "spatial-temporal)";
@@ -70,7 +74,12 @@ struct OrchestrateTaskOnCgraPass
       return;
     }
 
-    strategy->runTaskOrchestration(getOperation());
+    if (!strategy->runTaskOrchestration(getOperation())) {
+      getOperation()->emitError()
+          << "failed to orchestrate taskflow tasks with strategy: "
+          << orchestrationStrategy.getValue();
+      signalPassFailure();
+    }
   }
 };
 
@@ -79,8 +88,8 @@ struct OrchestrateTaskOnCgraPass
 namespace mlir {
 namespace taskflow {
 
-std::unique_ptr<Pass> createOrchestrateTaskOnCgraPass() {
-  return std::make_unique<OrchestrateTaskOnCgraPass>();
+std::unique_ptr<Pass> createOrchestrateTasksOnAcceleratorsPass() {
+  return std::make_unique<OrchestrateTasksOnAcceleratorsPass>();
 }
 
 } // namespace taskflow
