@@ -355,6 +355,24 @@ def Neura_StoreIndexedOp
                        "type($base) attr-dict `:` type($value)";
 }
 
+// Defines a batched random-address memory read operation.
+def Neura_GatherOp : Op<NeuraDialect, "gather"> {
+  let summary = "Batched random-address memory read (hardware gather primitive)";
+  let description = [{
+    Reads multiple rows from a table in a single operation using an index
+    vector, exploiting memory-level parallelism. Semantically equivalent to
+    fancy indexing table[indices]. On the CGRA it maps to a gather unit that
+    issues multiple random-address read requests together.
+    Example:
+      %rows = neura.gather %table [%indices] : tensor<16x4xf32>, tensor<8xi64> -> tensor<8x4xf32>
+  }];
+  let arguments = (ins AnyType:$table, AnyType:$indices);
+  let results = (outs AnyType:$result);
+  let assemblyFormat =
+      "$table `[` $indices `]` attr-dict `:` type($table) `,` "
+      "type($indices) `->` type($result)";
+}
+
 // Defines a pointer computation operation.
 def Neura_GEP : Op<NeuraDialect, "gep", [AttrSizedOperandSegments]> {
   let summary = "Pointer computation using offset indices";
