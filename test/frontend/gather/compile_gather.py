@@ -22,7 +22,7 @@ This is the same lowering route used for real application kernels, so the op
 rides through the standard pipeline instead of a bespoke bridge.
 
 Usage:
-    python3 gather.py [--neutral] [output.mlir]
+    python3 compile_gather.py [--neutral] [output.mlir]
 """
 
 import os
