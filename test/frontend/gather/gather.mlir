@@ -11,13 +11,13 @@
 // which mlir-neura-opt lowers with -lower-torch-to-neura. FileCheck confirms
 // the marker becomes a native neura.gather op and no torch marker remains.
 
-// RUN: python3 %S/gather.py %t.torch.mlir
+// RUN: python3 %S/compile_gather.py %t.torch.mlir
 // RUN: FileCheck --input-file=%t.torch.mlir %s --check-prefix=L1 --implicit-check-not="aten.index"
 
 // L1-LABEL: func.func @forward
 // L1: torch.operator "torch.neura.gather"
 
-// RUN: python3 %S/gather.py --neutral %t.neutral.mlir
+// RUN: python3 %S/compile_gather.py --neutral %t.neutral.mlir
 // RUN: mlir-neura-opt -allow-unregistered-dialect -lower-torch-to-neura %t.neutral.mlir | FileCheck %s --check-prefix=L2 --implicit-check-not="torch.neura.gather"
 
 // L2-LABEL: func.func @forward
