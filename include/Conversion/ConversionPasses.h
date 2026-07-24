@@ -18,6 +18,7 @@ std::unique_ptr<mlir::Pass> createLowerArithToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerLlvmToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerMemRefToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerBuiltinToNeuraPass();
+std::unique_ptr<mlir::Pass> createLowerTorchToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerAffineToNeuraPass();
 
 // TaskFlow Conversion Passes.

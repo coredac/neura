@@ -33,6 +33,18 @@ def LowerBuiltinToNeura : Pass<"lower-builtin-to-neura", "ModuleOp"> {
   let constructor = "mlir::createLowerBuiltinToNeuraPass()";
 }
 
+def LowerTorchToNeura : Pass<"lower-torch-to-neura", "ModuleOp"> {
+  let summary = "Lower torch frontend marker ops to Neura dialect";
+  let description = [{
+    Rewrites the opaque frontend marker operation "torch.neura.gather"
+    (produced by the PyTorch custom op and stripped of torch types by the
+    Python bridge) into the native neura.gather operation. This is a dedicated
+    lowering route that bypasses the linalg pipeline used by generic ops.
+  }];
+  let constructor = "mlir::createLowerTorchToNeuraPass()";
+  let dependentDialects = ["mlir::neura::NeuraDialect"];
+}
+
 def LowerAffineToNeura : Pass<"lower-affine-to-neura", "func::FuncOp"> {
   let summary =
       "Lower Affine perfect nested loops to Neura loop_control operations";
