@@ -6,6 +6,21 @@
 include "mlir/Pass/PassBase.td"
 
 //=========================================================//
+// Math Emulation Pass.
+//=========================================================//
+def EmulateMathWithArith : Pass<"emulate-math-with-arith", "ModuleOp"> {
+  let summary = "Emulate math.fpowi and math.tanh with arith/math.exp";
+  let description = [{
+    Emulates math.fpowi(constant-exponent) with chains of arith.mulf and
+    math.tanh with math.exp + arith ops. This must run before affine loop
+    conversion so that constant operands are not promoted to block arguments.
+  }];
+  let constructor = "mlir::createEmulateMathWithArithPass()";
+  let dependentDialects = ["mlir::arith::ArithDialect",
+                           "mlir::math::MathDialect"];
+}
+
+//=========================================================//
 // Neura Conversion Passes.
 //=========================================================//
 def LowerArithToNeura : Pass<"lower-arith-to-neura", "FuncOp"> {

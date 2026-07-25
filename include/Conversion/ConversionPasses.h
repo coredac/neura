@@ -21,6 +21,9 @@ std::unique_ptr<mlir::Pass> createLowerBuiltinToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerTorchToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerAffineToNeuraPass();
 
+// Math Emulation Pass.
+std::unique_ptr<mlir::Pass> createEmulateMathWithArithPass();
+
 // TaskFlow Conversion Passes.
 std::unique_ptr<mlir::Pass> createConvertAffineToTaskflowPass();
 std::unique_ptr<mlir::Pass> createConvertTaskflowToNeuraPass();

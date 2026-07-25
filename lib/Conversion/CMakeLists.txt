@@ -1,5 +1,6 @@
 get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 
+add_subdirectory(ExpandMathToArith)
 add_subdirectory(ArithToNeura)
 add_subdirectory(AffineToNeura)
 add_subdirectory(LlvmToNeura)
@@ -19,6 +20,7 @@ target_link_libraries(MLIRConversion INTERFACE
   MLIRSupport
   MLIRTransforms
   MLIRNeura
+  MLIREmulateMathWithArithPass
   MLIRNeuraArithToNeuraPass
   MLIRNeuraAffineToNeuraPass
   MLIRNeuraLlvmToNeuraPass
