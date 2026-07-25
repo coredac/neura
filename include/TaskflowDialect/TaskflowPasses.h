@@ -25,6 +25,7 @@ void registerLinalgToAffineConversionPassPipeline();
 std::unique_ptr<mlir::Pass> createConstructHyperblockFromTaskPass();
 std::unique_ptr<mlir::Pass> createClassifyTaskAndCounterPass();
 std::unique_ptr<mlir::Pass> createOrchestrateTasksOnAcceleratorsPass();
+std::unique_ptr<mlir::Pass> createAnalyzeTaskPipelineIntervalPass();
 std::unique_ptr<mlir::Pass> createFuseTaskPass();
 
 //=========================================================//
