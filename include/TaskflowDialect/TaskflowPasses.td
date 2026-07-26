@@ -190,18 +190,21 @@ def ResourceAwareTaskOptimization
     Use --estimation-mode to control how task II/steps are estimated:
       compiled   (default): runs the full Neura lowering + mapping pipeline
                   for accurate compiled_ii and steps.
-      analytical : uses only ResMII/RecMII analytical estimates without
-                  running the mapper — much faster but less accurate.
-                  Useful for rapid design-space exploration.
+      cost-model-analytical : uses the full parametric cost model
+                  (max of ResMII/RecMII/MemMII/RouteMII/RegMII/IssueMII) without
+                  running the mapper. Interpretable and fast; predicts large II.
+      analytical : legacy mode using only ResMII/RecMII estimates without
+                  running the mapper — faster but less accurate.
     Example:
-      --resource-aware-task-optimization estimation-mode=analytical
+      --resource-aware-task-optimization estimation-mode=cost-model-analytical
   }];
   let options = [Option<
       "estimationMode", "estimation-mode", "std::string",
       /*default=*/"\"compiled\"",
       "Profiling estimation mode: 'compiled' (default) runs the full "
-      "Neura lowering + mapping pipeline; 'analytical' uses only "
-      "ResMII/RecMII analytical estimates (faster but less accurate).">];
+      "Neura lowering + mapping pipeline; 'cost-model-analytical' uses the full "
+      "parametric cost model (all resource bounds); 'analytical' uses only "
+      "ResMII/RecMII estimates. The latter two never invoke the mapper.">];
   let constructor = "taskflow::createResourceAwareTaskOptimizationPass()";
   let dependentDialects = ["mlir::affine::AffineDialect",
                            "mlir::func::FuncDialect"];

@@ -1,0 +1,55 @@
+architecture:
+  name: "NeuraScarceMem"
+  version: "1.0"
+
+# 4x4 single CGRA. Every tile has all compute FUs, but the memory FUs
+# ('mem'/'mem_indexed') exist on tile (0,0) ONLY. A kernel with L independent
+# loads therefore has MemMII = ceil(L / 1) = L: the mapper must serialise all L
+# memory accesses onto one tile, so oracle II >= L. Isolates MemMII from the
+# issue/ResMII bounds (which use all 16 tiles).
+multi_cgra_defaults:
+  base_topology: "mesh"
+  rows: 1
+  columns: 1
+
+per_cgra_defaults:
+  rows: 4
+  columns: 4
+  ctrl_mem_items: 64
+  base_topology: "mesh"
+
+tile_defaults:
+  num_registers: 64
+  fu_types: ["add", "mul", "div", "fadd", "fmul", "fdiv", "logic", "cmp", "sel", "type_conv", "grant", "loop_control", "phi", "constant", "return", "alloca", "shift"]
+
+link_defaults:
+  latency: 1
+  bandwidth: 32
+
+link_overrides:
+
+tile_overrides:
+  # Only this tile provides memory FUs.
+  - cgra_x: 0
+    cgra_y: 0
+    tile_x: 0
+    tile_y: 0
+    fu_types: ["add", "mul", "div", "fadd", "fmul", "fdiv", "logic", "cmp", "sel", "type_conv", "grant", "loop_control", "phi", "constant", "return", "alloca", "shift", "mem", "mem_indexed"]
+    num_registers: 64
+    existence: true
+
+extensions:
+  crossbar: false
+
+simulator:
+  execution_model: "serial"
+  logging:
+    enabled: true
+    file: "output.log"
+  driver:
+    name: "Driver"
+    frequency: "1GHz"
+  device:
+    name: "Device"
+    frequency: "1GHz"
+    bind_to_architecture: true

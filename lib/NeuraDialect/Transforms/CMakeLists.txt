@@ -9,6 +9,8 @@ add_mlir_library(
     TransformCtrlToDataFlowPass.cpp
     LeveragePredicatedValuePass.cpp
     MapToAcceleratorPass.cpp
+    CostModelAnalyticalPass.cpp
+    DumpDfgJsonPass.cpp
     GenerateCodePass.cpp
     CanonicalizeReturnPass.cpp
     CanonicalizeLiveInPass.cpp

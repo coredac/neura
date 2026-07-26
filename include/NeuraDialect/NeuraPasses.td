@@ -93,6 +93,55 @@ def MapToAccelerator : Pass<"map-to-accelerator", "ModuleOp"> {
   let constructor = "neura::createMapToAcceleratorPass()";
 }
 
+def CostModelAnalytical : Pass<"cost-model-analytical", "ModuleOp"> {
+  let summary = "Analytical (parametric) single-task II predictor (no mapper)";
+  let description = [{
+    Predicts the modulo-scheduling Initiation Interval (II) of each Neura
+    task/kernel purely from compile-time structural parameters — the DFG and
+    the CGRA Architecture — WITHOUT running the mapper.
+
+    II = clamp(max(ResMII, RecMII, MemMII, RouteMII, RegMII, IssueMII),
+               1, ctrl_mem_items)
+
+    Every bound is an interpretable ceil(demand/capacity) term; the pass prints
+    a structured diagnostic block and (by default) records `analytical_ii` plus
+    each bound on the kernel/func via the `mapping_info` attribute, so it can be
+    compared directly against `--map-to-accelerator`'s `compiled_ii` oracle.
+
+    x-tiles/y-tiles/valid-tiles mirror --map-to-accelerator so the model can be
+    evaluated for any chosen CGRA shape. This pass never calls the mapper and
+    uses no workload/task name, no training data, and no fitted thresholds.
+  }];
+  let options =
+      [Option<
+           "x_tiles", "x-tiles", "int", /*default=*/"0",
+           "Total tiles in X (0 = use the global Architecture singleton).">,
+       Option<
+           "y_tiles", "y-tiles", "int", /*default=*/"0",
+           "Total tiles in Y (0 = use the global Architecture singleton).">,
+       Option<
+           "valid_tiles", "valid-tiles", "std::string", /*default=*/"\"\"",
+           "Comma-separated tile coordinates (x_y) present in a "
+           "non-rectangular shape; empty = all tiles in the rectangle.">,
+       Option<
+           "write_attr", "write-attr", "bool", /*default=*/"true",
+           "Record analytical_ii and each bound in the mapping_info attribute "
+           "(default true).">];
+  let constructor = "neura::createCostModelAnalyticalPass()";
+}
+
+def DumpDfgJson : Pass<"dump-dfg-json", "ModuleOp"> {
+  let summary = "Emit the pre-map DFG + architecture as JSON for the exact oracle";
+  let description = [{
+    Emits materialized ops (id, FU class, latency), dependence edges (with a
+    loop-carried iteration distance omega), and the CGRA architecture (tiles,
+    per-FU-class tile support, mesh links, registers, ctrl_mem_items) as JSON on
+    stdout. Consumed by test/cost-model/exact_oracle.py to compute the exact
+    minimum-II modulo schedule (the trustworthy oracle).
+  }];
+  let constructor = "neura::createDumpDfgJsonPass()";
+}
+
 def GenerateCode : Pass<"generate-code", "ModuleOp"> {
   let summary = "Generate JSON-formatted instructions from mapped Neura IR";
   let description = [{

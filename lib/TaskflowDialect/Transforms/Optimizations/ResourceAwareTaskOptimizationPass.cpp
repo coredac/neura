@@ -17,6 +17,7 @@
 #include "TaskflowDialect/TaskflowPasses.h"
 
 #include "NeuraDialect/Architecture/Architecture.h"
+#include "NeuraDialect/Mapping/analytical_cost_model.h"
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraAttributes.h"
 #include "NeuraDialect/NeuraDialect.h"
@@ -231,6 +232,13 @@ class TaskDependencyGraph {
 public:
   SmallVector<std::unique_ptr<TaskGraphNode>> nodes;
   DenseMap<Operation *, TaskGraphNode *> op_to_node;
+
+  // When true, the analytical fallback in runNeuraPipelineOnKernel uses the full
+  // parametric cost model (computeAnalyticalII: max of ResMII/RecMII/MemMII/
+  // RouteMII/RegMII/IssueMII) instead of only ResMII/RecMII. Set for
+  // estimation-mode=cost-model-analytical. The mapper is never invoked in this
+  // mode (skip_mapper is also forced true).
+  bool use_full_cost_model = false;
 
   void build(func::FuncOp func, bool skip_mapper = false) {
     // 1. Creates TaskGraphNodes.
@@ -540,7 +548,17 @@ private:
         int rec_mii = 1;
         for (auto &cycle : cycles)
           rec_mii = std::max(rec_mii, cycle.length);
-        compiled_ii = std::max({compiled_ii, res_mii, rec_mii});
+        if (use_full_cost_model) {
+          // Full parametric model: max of all resource bounds. Strictly >=
+          // max(res_mii, rec_mii), so this only tightens the estimate.
+          neura::AnalyticalIIBreakdown bd =
+              neura::computeAnalyticalII(region, architecture);
+          llvm::errs() << "[cost-model-analytical] task profiling:\n";
+          bd.print(llvm::errs());
+          compiled_ii = std::max({compiled_ii, res_mii, rec_mii, bd.final_ii});
+        } else {
+          compiled_ii = std::max({compiled_ii, res_mii, rec_mii});
+        }
         // Derives cp_depth from ALAP (As-Late-As-Possible) scheduling levels.
         std::set<Operation *> critical_ops;
         for (auto &cycle : cycles)
@@ -1672,16 +1690,16 @@ struct ResourceAwareTaskOptimizationPass
   // Estimation mode for profiling task II / steps.
   //   "compiled" (default): runs the full Neura lowering + mapping pipeline
   //       to obtain accurate compiled_ii and steps from MapToAcceleratorPass.
-  //   "analytical": uses only ResMII / RecMII analytical estimates without
-  //       running the mapper.  Much faster but less accurate — useful for
-  //       rapid design-space exploration or when the mapper is unavailable.
+  //   "cost-model-analytical": full parametric cost model (max of ResMII,
+  //       RecMII, MemMII, RouteMII, RegMII, IssueMII); no mapper.
+  //   "analytical": legacy ResMII/RecMII-only estimate; no mapper.
   Option<std::string> estimationMode{
       *this, "estimation-mode",
       llvm::cl::desc(
           "Profiling estimation mode: 'compiled' (default) runs the full "
-          "Neura lowering + mapping pipeline for accurate II/steps; "
-          "'analytical' uses only ResMII/RecMII analytical estimates "
-          "(faster but less accurate)."),
+          "Neura lowering + mapping pipeline; 'cost-model-analytical' uses the "
+          "full parametric cost model (all resource bounds); 'analytical' uses "
+          "only ResMII/RecMII. The latter two never invoke the mapper."),
       llvm::cl::init("compiled")};
 
   // Controls whether the balance phase skips the mapper during speculative
@@ -1700,7 +1718,13 @@ struct ResourceAwareTaskOptimizationPass
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
-    bool use_analytical = (estimationMode.getValue() == "analytical");
+    // cost-model-analytical: full parametric model (all bounds), no mapper.
+    // analytical: legacy ResMII/RecMII-only, no mapper.
+    // compiled (default): full lowering + mapper oracle.
+    bool use_full_cost_model =
+        (estimationMode.getValue() == "cost-model-analytical");
+    bool use_analytical =
+        (estimationMode.getValue() == "analytical") || use_full_cost_model;
 
     llvm::errs() << "=== ResourceAwareTaskOptimization on " << func.getName()
                  << " (estimation-mode=" << estimationMode.getValue()
@@ -1711,6 +1735,7 @@ struct ResourceAwareTaskOptimizationPass
     for (int outer = 0; outer < kMaxOuterIterations; ++outer) {
       // Rebuilds graph from current IR state.
       TaskDependencyGraph graph;
+      graph.use_full_cost_model = use_full_cost_model;
       graph.build(func, use_analytical);
 
       if (graph.nodes.empty()) {
@@ -1751,6 +1776,7 @@ struct ResourceAwareTaskOptimizationPass
       // Rebuilds graph after fusion (tasks may have been erased/created).
       if (fuse_changed) {
         graph = TaskDependencyGraph();
+        graph.use_full_cost_model = use_full_cost_model;
         graph.build(func, use_analytical);
       }
 
