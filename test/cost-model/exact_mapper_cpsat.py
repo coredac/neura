@@ -19,6 +19,10 @@ Two-stage per II (iterated upward from a lower bound):
      Fan-out shares links (same net is free to reuse a (link,residue)).
 First II with both stages feasible = true optimal; the routes are the mapping.
 
+Input dfg.json (from --dump-dfg-json): ops[{class,latency}], edges[{s,d,w}]
+(w=1 marks a loop-carried edge), and arch{tiles[{id,x,y,regs}], links[[s,d,lat]],
+fu_class_tiles{class:[tile ids]}, num_tiles, ctrl_mem_items}.
+
 Usage: exact_mapper_cpsat.py dfg.json [--max-ii N] [--seconds S] [-v] [--emit out.json]
 """
 import argparse
@@ -31,61 +35,92 @@ from ortools.sat.python import cp_model
 
 def shortest_hops(arch):
     """All-pairs shortest path (in link latency) over the real directed link
-    graph. Returns dist[(a,b)] in cycles; missing pairs -> None (unreachable)."""
-    tids = [t["id"] for t in arch["tiles"]]
+    graph. Returns dist[(a,b)] in cycles; missing pairs -> None (unreachable).
+
+    Example (4x4 mesh, id = y*4+x, latency-1 links): dist[(0,0)] = 0,
+    dist[(0,1)] = 1 (adjacent), dist[(0,5)] = 2 (0->1->5 or 0->4->5),
+    dist[(0,15)] = 6 (opposite corners)."""
+    tile_ids = [t["id"] for t in arch["tiles"]]
     INF = float("inf")
-    dist = {(a, b): (0 if a == b else INF) for a in tids for b in tids}
-    for s, d, lat in arch["links"]:
-        dist[(s, d)] = min(dist[(s, d)], lat)
-    for k in tids:
-        for i in tids:
-            dik = dist[(i, k)]
-            if dik == INF:
+    dist = {(a, b): (0 if a == b else INF)
+            for a in tile_ids for b in tile_ids}
+    for src, dst, latency in arch["links"]:
+        dist[(src, dst)] = min(dist[(src, dst)], latency)
+    # Floyd-Warshall: relax every path through an intermediate tile `via`.
+    for via in tile_ids:
+        for src in tile_ids:
+            dist_src_via = dist[(src, via)]
+            if dist_src_via == INF:
                 continue
-            for j in tids:
-                nd = dik + dist[(k, j)]
-                if nd < dist[(i, j)]:
-                    dist[(i, j)] = nd
+            for dst in tile_ids:
+                relaxed = dist_src_via + dist[(via, dst)]
+                if relaxed < dist[(src, dst)]:
+                    dist[(src, dst)] = relaxed
     return dist
 
 
 def schedule(data, ii, seconds, hops, minimize_routing=False):
+    """Stage 1: decide place[i] (tile) and issue_time[i] for every op at this II.
+    Returns {i:(tile,time)} if feasible, None if infeasible, "unknown" on
+    timeout. minimize_routing biases toward a router-friendly witness (see below).
+    """
     ops, edges, arch = data["ops"], data["edges"], data["arch"]
-    tiles = arch["tiles"]
-    tid = [t["id"] for t in tiles]
-    fu = arch["fu_class_tiles"]
-    n = len(ops)
-    Tmax = 2 * n + 2 * ii + 8
-    m = cp_model.CpModel()
-    place = []
-    t = []
+    tile_ids = [t["id"] for t in arch["tiles"]]
+    fu_class_tiles = arch["fu_class_tiles"]
+    num_ops = len(ops)
+    # Upper bound on any op's issue time. A modulo schedule fits within one II
+    # window per op plus slack for the dependence chain; 2*num_ops + 2*ii + 8 is
+    # a deliberately loose ceiling (never binds for these kernels, just bounds
+    # the integer-variable domains so CP-SAT stays finite).
+    max_time = 2 * num_ops + 2 * ii + 8
+    model = cp_model.CpModel()
+    place = []                                  # place[i]      = tile of op i
+    issue_time = []                             # issue_time[i] = cycle op i fires
     for i, op in enumerate(ops):
-        valid = fu.get(op["class"]) or tid
-        p = m.NewIntVarFromDomain(cp_model.Domain.FromValues(valid), f"p{i}")
-        place.append(p)
-        t.append(m.NewIntVar(0, Tmax, f"t{i}"))
-    # FU modulo resource via AllDifferent(place*II + residue).
+        # Restrict placement to tiles whose FU supports this op's class; if the
+        # class is unlisted, allow any tile.
+        valid_tiles = fu_class_tiles.get(op["class"]) or tile_ids
+        place_var = model.NewIntVarFromDomain(
+            cp_model.Domain.FromValues(valid_tiles), f"place{i}")
+        place.append(place_var)
+        issue_time.append(model.NewIntVar(0, max_time, f"time{i}"))
+    # FU modulo resource: at most one op per (tile, residue). Encoded as a single
+    # AllDifferent over cell = place*II + (time mod II): equal cells would mean
+    # two ops share a tile at congruent times, which is exactly the conflict to
+    # ban. Example (II=4): an op on tile 1 at t=5 has residue 5%4=1 and cell
+    # 1*4+1=5; any other op wanting tile 1 at t=1, 9, 13, ... (also residue 1)
+    # would need the same cell 5 -> AllDifferent rejects it. An op on tile 2 at
+    # t=5 has cell 2*4+1=9, no conflict.
     cells = []
-    for i in range(n):
-        r = m.NewIntVar(0, ii - 1, f"r{i}")
-        q = m.NewIntVar(0, Tmax, f"q{i}")
-        m.Add(t[i] == q * ii + r)
-        c = m.NewIntVar(0, (max(tid) + 1) * ii, f"c{i}")
-        m.Add(c == place[i] * ii + r)
-        cells.append(c)
-    m.AddAllDifferent(cells)
-    # Precedence/recurrence with true shortest-path hop latency (place-dependent).
-    maxhop = max((h for h in hops.values() if h != float("inf")), default=0)
+    for i in range(num_ops):
+        residue = model.NewIntVar(0, ii - 1, f"residue{i}")
+        iteration = model.NewIntVar(0, max_time, f"iter{i}")
+        model.Add(issue_time[i] == iteration * ii + residue)  # residue = time % II
+        cell = model.NewIntVar(0, (max(tile_ids) + 1) * ii, f"cell{i}")
+        model.Add(cell == place[i] * ii + residue)
+        cells.append(cell)
+    model.AddAllDifferent(cells)
+    # Precedence/recurrence. hop is the place-dependent travel latency between the
+    # producer and consumer tiles, pinned to the shortest-path table so the timing
+    # is exact. is_loop_carried (w=1) relaxes the bound by one II (next iteration).
+    # Example: producer src on tile 0 issued at time 3 with latency 1, consumer
+    # dst on tile 5 (2 hops away) -> time[dst] >= 3 + 1 + 2 = 6. If it were a
+    # loop-carried edge (w=1, II=4) the value is consumed next iteration:
+    # time[dst] >= 3 + 1 + 2 - 4 = 2.
+    max_hop = max((h for h in hops.values() if h != float("inf")), default=0)
     hop_vars = []
-    for e in edges:
-        s, d, w = e["s"], e["d"], e["w"]
-        lat = ops[s]["latency"]
-        hop = m.NewIntVar(0, int(maxhop), "")
-        # hop == hops[(place[s], place[d])] via a table constraint.
-        allowed = [[a, b, int(hops[(a, b)])] for a in tid for b in tid
-                   if hops[(a, b)] != float("inf")]
-        m.AddAllowedAssignments([place[s], place[d], hop], allowed)
-        m.Add(t[d] >= t[s] + lat + hop - w * ii)
+    for edge in edges:
+        src, dst, is_loop_carried = edge["s"], edge["d"], edge["w"]
+        src_latency = ops[src]["latency"]
+        hop = model.NewIntVar(0, int(max_hop), "")
+        # hop == hops[(place[src], place[dst])] via a table constraint listing
+        # every reachable (src_tile, dst_tile, hop_count) triple.
+        allowed_hops = [[a, b, int(hops[(a, b)])]
+                        for a in tile_ids for b in tile_ids
+                        if hops[(a, b)] != float("inf")]
+        model.AddAllowedAssignments([place[src], place[dst], hop], allowed_hops)
+        model.Add(issue_time[dst] >=
+                  issue_time[src] + src_latency + hop - is_loop_carried * ii)
         hop_vars.append(hop)
     # Optional: make the schedule reproducible by the backend's greedy per-net
     # router. That router struggles with long register-hold spans and long
@@ -93,131 +128,157 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
     # and LOCAL placements (few hops) second. Neither changes which II is
     # feasible; both just pick a router-friendly witness. Off for the fast sweep.
     if minimize_routing:
-        makespan = m.NewIntVar(0, Tmax, "makespan")
-        for i in range(n):
-            m.Add(makespan >= t[i])
-        m.Minimize(makespan * (int(maxhop) * len(edges) + 1) + sum(hop_vars))
-    sol = cp_model.CpSolver()
-    sol.parameters.max_time_in_seconds = seconds
+        makespan = model.NewIntVar(0, max_time, "makespan")
+        for i in range(num_ops):
+            model.Add(makespan >= issue_time[i])
+        model.Minimize(makespan * (int(max_hop) * len(edges) + 1) + sum(hop_vars))
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = seconds
     # Deterministic: single worker + fixed seed (reproducible for tests).
-    sol.parameters.num_search_workers = 1
-    sol.parameters.random_seed = 0
-    st = sol.Solve(m)
-    if st in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return {i: (sol.Value(place[i]), sol.Value(t[i])) for i in range(n)}
-    return None if st == cp_model.INFEASIBLE else "unknown"
+    solver.parameters.num_search_workers = 1
+    solver.parameters.random_seed = 0
+    status = solver.Solve(model)
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return {i: (solver.Value(place[i]), solver.Value(issue_time[i]))
+                for i in range(num_ops)}
+    return None if status == cp_model.INFEASIBLE else "unknown"
 
 
 def route(data, sched, ii, seconds, want_routes=False):
+    """Stage 2: with placement+times fixed, find a modulo-feasible routing of
+    every value. Returns (feasible, routes). routes is None unless want_routes;
+    otherwise routes[(s,d)] is the concrete [(tile,cycle),...] path per edge."""
     ops, edges, arch = data["ops"], data["edges"], data["arch"]
-    tiles = arch["tiles"]
-    tid = [t["id"] for t in tiles]
-    regs = {t["id"]: t["regs"] for t in tiles}
-    out_links = collections.defaultdict(list)   # tile -> [(dst, lat)]
-    for s, d, lat in arch["links"]:
-        out_links[s].append((d, lat))
-    # Build nets: producer -> list of (consumer_tile, deadline_cycle).
-    nets = collections.defaultdict(list)
-    prod_avail = {}
-    for i, (pt, tt) in sched.items():
-        prod_avail[i] = tt + ops[i]["latency"]
-    for e in edges:
-        s, d, w = e["s"], e["d"], e["w"]
-        ct, cd = sched[d]
-        deadline = cd + (ii if w == 1 else 0)  # recurrence: next iteration
-        nets[s].append((sched[d][0], deadline))
-    m = cp_model.CpModel()
-    # Presence + arc booleans per net over a per-net cycle window.
-    link_use = collections.defaultdict(list)  # (link_key,residue) -> [bool]
-    reg_use = collections.defaultdict(list)   # (tile,residue) -> [bool]
-    pres_of = {}                              # p -> {(tile,cyc): boolvar}
-    # p -> {(child_tile,child_cyc): [(kind, parent_node, boolvar)]}. Used after
-    # solving to trace each consumer back to the producer (the concrete route).
+    tile_ids = [t["id"] for t in arch["tiles"]]
+    num_regs = {t["id"]: t["regs"] for t in arch["tiles"]}
+    out_links = collections.defaultdict(list)   # tile -> [(dst_tile, latency)]
+    for src, dst, latency in arch["links"]:
+        out_links[src].append((dst, latency))
+    # A "net" is one producer feeding its consumers. produce_cycle is the cycle
+    # the producer's result is ready; deadline is when a consumer must have it (a
+    # loop-carried consumer needs it one II later).
+    # Example: producer 7 on tile 2 at t=2, latency 1 -> produce_cycle[7]=3. A
+    # normal consumer on tile 9 at t=6 -> deadline 6; a loop-carried one (w=1,
+    # II=4) at t=6 -> deadline 10. So nets[7] = [(9, 6), ...].
+    nets = collections.defaultdict(list)        # producer -> [(cons_tile, deadline)]
+    produce_cycle = {}
+    for i, (tile, fire_time) in sched.items():
+        produce_cycle[i] = fire_time + ops[i]["latency"]
+    for edge in edges:
+        src, dst, is_loop_carried = edge["s"], edge["d"], edge["w"]
+        cons_tile, cons_time = sched[dst]
+        deadline = cons_time + (ii if is_loop_carried else 0)  # recurrence
+        nets[src].append((cons_tile, deadline))
+    model = cp_model.CpModel()
+    # Each net is routed as a presence flow on a time-expanded graph:
+    # present[(tile,cycle)] means "the value sits on this tile at cycle". It
+    # enters at the producer and must reach every consumer node; between them it
+    # either holds (a register on the same tile, next cycle) or moves (a link
+    # into the tile). link_use / reg_use collect the booleans that share a modulo
+    # slot so we can cap them.
+    link_use = collections.defaultdict(list)  # (link_key, residue) -> [bool]
+    reg_use = collections.defaultdict(list)   # (tile, residue)     -> [bool]
+    present_of = {}                           # producer -> {(tile,cycle): boolvar}
+    # producer -> {(child_tile,child_cyc): [(kind, parent_node, boolvar)]}. Used
+    # after solving to trace each consumer back to the producer (concrete route).
     arcs_of = collections.defaultdict(lambda: collections.defaultdict(list))
-    for p, cons in nets.items():
-        src_tile = sched[p][0]
-        c0 = prod_avail[p]
-        cmax = max(d for _, d in cons)
-        if cmax < c0:
-            cmax = c0
-        cycles = list(range(c0, cmax + 1))
-        pres = {(tl, c): m.NewBoolVar(f"pr{p}_{tl}_{c}")
-                for tl in tid for c in cycles}
-        pres_of[p] = pres
-        m.Add(pres[(src_tile, c0)] == 1)
-        for (ct, dl) in cons:
-            m.Add(pres[(ct, dl)] == 1)
+    for producer, consumers in nets.items():
+        src_tile = sched[producer][0]
+        start_cycle = produce_cycle[producer]
+        last_cycle = max(deadline for _, deadline in consumers)
+        if last_cycle < start_cycle:
+            last_cycle = start_cycle
+        cycles = list(range(start_cycle, last_cycle + 1))
+        present = {(tile, cycle): model.NewBoolVar(f"pr{producer}_{tile}_{cycle}")
+                   for tile in tile_ids for cycle in cycles}
+        present_of[producer] = present
+        model.Add(present[(src_tile, start_cycle)] == 1)   # starts at producer
+        for (cons_tile, deadline) in consumers:
+            model.Add(present[(cons_tile, deadline)] == 1)  # present at consumer
         # Flow: every present node except the source has an incoming arc.
-        for tl in tid:
-            for c in cycles:
-                if (tl, c) == (src_tile, c0):
+        for tile in tile_ids:
+            for cycle in cycles:
+                if (tile, cycle) == (src_tile, start_cycle):
                     continue
                 incoming = []
-                if c - 1 in cycles:
-                    # hold on same tile
-                    h = m.NewBoolVar(f"h{p}_{tl}_{c}")
-                    m.Add(pres[(tl, c - 1)] == 1).OnlyEnforceIf(h)
-                    incoming.append(h)
-                    reg_use[(tl, (c - 1) % ii)].append(h)
-                    arcs_of[p][(tl, c)].append(("hold", (tl, c - 1), h))
-                    # link moves from neighbors into tl
-                    for src in tid:
-                        for (dst, lat) in out_links[src]:
-                            if dst == tl and (c - lat) in cycles and lat >= 1:
-                                mv = m.NewBoolVar(f"m{p}_{src}_{tl}_{c}")
-                                m.Add(pres[(src, c - lat)] == 1).OnlyEnforceIf(mv)
-                                incoming.append(mv)
-                                link_use[((src, dst), (c - lat) % ii)].append(mv)
-                                arcs_of[p][(tl, c)].append(
-                                    ("move", (src, c - lat), mv))
+                if cycle - 1 in cycles:
+                    # hold on same tile: present here now if it was here last
+                    # cycle (e.g. present[(tile 3, cycle 5)] can be justified by
+                    # holding a register from present[(tile 3, cycle 4)], or by a
+                    # link move below).
+                    hold_var = model.NewBoolVar(f"hold{producer}_{tile}_{cycle}")
+                    model.Add(present[(tile, cycle - 1)] == 1).OnlyEnforceIf(hold_var)
+                    incoming.append(hold_var)
+                    reg_use[(tile, (cycle - 1) % ii)].append(hold_var)
+                    arcs_of[producer][(tile, cycle)].append(
+                        ("hold", (tile, cycle - 1), hold_var))
+                    # link moves from neighbors into `tile` (arrive after latency)
+                    for neighbor in tile_ids:
+                        for (dst_tile, latency) in out_links[neighbor]:
+                            if (dst_tile == tile and (cycle - latency) in cycles
+                                    and latency >= 1):
+                                move_var = model.NewBoolVar(
+                                    f"move{producer}_{neighbor}_{tile}_{cycle}")
+                                model.Add(
+                                    present[(neighbor, cycle - latency)] == 1
+                                ).OnlyEnforceIf(move_var)
+                                incoming.append(move_var)
+                                link_use[((neighbor, dst_tile),
+                                          (cycle - latency) % ii)].append(move_var)
+                                arcs_of[producer][(tile, cycle)].append(
+                                    ("move", (neighbor, cycle - latency), move_var))
                 # present => at least one incoming arc chosen
-                m.Add(sum(incoming) >= 1).OnlyEnforceIf(pres[(tl, c)])
+                model.Add(sum(incoming) >= 1).OnlyEnforceIf(present[(tile, cycle)])
                 if not incoming:
-                    m.Add(pres[(tl, c)] == 0)
-    # Modulo resources.
-    for key, lst in link_use.items():
-        m.Add(sum(lst) <= 1)             # one net-move per (link, residue)
-    for (tl, s), lst in reg_use.items():
-        m.Add(sum(lst) <= max(1, regs[tl]))
-    sol = cp_model.CpSolver()
-    sol.parameters.max_time_in_seconds = seconds
+                    model.Add(present[(tile, cycle)] == 0)
+    # Modulo resources: a link carries one net-move per residue; a tile holds no
+    # more values per residue than it has registers.
+    for key, bool_vars in link_use.items():
+        model.Add(sum(bool_vars) <= 1)          # one net-move per (link, residue)
+    for (tile, residue), bool_vars in reg_use.items():
+        model.Add(sum(bool_vars) <= max(1, num_regs[tile]))
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = seconds
     # Deterministic: single worker + fixed seed (reproducible for tests).
-    sol.parameters.num_search_workers = 1
-    sol.parameters.random_seed = 0
-    st = sol.Solve(m)
-    feasible = st in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+    solver.parameters.num_search_workers = 1
+    solver.parameters.random_seed = 0
+    status = solver.Solve(model)
+    feasible = status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
     if not want_routes or not feasible:
         return (feasible, None)
 
     # Reconstruct the concrete route of every edge: trace each consumer node
     # back to the producer through the chosen arcs. routes[(s,d)] = ordered list
     # of (tile, cycle) the value occupies, producer-tile first, consumer last.
-    def trace(p, start_node):
-        src_tile = sched[p][0]
-        c0 = prod_avail[p]
+    # e.g. [(2,3),(2,4),(3,5)] = produced on tile 2 at cycle 3, held in a tile-2
+    # register through cycle 4, then a link move arriving on tile 3 at cycle 5.
+    def trace(producer, start_node):
+        src_tile = sched[producer][0]
+        start_cycle = produce_cycle[producer]
         node = start_node
-        rev = [node]
+        reversed_path = [node]
         guard = 0
-        while node != (src_tile, c0) and guard < 100000:
+        while node != (src_tile, start_cycle) and guard < 100000:
             guard += 1
+            # pick any incoming arc that is set and whose parent is also present
             parent = None
-            for kind, pnode, var in arcs_of[p].get(node, []):
-                if sol.Value(var) and sol.Value(pres_of[p][pnode]):
-                    parent = pnode
+            for kind, parent_node, var in arcs_of[producer].get(node, []):
+                if solver.Value(var) and solver.Value(present_of[producer][parent_node]):
+                    parent = parent_node
                     break
             if parent is None:
                 return None
-            rev.append(parent)
+            reversed_path.append(parent)
             node = parent
-        return list(reversed(rev))
+        return list(reversed(reversed_path))
 
     routes = {}
-    for e in edges:
-        s, d, w = e["s"], e["d"], e["w"]
-        deadline = sched[d][1] + (ii if w == 1 else 0)
-        path = trace(s, (sched[d][0], deadline))
+    for edge in edges:
+        src, dst, is_loop_carried = edge["s"], edge["d"], edge["w"]
+        deadline = sched[dst][1] + (ii if is_loop_carried else 0)
+        path = trace(src, (sched[dst][0], deadline))
         if path is not None:
-            routes[(s, d)] = path
+            routes[(src, dst)] = path
     return (feasible, routes)
 
 
@@ -225,15 +286,18 @@ def emit_mapping(data, sched, ii, path, routes=None):
     """Writes the concrete real mapping (op -> tile placement + modulo schedule)
     as JSON. index_per_ii = time_step % II and invalid_iterations = time_step //
     II follow the backend's convention, so this is directly comparable to the
-    heuristic mapper's per-op placement."""
-    xy = {t["id"]: (t.get("x"), t.get("y")) for t in data["arch"]["tiles"]}
+    heuristic mapper's per-op placement. Example (II=6): time_step 4 ->
+    index_per_ii 4, invalid_iterations 0; time_step 11 -> index_per_ii 5,
+    invalid_iterations 1 (op runs in the second, still-filling iteration)."""
+    tile_xy = {t["id"]: (t.get("x"), t.get("y")) for t in data["arch"]["tiles"]}
     placements = []
     for i, op in enumerate(data["ops"]):
-        tile, t = sched[i]
-        x, y = xy.get(tile, (None, None))
+        tile, time_step = sched[i]
+        x, y = tile_xy.get(tile, (None, None))
         placements.append({
             "id": i, "class": op["class"], "tile": tile, "x": x, "y": y,
-            "time_step": t, "index_per_ii": t % ii, "invalid_iterations": t // ii,
+            "time_step": time_step,
+            "index_per_ii": time_step % ii, "invalid_iterations": time_step // ii,
         })
     out = {"compiled_ii": ii, "num_tiles": data["arch"]["num_tiles"],
            "placements": placements}
@@ -243,16 +307,19 @@ def emit_mapping(data, sched, ii, path, routes=None):
         # tile across cycles => a register hold). The backend importer replays
         # exactly this path instead of greedily re-routing, so it reproduces the
         # solver's joint routing even on large kernels.
-        out["routes"] = [{"s": s, "d": d,
-                          "path": [[tl, c] for (tl, c) in routes[(s, d)]]}
-                         for (s, d) in sorted(routes)]
+        out["routes"] = [{"s": src, "d": dst,
+                          "path": [[tile, cycle] for (tile, cycle) in routes[(src, dst)]]}
+                         for (src, dst) in sorted(routes)]
     json.dump(out, open(path, "w"), indent=1)
-    nroutes = len(routes) if routes is not None else 0
-    print(f"[emit] wrote real mapping ({len(placements)} ops, {nroutes} routes, "
+    num_routes = len(routes) if routes is not None else 0
+    print(f"[emit] wrote real mapping ({len(placements)} ops, {num_routes} routes, "
           f"II={ii}) -> {path}", file=sys.stderr)
 
 
 def main():
+    # Driver: climb II from min to max; the first II whose schedule AND routing
+    # are both feasible is the answer. --emit writes that mapping; --fallback and
+    # --emit-cap trade a possibly-larger II for a bounded solve time (see below).
     ap = argparse.ArgumentParser()
     ap.add_argument("json")
     ap.add_argument("--min-ii", type=int, default=1)
@@ -287,7 +354,7 @@ def main():
         sched = schedule(data, ii, solve_seconds, hops, minimize_routing)
         if sched is None:
             if a.v: print(f"  II={ii}: schedule infeasible", file=sys.stderr)
-            continue
+            continue                            # II provably too small; try II+1
         if sched == "unknown":
             # Solver could not settle this II within the time budget.
             if a.fallback:

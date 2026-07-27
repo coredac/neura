@@ -36,23 +36,6 @@ using namespace mlir::neura;
 
 namespace {
 
-// True if the op occupies a tile/FU (i.e. must be placed), as opposed to a
-// routing/structural op or a fused-region interior op.
-bool isMaterializedOp(Operation *op) {
-  if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(op)) {
-    return false;
-  }
-  if (is_non_materialized(op)) { // reserve / data_mov / ctrl_mov / yield
-    return false;
-  }
-  if (Operation *parent = op->getParentOp()) {
-    if (isa<neura::FusedOp>(parent)) {
-      return false;
-    }
-  }
-  return true;
-}
-
 // Inverse of kFuTypesToOperations: OperationKind -> FU class name.
 const std::map<OperationKind, std::string> &kindToFuClassTable() {
   static const std::map<OperationKind, std::string> table = [] {

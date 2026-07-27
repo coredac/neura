@@ -12,6 +12,12 @@ OperationKind getOperationKindFromMlirOp(Operation *op);
 // Returns true if the operation does not need CGRA tile placement.
 bool is_non_materialized(Operation *op);
 
+// Returns true if the op occupies a tile/FU and must be placed (not a
+// routing/structural op or a fused-region interior). Shared by DumpDfgJsonPass
+// (which emits these ops in walk order) and MapToAcceleratorPass's
+// import-mapping (which replays onto them), so their op indices stay aligned.
+bool isMaterializedOp(Operation *op);
+
 // Returns true if the operation is a steering-mode operation that doesn't
 // require DataMovOp wrapping (e.g., constants, carry, invariant, etc.).
 bool is_steering_unwrapped_op(Operation *op);

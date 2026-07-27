@@ -226,25 +226,16 @@ struct MapToAcceleratorPass
   using RouteMap = std::map<std::pair<int, int>, std::vector<RouteHop>>;
 
   // Materialized ops in the SAME order --dump-dfg-json emits them, so the i-th
-  // op here corresponds to placements[i] of the exact-mapper JSON. Mirrors
-  // DumpDfgJsonPass::isMaterializedOp exactly (skip structural/routing ops and
-  // fused-region interiors).
+  // op here corresponds to placements[i] of the exact-mapper JSON. Uses the
+  // shared neura::isMaterializedOp (the exact predicate DumpDfgJsonPass emits
+  // with) so the two indexings cannot drift apart.
   static std::vector<Operation *>
   collectMaterializedInDumpOrder(Region &region) {
     std::vector<Operation *> materialized;
     region.walk([&](Operation *walked) {
-      if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(walked)) {
-        return;
+      if (isMaterializedOp(walked)) {
+        materialized.push_back(walked);
       }
-      if (is_non_materialized(walked)) {
-        return;
-      }
-      if (Operation *parent = walked->getParentOp()) {
-        if (isa<neura::FusedOp>(parent)) {
-          return;
-        }
-      }
-      materialized.push_back(walked);
     });
     return materialized;
   }
@@ -332,11 +323,20 @@ struct MapToAcceleratorPass
     return true;
   }
 
-  // Places every materialized op at its imported tile/time and lets the
-  // existing router (placeAndRoute) wire the operands. The IR must be the same
-  // lowered form --dump-dfg-json consumed, so op i <-> placements[i]. Returns
-  // false (leaving diagnostics) if the op count disagrees or any op fails to
-  // place/route -- e.g. a greedy routing conflict the joint solver avoided.
+  // Placement-only fallback: bind every op at its imported tile/time and let
+  // the existing greedy router (placeAndRoute) wire the operands.
+  //
+  // NOTE: currently unexercised. It runs only when the imported JSON has NO
+  // "routes" array, but the exact mapper always emits routes with --emit (and
+  // its II+1 fallback guarantees a routable solution is found), so the normal
+  // flow always takes placeImportedExact instead. Kept as a safety net for a
+  // hypothetical placement-only emit -- and because greedy re-routing can fail
+  // on large kernels where the joint solver would not, which is exactly why the
+  // exact-route path exists.
+  //
+  // The IR must be the same lowered form --dump-dfg-json consumed, so op i <->
+  // placements[i]. Returns false (leaving diagnostics) if the op count
+  // disagrees or any op fails to place/route.
   bool placeImportedSolution(Region &region, const Architecture &architecture,
                              const std::vector<ImportedPlace> &places,
                              MappingState &mapping_state) {
@@ -702,8 +702,10 @@ struct MapToAcceleratorPass
                    << " routes, II=" << imported_ii << ") from "
                    << importMapping.getValue() << "\n";
       MappingState mapping_state(architecture, imported_ii, is_spatial_only);
-      // With exact routes, replay them (reproduces the solver's joint routing);
-      // otherwise fall back to greedy re-routing of the imported placement.
+      // With exact routes, replay them (reproduces the solver's joint routing).
+      // The routes.empty() branch is the placement-only fallback and is not hit
+      // by the current emit, which always carries routes (see
+      // placeImportedSolution).
       bool placed = routes.empty()
                         ? placeImportedSolution(region, architecture, places,
                                                 mapping_state)
@@ -718,7 +720,6 @@ struct MapToAcceleratorPass
       return false;
     }
 
-    // assert(false);
     for (int ii = possible_min_ii; ii <= max_ii; ++ii) {
       llvm::errs() << "[MapToAcceleratorPass] Start mapping with target II of "
                    << ii << "\n";

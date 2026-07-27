@@ -135,6 +135,27 @@ bool is_non_materialized(Operation *op) {
                    neura::YieldOp>(op);
 }
 
+// Returns true if the op occupies a tile/FU (i.e. must be placed), as opposed
+// to a routing/structural op or a fused-region interior op. This is the single
+// source of truth for "which ops the exact mapper places": --dump-dfg-json
+// emits exactly these (in walk order) and --import-mapping replays onto exactly
+// these, so op index i lines up on both sides. Keep them sharing this one
+// definition -- if the two ever diverge, placements bind to the wrong ops.
+bool isMaterializedOp(Operation *op) {
+  if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(op)) {
+    return false;
+  }
+  if (is_non_materialized(op)) { // reserve / data_mov / ctrl_mov / yield
+    return false;
+  }
+  if (Operation *parent = op->getParentOp()) {
+    if (isa<neura::FusedOp>(parent)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 } // namespace neura
 } // namespace mlir
 
