@@ -81,8 +81,9 @@ struct CostModelAnalyticalPass
   // like --map-to-accelerator so predictions can be compared per CGRA shape.
   std::unique_ptr<Architecture>
   buildCustomArch(const Architecture &global_arch) {
-    if (x_tiles.getValue() <= 0 || y_tiles.getValue() <= 0)
+    if (x_tiles.getValue() <= 0 || y_tiles.getValue() <= 0) {
       return nullptr;
+    }
     std::vector<TileOverride> overrides;
     if (!valid_tiles.getValue().empty()) {
       // applyTileOverrides can only REMOVE tiles (existence=false), not re-add
@@ -94,11 +95,12 @@ struct CostModelAnalyticalPass
         auto parts = coord.split('_');
         int x, y;
         if (!parts.first.getAsInteger(10, x) &&
-            !parts.second.getAsInteger(10, y))
+            !parts.second.getAsInteger(10, y)) {
           valid_coords.insert({x, y});
+        }
       }
-      for (int y = 0; y < y_tiles.getValue(); ++y)
-        for (int x = 0; x < x_tiles.getValue(); ++x)
+      for (int y = 0; y < y_tiles.getValue(); ++y) {
+        for (int x = 0; x < x_tiles.getValue(); ++x) {
           if (!valid_coords.count({x, y})) {
             TileOverride tile_override;
             tile_override.tile_x = x;
@@ -106,6 +108,8 @@ struct CostModelAnalyticalPass
             tile_override.existence = false;
             overrides.push_back(tile_override);
           }
+        }
+      }
     }
     return global_arch.cloneWithNewDimensions(y_tiles.getValue(),
                                               x_tiles.getValue(), overrides);
@@ -140,14 +144,16 @@ struct CostModelAnalyticalPass
 
     int num_processed = 0;
     auto process = [&](Operation *op, Region &region, StringRef name) {
-      if (region.empty())
+      if (region.empty()) {
         return;
+      }
       AnalyticalIIBreakdown breakdown = computeAnalyticalII(region, arch);
       llvm::errs() << "[cost-model-analytical] region=" << name
                    << " tiles=" << arch.getNumTiles() << "\n";
       breakdown.print(llvm::errs());
-      if (write_attr.getValue())
+      if (write_attr.getValue()) {
         writeAttr(op, breakdown);
+      }
       ++num_processed;
     };
 
@@ -172,12 +178,15 @@ struct CostModelAnalyticalPass
     // Fallback: no op is explicitly tagged for the accelerator (e.g. a
     // hand-written regression kernel). Process every non-empty func so the
     // model is still usable standalone.
-    if (!any_accel)
-      module.walk(
-          [&](func::FuncOp func) { process(func, func.getBody(), func.getName()); });
+    if (!any_accel) {
+      module.walk([&](func::FuncOp func) {
+        process(func, func.getBody(), func.getName());
+      });
+    }
 
-    if (num_processed == 0)
+    if (num_processed == 0) {
       llvm::errs() << "[cost-model-analytical] no regions processed\n";
+    }
   }
 };
 

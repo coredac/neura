@@ -31,34 +31,35 @@ namespace neura {
 // A single resource lower bound with the raw quantities that produced it, so
 // the contribution of every term is explainable / printable.
 struct IIBound {
-  int value = 1;             // ceil(demand / capacity), floored at 1.
-  long long demand = 0;      // numerator (work / accesses / moves / live vals).
-  long long capacity = 1;    // denominator (FU count / ports / links / regs).
-  std::string detail;        // human-readable dominant sub-term (e.g. FU class).
+  int value = 1;          // ceil(demand / capacity), floored at 1.
+  long long demand = 0;   // numerator (work / accesses / moves / live vals).
+  long long capacity = 1; // denominator (FU count / ports / links / regs).
+  std::string detail;     // human-readable dominant sub-term (e.g. FU class).
 };
 
 // Full per-bound breakdown of the analytical II prediction for one region.
 struct AnalyticalIIBreakdown {
-  IIBound res;    // ResMII   — per-FU-class functional-unit throughput.
-  IIBound rec;    // RecMII   — loop-carried recurrence latency / distance.
-  IIBound mem;    // MemMII   — load/store port + memory-FU contention.
-  IIBound route;  // RouteMII — routed edge demand vs link capacity.
-  IIBound reg;    // RegMII   — simultaneously-live values vs register capacity.
-  IIBound issue;  // IssueMII — tile issue-slot occupancy.
+  IIBound res;   // ResMII   — per-FU-class functional-unit throughput.
+  IIBound rec;   // RecMII   — loop-carried recurrence latency / distance.
+  IIBound mem;   // MemMII   — load/store port + memory-FU contention.
+  IIBound route; // RouteMII — routed edge demand vs link capacity.
+  IIBound reg;   // RegMII   — simultaneously-live values vs register capacity.
+  IIBound issue; // IssueMII — tile issue-slot occupancy.
 
-  int final_ii = 1;          // clamp(max(all bounds), 1, max_ii).
-  int max_ii = 0;            // architecture II ceiling (ctrl_mem_items).
-  bool clamped = false;      // true if max(bounds) exceeded max_ii.
-  std::string dominant;      // name of the bound equal to final_ii.
+  int final_ii = 1;     // clamp(max(all bounds), 1, max_ii).
+  int max_ii = 0;       // architecture II ceiling (ctrl_mem_items).
+  bool clamped = false; // true if max(bounds) exceeded max_ii.
+  std::string dominant; // name of the bound equal to final_ii.
 
   // Prints the structured diagnostic block:
   //   [cost-model-analytical]
-  //   res_mii=..  rec_mii=..  mem_mii=..  route_mii=..  reg_mii=..  issue_mii=..
+  //   res_mii=..  rec_mii=..  mem_mii=..  route_mii=..  reg_mii=.. issue_mii=..
   //   final_ii=..  (dominant=..)
   void print(llvm::raw_ostream &os) const;
 };
 
-// ===-- Individual bounds (each independently testable) --=================== //
+// ===-- Individual bounds (each independently testable) --===================
+// //
 
 // ResMII: partitions materialized ops by FU class (add/mul/mem/cmp/... per
 // kFuTypesToOperations), weights each by its execution latency, and divides by

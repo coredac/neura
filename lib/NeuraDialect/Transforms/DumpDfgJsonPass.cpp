@@ -39,13 +39,17 @@ namespace {
 // True if the op occupies a tile/FU (i.e. must be placed), as opposed to a
 // routing/structural op or a fused-region interior op.
 bool isMaterializedOp(Operation *op) {
-  if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(op))
+  if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(op)) {
     return false;
-  if (is_non_materialized(op)) // reserve / data_mov / ctrl_mov / yield
+  }
+  if (is_non_materialized(op)) { // reserve / data_mov / ctrl_mov / yield
     return false;
-  if (Operation *parent = op->getParentOp())
-    if (isa<neura::FusedOp>(parent))
+  }
+  if (Operation *parent = op->getParentOp()) {
+    if (isa<neura::FusedOp>(parent)) {
       return false;
+    }
+  }
   return true;
 }
 
@@ -53,33 +57,41 @@ bool isMaterializedOp(Operation *op) {
 const std::map<OperationKind, std::string> &kindToFuClassTable() {
   static const std::map<OperationKind, std::string> table = [] {
     std::map<OperationKind, std::string> inverse;
-    for (const auto &[fu_class_name, kinds] : kFuTypesToOperations)
-      for (OperationKind kind : kinds)
+    for (const auto &[fu_class_name, kinds] : kFuTypesToOperations) {
+      for (OperationKind kind : kinds) {
         inverse[kind] = fu_class_name;
+      }
+    }
     return inverse;
   }();
   return table;
 }
 
 std::string fuClassOf(Operation *op) {
-  if (isa<neura::FusedOp>(op))
-    if (auto pattern_name = op->getAttrOfType<StringAttr>("pattern_name"))
+  if (isa<neura::FusedOp>(op)) {
+    if (auto pattern_name = op->getAttrOfType<StringAttr>("pattern_name")) {
       return pattern_name.getValue().str();
+    }
+  }
   auto found = kindToFuClassTable().find(getOperationKindFromMlirOp(op));
   return found == kindToFuClassTable().end() ? "other" : found->second;
 }
 
-// Safe materialized-producer unwrap (does not assert like getMaterializedProducer).
+// Safe materialized-producer unwrap (does not assert like
+// getMaterializedProducer).
 Operation *materializedProducer(Value value) {
   Operation *producer = value.getDefiningOp();
-  if (!producer)
+  if (!producer) {
     return nullptr;
-  if (isa<neura::ReserveOp>(producer))
+  }
+  if (isa<neura::ReserveOp>(producer)) {
     return nullptr; // loop-carried placeholder; handled via ctrl_mov edges.
+  }
   if (auto move = dyn_cast<neura::DataMovOp>(producer)) {
     Operation *inner_producer = move.getOperand().getDefiningOp();
-    if (inner_producer && !isa<neura::ReserveOp>(inner_producer))
+    if (inner_producer && !isa<neura::ReserveOp>(inner_producer)) {
       return inner_producer;
+    }
     return nullptr;
   }
   return producer;
@@ -114,9 +126,11 @@ struct DumpDfgJsonPass
       llvm::cl::desc("Comma-separated tile coords (x_y) for non-rect shapes."),
       llvm::cl::init("")};
 
-  std::unique_ptr<Architecture> buildCustomArch(const Architecture &global_arch) {
-    if (x_tiles.getValue() <= 0 || y_tiles.getValue() <= 0)
+  std::unique_ptr<Architecture>
+  buildCustomArch(const Architecture &global_arch) {
+    if (x_tiles.getValue() <= 0 || y_tiles.getValue() <= 0) {
       return nullptr;
+    }
     std::vector<TileOverride> overrides;
     if (!valid_tiles.getValue().empty()) {
       // applyTileOverrides can only REMOVE tiles (existence=false); it cannot
@@ -129,11 +143,12 @@ struct DumpDfgJsonPass
         auto parts = coord.split('_');
         int x, y;
         if (!parts.first.getAsInteger(10, x) &&
-            !parts.second.getAsInteger(10, y))
+            !parts.second.getAsInteger(10, y)) {
           valid_coords.insert({x, y});
+        }
       }
-      for (int y = 0; y < y_tiles.getValue(); ++y)
-        for (int x = 0; x < x_tiles.getValue(); ++x)
+      for (int y = 0; y < y_tiles.getValue(); ++y) {
+        for (int x = 0; x < x_tiles.getValue(); ++x) {
           if (!valid_coords.count({x, y})) {
             TileOverride tile_override;
             tile_override.tile_x = x;
@@ -141,6 +156,8 @@ struct DumpDfgJsonPass
             tile_override.existence = false;
             overrides.push_back(tile_override);
           }
+        }
+      }
     }
     return global_arch.cloneWithNewDimensions(y_tiles.getValue(),
                                               x_tiles.getValue(), overrides);
@@ -163,29 +180,35 @@ struct DumpDfgJsonPass
     };
     std::vector<Edge> edges;
     // Forward (intra-iteration) edges, omega=0.
-    for (Operation *consumer : materialized_ops)
+    for (Operation *consumer : materialized_ops) {
       for (Value operand : consumer->getOperands()) {
         Operation *producer = materializedProducer(operand);
-        if (producer && op_id.count(producer))
+        if (producer && op_id.count(producer)) {
           edges.push_back({op_id[producer], op_id[consumer], 0});
+        }
       }
+    }
     // Loop-carried edges, omega=1: producer of a ctrl_mov's value -> users of
     // the reserve it targets. Represents value[i] feeding the placeholder for
     // iteration i+1.
     region.walk([&](neura::CtrlMovOp ctrl_mov) {
       Operation *producer = materializedProducer(ctrl_mov.getValue());
       auto reserve = ctrl_mov.getTarget().getDefiningOp<neura::ReserveOp>();
-      if (!producer || !op_id.count(producer) || !reserve)
+      if (!producer || !op_id.count(producer) || !reserve) {
         return;
+      }
       for (Operation *user : reserve.getResult().getUsers()) {
         Operation *materialized_user = user;
         if (is_non_materialized(user)) {
-          for (Operation *router_user : user->getUsers())
-            if (op_id.count(router_user))
+          for (Operation *router_user : user->getUsers()) {
+            if (op_id.count(router_user)) {
               materialized_user = router_user;
+            }
+          }
         }
-        if (op_id.count(materialized_user))
+        if (op_id.count(materialized_user)) {
           edges.push_back({op_id[producer], op_id[materialized_user], 1});
+        }
       }
     });
 
@@ -204,14 +227,17 @@ struct DumpDfgJsonPass
     os << "],\n    \"fu_class_tiles\": {";
     bool first_class = true;
     for (const auto &[fu_class_name, kinds] : kFuTypesToOperations) {
-      if (kinds.empty())
+      if (kinds.empty()) {
         continue;
+      }
       OperationKind probe_kind = kinds.front();
       std::string tile_id_list;
-      for (Tile *tile : tiles)
-        if (tile->canSupportOperation(probe_kind))
+      for (Tile *tile : tiles) {
+        if (tile->canSupportOperation(probe_kind)) {
           tile_id_list += (tile_id_list.empty() ? "" : ", ") +
                           std::to_string(tile->getId());
+        }
+      }
       os << (first_class ? "" : ", ") << "\"" << fu_class_name << "\": ["
          << tile_id_list << "]";
       first_class = false;
@@ -227,14 +253,16 @@ struct DumpDfgJsonPass
 
     // Ops.
     os << "  \"ops\": [";
-    for (size_t i = 0; i < materialized_ops.size(); ++i)
+    for (size_t i = 0; i < materialized_ops.size(); ++i) {
       os << (i ? ", " : "") << "{\"id\": " << i << ", \"class\": \""
          << fuClassOf(materialized_ops[i]) << "\", \"latency\": "
          << std::max(1, getOpLatency(materialized_ops[i])) << "}";
+    }
     os << "],\n  \"edges\": [";
-    for (size_t i = 0; i < edges.size(); ++i)
-      os << (i ? ", " : "") << "{\"s\": " << edges[i].src << ", \"d\": "
-         << edges[i].dst << ", \"w\": " << edges[i].omega << "}";
+    for (size_t i = 0; i < edges.size(); ++i) {
+      os << (i ? ", " : "") << "{\"s\": " << edges[i].src
+         << ", \"d\": " << edges[i].dst << ", \"w\": " << edges[i].omega << "}";
+    }
     os << "]\n}\n";
   }
 
@@ -252,17 +280,19 @@ struct DumpDfgJsonPass
         emitted = true;
       }
     };
-    module.walk([&](neura::KernelOp kernel) { tryEmit(kernel, kernel.getBody()); });
+    module.walk(
+        [&](neura::KernelOp kernel) { tryEmit(kernel, kernel.getBody()); });
     module.walk([&](func::FuncOp func) { tryEmit(func, func.getBody()); });
     // Fallback: nothing tagged for the accelerator -> emit the first non-empty
     // func so a hand-written kernel still works standalone.
-    if (!emitted)
+    if (!emitted) {
       module.walk([&](func::FuncOp func) {
         if (!emitted && !func.getBody().empty()) {
           emitRegion(func.getBody(), arch, llvm::outs());
           emitted = true;
         }
       });
+    }
   }
 };
 } // namespace

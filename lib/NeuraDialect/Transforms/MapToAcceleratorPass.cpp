@@ -95,12 +95,13 @@ struct MapToAcceleratorPass
       llvm::cl::init("")};
   Option<std::string> importMapping{
       *this, "import-mapping",
-      llvm::cl::desc("Path to an exact-mapper placement JSON (op index -> tile "
-                     "+ time_step, produced by exact_mapper_cpsat.py --emit). "
-                     "When set, the search is skipped: each materialized op is "
-                     "placed at its given tile/time and the existing router "
-                     "wires the operands, reproducing the exact optimal II. The "
-                     "op order must match --dump-dfg-json (same lowered IR)."),
+      llvm::cl::desc(
+          "Path to an exact-mapper placement JSON (op index -> tile "
+          "+ time_step, produced by exact_mapper_cpsat.py --emit). "
+          "When set, the search is skipped: each materialized op is "
+          "placed at its given tile/time and the existing router "
+          "wires the operands, reproducing the exact optimal II. The "
+          "op order must match --dump-dfg-json (same lowered IR)."),
       llvm::cl::init("")};
 
   // Configures mapping strategy and mode based on command-line options.
@@ -218,26 +219,31 @@ struct MapToAcceleratorPass
     int tile;
     int cycle;
   };
-  // Concrete routes keyed by (producer op index, consumer op index). Each is the
-  // ordered tile/cycle path the value travels (producer tile first). Present
-  // only when the emit carries exact routes; then the importer replays them
-  // instead of greedily re-routing.
+  // Concrete routes keyed by (producer op index, consumer op index). Each is
+  // the ordered tile/cycle path the value travels (producer tile first).
+  // Present only when the emit carries exact routes; then the importer replays
+  // them instead of greedily re-routing.
   using RouteMap = std::map<std::pair<int, int>, std::vector<RouteHop>>;
 
   // Materialized ops in the SAME order --dump-dfg-json emits them, so the i-th
   // op here corresponds to placements[i] of the exact-mapper JSON. Mirrors
   // DumpDfgJsonPass::isMaterializedOp exactly (skip structural/routing ops and
   // fused-region interiors).
-  static std::vector<Operation *> collectMaterializedInDumpOrder(Region &region) {
+  static std::vector<Operation *>
+  collectMaterializedInDumpOrder(Region &region) {
     std::vector<Operation *> materialized;
     region.walk([&](Operation *walked) {
-      if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(walked))
+      if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(walked)) {
         return;
-      if (is_non_materialized(walked))
+      }
+      if (is_non_materialized(walked)) {
         return;
-      if (Operation *parent = walked->getParentOp())
-        if (isa<neura::FusedOp>(parent))
+      }
+      if (Operation *parent = walked->getParentOp()) {
+        if (isa<neura::FusedOp>(parent)) {
           return;
+        }
+      }
       materialized.push_back(walked);
     });
     return materialized;
@@ -291,30 +297,34 @@ struct MapToAcceleratorPass
         err = "placement id out of range";
         return false;
       }
-      places[*id] = ImportedPlace{static_cast<int>(*tile),
-                                  static_cast<int>(*time_step)};
+      places[*id] =
+          ImportedPlace{static_cast<int>(*tile), static_cast<int>(*time_step)};
     }
     // Optional exact routes.
     if (llvm::json::Array *route_arr = root->getArray("routes")) {
       for (llvm::json::Value &entry : *route_arr) {
         llvm::json::Object *record = entry.getAsObject();
-        if (!record)
+        if (!record) {
           continue;
+        }
         std::optional<int64_t> s = record->getInteger("s");
         std::optional<int64_t> d = record->getInteger("d");
         llvm::json::Array *path = record->getArray("path");
-        if (!s || !d || !path)
+        if (!s || !d || !path) {
           continue;
+        }
         std::vector<RouteHop> hops;
         for (llvm::json::Value &node : *path) {
           llvm::json::Array *pair = node.getAsArray();
-          if (!pair || pair->size() != 2)
+          if (!pair || pair->size() != 2) {
             continue;
+          }
           std::optional<int64_t> tl = (*pair)[0].getAsInteger();
           std::optional<int64_t> cy = (*pair)[1].getAsInteger();
-          if (tl && cy)
+          if (tl && cy) {
             hops.push_back(
                 RouteHop{static_cast<int>(*tl), static_cast<int>(*cy)});
+          }
         }
         routes[{static_cast<int>(*s), static_cast<int>(*d)}] = std::move(hops);
       }
@@ -333,16 +343,18 @@ struct MapToAcceleratorPass
     std::vector<Operation *> materialized =
         collectMaterializedInDumpOrder(region);
     if (materialized.size() != places.size()) {
-      llvm::errs() << "[MapToAcceleratorPass] import-mapping op-count mismatch: "
-                   << materialized.size() << " materialized ops vs "
-                   << places.size() << " placements. The JSON must come from "
-                   << "--dump-dfg-json on this exact lowered IR.\n";
+      llvm::errs()
+          << "[MapToAcceleratorPass] import-mapping op-count mismatch: "
+          << materialized.size() << " materialized ops vs " << places.size()
+          << " placements. The JSON must come from "
+          << "--dump-dfg-json on this exact lowered IR.\n";
       return false;
     }
     // tile id -> tile resource, so an imported tile id becomes a MappingLoc.
     llvm::DenseMap<int, Tile *> tile_by_id;
-    for (Tile *tile : architecture.getAllTiles())
+    for (Tile *tile : architecture.getAllTiles()) {
       tile_by_id[tile->getId()] = tile;
+    }
 
     for (size_t i = 0; i < materialized.size(); ++i) {
       Operation *op = materialized[i];
@@ -368,9 +380,9 @@ struct MapToAcceleratorPass
   // Turns one emitted route (ordered tile/cycle hops) into a MappingLoc path of
   // links and registers, the form MappingState::reserveRoute expects. Same-tile
   // runs become a register hold (one register for the whole run); a tile change
-  // becomes the link between the two tiles. Returns false if a link/register the
-  // route needs is unavailable (should not happen -- the solver already proved
-  // the routing feasible under the same resource limits).
+  // becomes the link between the two tiles. Returns false if a link/register
+  // the route needs is unavailable (should not happen -- the solver already
+  // proved the routing feasible under the same resource limits).
   bool buildRoutePath(const std::vector<RouteHop> &hops,
                       llvm::DenseMap<int, Tile *> &tile_by_id,
                       MappingState &mapping_state, neura::DataMovOp mov_op,
@@ -380,8 +392,9 @@ struct MapToAcceleratorPass
       if (hops[k].tile == hops[k + 1].tile) {
         // Maximal same-tile run -> a single register holds the value across it.
         size_t j = k;
-        while (j + 1 < hops.size() && hops[j + 1].tile == hops[k].tile)
+        while (j + 1 < hops.size() && hops[j + 1].tile == hops[k].tile) {
           ++j;
+        }
         Tile *tile = tile_by_id[hops[k].tile];
         int c_start = hops[k].cycle, c_end = hops[j].cycle; // exclusive
         Register *reg =
@@ -392,18 +405,20 @@ struct MapToAcceleratorPass
                        << ")\n";
           return false;
         }
-        for (int c = c_start; c < c_end; ++c)
+        for (int c = c_start; c < c_end; ++c) {
           out.push_back(MappingLoc{reg, c});
+        }
         k = j;
       } else {
         // Tile change -> the link between the two tiles at this cycle.
         Tile *src = tile_by_id[hops[k].tile];
         Link *link = nullptr;
-        for (Link *candidate : src->getOutLinks())
+        for (Link *candidate : src->getOutLinks()) {
           if (candidate->getDstTile()->getId() == hops[k + 1].tile) {
             link = candidate;
             break;
           }
+        }
         if (!link) {
           llvm::errs() << "[MapToAcceleratorPass] no link " << hops[k].tile
                        << "->" << hops[k + 1].tile << "\n";
@@ -416,27 +431,31 @@ struct MapToAcceleratorPass
     return true;
   }
 
-  // Exact-route import: bind every op at its tile/time, then reserve the SOLVER'S
-  // route for every value move (instead of greedily re-routing). Because the
-  // routes are the joint solution, this reproduces the optimal mapping even on
-  // large kernels where greedy per-net routing gets stuck. Binding is done in a
-  // first pass so every producer location exists before routes are reserved.
+  // Exact-route import: bind every op at its tile/time, then reserve the
+  // SOLVER'S route for every value move (instead of greedily re-routing).
+  // Because the routes are the joint solution, this reproduces the optimal
+  // mapping even on large kernels where greedy per-net routing gets stuck.
+  // Binding is done in a first pass so every producer location exists before
+  // routes are reserved.
   bool placeImportedExact(Region &region, const Architecture &architecture,
                           const std::vector<ImportedPlace> &places,
                           const RouteMap &routes, MappingState &mapping_state) {
     std::vector<Operation *> materialized =
         collectMaterializedInDumpOrder(region);
     if (materialized.size() != places.size()) {
-      llvm::errs() << "[MapToAcceleratorPass] import-mapping op-count mismatch: "
-                   << materialized.size() << " vs " << places.size() << "\n";
+      llvm::errs()
+          << "[MapToAcceleratorPass] import-mapping op-count mismatch: "
+          << materialized.size() << " vs " << places.size() << "\n";
       return false;
     }
     llvm::DenseMap<int, Tile *> tile_by_id;
-    for (Tile *tile : architecture.getAllTiles())
+    for (Tile *tile : architecture.getAllTiles()) {
       tile_by_id[tile->getId()] = tile;
+    }
     llvm::DenseMap<Operation *, int> op_index;
-    for (size_t i = 0; i < materialized.size(); ++i)
+    for (size_t i = 0; i < materialized.size(); ++i) {
       op_index[materialized[i]] = (int)i;
+    }
 
     // Pass 1: bind every op at its imported tile/time.
     for (size_t i = 0; i < materialized.size(); ++i) {
@@ -469,10 +488,12 @@ struct MapToAcceleratorPass
       }
       std::vector<MappingLoc> path;
       if (!buildRoutePath(it->second, tile_by_id, mapping_state,
-                          dyn_cast<neura::DataMovOp>(mov), path))
+                          dyn_cast<neura::DataMovOp>(mov), path)) {
         return false;
-      if (!path.empty())
+      }
+      if (!path.empty()) {
         mapping_state.reserveRoute(mov, path);
+      }
       return true;
     };
     for (size_t i = 0; i < materialized.size(); ++i) {
@@ -480,26 +501,33 @@ struct MapToAcceleratorPass
       // Forward operand moves.
       for (Value operand : op->getOperands()) {
         Operation *def = operand.getDefiningOp();
-        if (!def || isa<neura::ReserveOp>(def))
+        if (!def || isa<neura::ReserveOp>(def)) {
           continue; // loop-carried placeholder handled via ctrl_mov below.
-        if (!isa<neura::DataMovOp>(def))
+        }
+        if (!isa<neura::DataMovOp>(def)) {
           continue;
+        }
         Operation *producer = getMaterializedProducer(operand);
-        if (!producer || !op_index.count(producer))
+        if (!producer || !op_index.count(producer)) {
           continue;
-        if (!reserve(def, op_index[producer], (int)i))
+        }
+        if (!reserve(def, op_index[producer], (int)i)) {
           return false;
+        }
       }
       // Backward (loop-carried) moves: op -> phi/reserve via ctrl_mov.
       for (Operation *user : getCtrlMovUsers(op)) {
         auto ctrl_mov = dyn_cast<neura::CtrlMovOp>(user);
-        if (!ctrl_mov)
+        if (!ctrl_mov) {
           continue;
+        }
         Operation *backward = getMaterializedBackwardUser(ctrl_mov);
-        if (!backward || !op_index.count(backward))
+        if (!backward || !op_index.count(backward)) {
           continue;
-        if (!reserve(ctrl_mov, (int)i, op_index[backward]))
+        }
+        if (!reserve(ctrl_mov, (int)i, op_index[backward])) {
           return false;
+        }
       }
     }
     return true;
@@ -651,8 +679,7 @@ struct MapToAcceleratorPass
       mapping_attrs.push_back(
           NamedAttribute(StringAttr::get(ctx, attr::kResMII),
                          IntegerAttr::get(IntegerType::get(ctx, 32), res_mii)));
-      op->setAttr(attr::kMappingInfo,
-                  DictionaryAttr::get(ctx, mapping_attrs));
+      op->setAttr(attr::kMappingInfo, DictionaryAttr::get(ctx, mapping_attrs));
     };
 
     // Imported exact solution: skip the search, place each materialized op at
