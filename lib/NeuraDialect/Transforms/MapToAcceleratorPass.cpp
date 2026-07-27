@@ -213,6 +213,17 @@ struct MapToAcceleratorPass
     int time_step;
   };
 
+  // One hop of a value's concrete route: the tile it occupies and the cycle.
+  struct RouteHop {
+    int tile;
+    int cycle;
+  };
+  // Concrete routes keyed by (producer op index, consumer op index). Each is the
+  // ordered tile/cycle path the value travels (producer tile first). Present
+  // only when the emit carries exact routes; then the importer replays them
+  // instead of greedily re-routing.
+  using RouteMap = std::map<std::pair<int, int>, std::vector<RouteHop>>;
+
   // Materialized ops in the SAME order --dump-dfg-json emits them, so the i-th
   // op here corresponds to placements[i] of the exact-mapper JSON. Mirrors
   // DumpDfgJsonPass::isMaterializedOp exactly (skip structural/routing ops and
@@ -232,10 +243,11 @@ struct MapToAcceleratorPass
     return materialized;
   }
 
-  // Parses an exact-mapper emit (compiled_ii + placements[{id,tile,time_step}]).
+  // Parses an exact-mapper emit (compiled_ii + placements[{id,tile,time_step}]
+  // and optional routes[{s,d,path}]).
   static bool parseImportedMapping(StringRef path, int &imported_ii,
                                    std::vector<ImportedPlace> &places,
-                                   std::string &err) {
+                                   RouteMap &routes, std::string &err) {
     auto buffer = llvm::MemoryBuffer::getFile(path);
     if (!buffer) {
       err = "cannot open " + path.str();
@@ -282,6 +294,31 @@ struct MapToAcceleratorPass
       places[*id] = ImportedPlace{static_cast<int>(*tile),
                                   static_cast<int>(*time_step)};
     }
+    // Optional exact routes.
+    if (llvm::json::Array *route_arr = root->getArray("routes")) {
+      for (llvm::json::Value &entry : *route_arr) {
+        llvm::json::Object *record = entry.getAsObject();
+        if (!record)
+          continue;
+        std::optional<int64_t> s = record->getInteger("s");
+        std::optional<int64_t> d = record->getInteger("d");
+        llvm::json::Array *path = record->getArray("path");
+        if (!s || !d || !path)
+          continue;
+        std::vector<RouteHop> hops;
+        for (llvm::json::Value &node : *path) {
+          llvm::json::Array *pair = node.getAsArray();
+          if (!pair || pair->size() != 2)
+            continue;
+          std::optional<int64_t> tl = (*pair)[0].getAsInteger();
+          std::optional<int64_t> cy = (*pair)[1].getAsInteger();
+          if (tl && cy)
+            hops.push_back(
+                RouteHop{static_cast<int>(*tl), static_cast<int>(*cy)});
+        }
+        routes[{static_cast<int>(*s), static_cast<int>(*d)}] = std::move(hops);
+      }
+    }
     return true;
   }
 
@@ -323,6 +360,146 @@ struct MapToAcceleratorPass
                      << places[i].tile_id << " t=" << places[i].time_step
                      << "\n";
         return false;
+      }
+    }
+    return true;
+  }
+
+  // Turns one emitted route (ordered tile/cycle hops) into a MappingLoc path of
+  // links and registers, the form MappingState::reserveRoute expects. Same-tile
+  // runs become a register hold (one register for the whole run); a tile change
+  // becomes the link between the two tiles. Returns false if a link/register the
+  // route needs is unavailable (should not happen -- the solver already proved
+  // the routing feasible under the same resource limits).
+  bool buildRoutePath(const std::vector<RouteHop> &hops,
+                      llvm::DenseMap<int, Tile *> &tile_by_id,
+                      MappingState &mapping_state, neura::DataMovOp mov_op,
+                      std::vector<MappingLoc> &out) {
+    size_t k = 0;
+    while (k + 1 < hops.size()) {
+      if (hops[k].tile == hops[k + 1].tile) {
+        // Maximal same-tile run -> a single register holds the value across it.
+        size_t j = k;
+        while (j + 1 < hops.size() && hops[j + 1].tile == hops[k].tile)
+          ++j;
+        Tile *tile = tile_by_id[hops[k].tile];
+        int c_start = hops[k].cycle, c_end = hops[j].cycle; // exclusive
+        Register *reg =
+            getAvailableRegister(mapping_state, tile, c_start, c_end, mov_op);
+        if (!reg) {
+          llvm::errs() << "[MapToAcceleratorPass] no free register on tile "
+                       << hops[k].tile << " for [" << c_start << "," << c_end
+                       << ")\n";
+          return false;
+        }
+        for (int c = c_start; c < c_end; ++c)
+          out.push_back(MappingLoc{reg, c});
+        k = j;
+      } else {
+        // Tile change -> the link between the two tiles at this cycle.
+        Tile *src = tile_by_id[hops[k].tile];
+        Link *link = nullptr;
+        for (Link *candidate : src->getOutLinks())
+          if (candidate->getDstTile()->getId() == hops[k + 1].tile) {
+            link = candidate;
+            break;
+          }
+        if (!link) {
+          llvm::errs() << "[MapToAcceleratorPass] no link " << hops[k].tile
+                       << "->" << hops[k + 1].tile << "\n";
+          return false;
+        }
+        out.push_back(MappingLoc{link, hops[k].cycle});
+        ++k;
+      }
+    }
+    return true;
+  }
+
+  // Exact-route import: bind every op at its tile/time, then reserve the SOLVER'S
+  // route for every value move (instead of greedily re-routing). Because the
+  // routes are the joint solution, this reproduces the optimal mapping even on
+  // large kernels where greedy per-net routing gets stuck. Binding is done in a
+  // first pass so every producer location exists before routes are reserved.
+  bool placeImportedExact(Region &region, const Architecture &architecture,
+                          const std::vector<ImportedPlace> &places,
+                          const RouteMap &routes, MappingState &mapping_state) {
+    std::vector<Operation *> materialized =
+        collectMaterializedInDumpOrder(region);
+    if (materialized.size() != places.size()) {
+      llvm::errs() << "[MapToAcceleratorPass] import-mapping op-count mismatch: "
+                   << materialized.size() << " vs " << places.size() << "\n";
+      return false;
+    }
+    llvm::DenseMap<int, Tile *> tile_by_id;
+    for (Tile *tile : architecture.getAllTiles())
+      tile_by_id[tile->getId()] = tile;
+    llvm::DenseMap<Operation *, int> op_index;
+    for (size_t i = 0; i < materialized.size(); ++i)
+      op_index[materialized[i]] = (int)i;
+
+    // Pass 1: bind every op at its imported tile/time.
+    for (size_t i = 0; i < materialized.size(); ++i) {
+      Operation *op = materialized[i];
+      auto found = tile_by_id.find(places[i].tile_id);
+      if (found == tile_by_id.end()) {
+        llvm::errs() << "[MapToAcceleratorPass] imported tile id "
+                     << places[i].tile_id << " not in architecture\n";
+        return false;
+      }
+      MappingLoc loc{found->second, places[i].time_step};
+      int latency = getOpLatency(op);
+      bool ok = latency > 1 ? mapping_state.bindMultiCycleOp(
+                                  loc.resource, loc.time_step, latency, op)
+                            : mapping_state.bindOp(loc, op);
+      if (!ok) {
+        llvm::errs() << "[MapToAcceleratorPass] failed to bind op #" << i
+                     << " at tile " << places[i].tile_id << "\n";
+        return false;
+      }
+    }
+
+    // Pass 2: reserve the exact route of every value move.
+    auto reserve = [&](Operation *mov, int producer_idx, int consumer_idx) {
+      auto it = routes.find({producer_idx, consumer_idx});
+      if (it == routes.end()) {
+        llvm::errs() << "[MapToAcceleratorPass] missing route " << producer_idx
+                     << "->" << consumer_idx << "\n";
+        return false;
+      }
+      std::vector<MappingLoc> path;
+      if (!buildRoutePath(it->second, tile_by_id, mapping_state,
+                          dyn_cast<neura::DataMovOp>(mov), path))
+        return false;
+      if (!path.empty())
+        mapping_state.reserveRoute(mov, path);
+      return true;
+    };
+    for (size_t i = 0; i < materialized.size(); ++i) {
+      Operation *op = materialized[i];
+      // Forward operand moves.
+      for (Value operand : op->getOperands()) {
+        Operation *def = operand.getDefiningOp();
+        if (!def || isa<neura::ReserveOp>(def))
+          continue; // loop-carried placeholder handled via ctrl_mov below.
+        if (!isa<neura::DataMovOp>(def))
+          continue;
+        Operation *producer = getMaterializedProducer(operand);
+        if (!producer || !op_index.count(producer))
+          continue;
+        if (!reserve(def, op_index[producer], (int)i))
+          return false;
+      }
+      // Backward (loop-carried) moves: op -> phi/reserve via ctrl_mov.
+      for (Operation *user : getCtrlMovUsers(op)) {
+        auto ctrl_mov = dyn_cast<neura::CtrlMovOp>(user);
+        if (!ctrl_mov)
+          continue;
+        Operation *backward = getMaterializedBackwardUser(ctrl_mov);
+        if (!backward || !op_index.count(backward))
+          continue;
+        if (!reserve(ctrl_mov, (int)i, op_index[backward]))
+          return false;
       }
     }
     return true;
@@ -485,18 +662,27 @@ struct MapToAcceleratorPass
     if (!importMapping.getValue().empty()) {
       int imported_ii = 0;
       std::vector<ImportedPlace> places;
+      RouteMap routes;
       std::string parse_err;
       if (!parseImportedMapping(importMapping.getValue(), imported_ii, places,
-                                parse_err)) {
+                                routes, parse_err)) {
         llvm::errs() << "[MapToAcceleratorPass] import-mapping error: "
                      << parse_err << "\n";
         return false;
       }
       llvm::errs() << "[MapToAcceleratorPass] Importing exact mapping ("
-                   << places.size() << " ops, II=" << imported_ii << ") from "
+                   << places.size() << " ops, " << routes.size()
+                   << " routes, II=" << imported_ii << ") from "
                    << importMapping.getValue() << "\n";
       MappingState mapping_state(architecture, imported_ii, is_spatial_only);
-      if (placeImportedSolution(region, architecture, places, mapping_state)) {
+      // With exact routes, replay them (reproduces the solver's joint routing);
+      // otherwise fall back to greedy re-routing of the imported placement.
+      bool placed = routes.empty()
+                        ? placeImportedSolution(region, architecture, places,
+                                                mapping_state)
+                        : placeImportedExact(region, architecture, places,
+                                             routes, mapping_state);
+      if (placed) {
         finalizeMapping(mapping_state, imported_ii, "exact-cpsat");
         return true;
       }
