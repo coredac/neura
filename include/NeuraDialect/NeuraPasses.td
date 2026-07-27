@@ -96,21 +96,14 @@ def MapToAccelerator : Pass<"map-to-accelerator", "ModuleOp"> {
 def CostModelAnalytical : Pass<"cost-model-analytical", "ModuleOp"> {
   let summary = "Analytical (parametric) single-task II predictor (no mapper)";
   let description = [{
-    Predicts the modulo-scheduling Initiation Interval (II) of each Neura
-    task/kernel purely from compile-time structural parameters — the DFG and
-    the CGRA Architecture — WITHOUT running the mapper.
-
-    II = clamp(max(ResMII, RecMII, MemMII, RouteMII, RegMII, IssueMII),
-               1, ctrl_mem_items)
-
-    Every bound is an interpretable ceil(demand/capacity) term; the pass prints
-    a structured diagnostic block and (by default) records `analytical_ii` plus
-    each bound on the kernel/func via the `mapping_info` attribute, so it can be
-    compared directly against `--map-to-accelerator`'s `compiled_ii` oracle.
-
-    x-tiles/y-tiles/valid-tiles mirror --map-to-accelerator so the model can be
-    evaluated for any chosen CGRA shape. This pass never calls the mapper and
-    uses no workload/task name, no training data, and no fitted thresholds.
+    Predicts the modulo-scheduling II of each Neura kernel from the DFG + CGRA
+    Architecture alone, without running the mapper:
+      II = clamp(max(ResMII, RecMII, MemMII, RouteMII, RegMII, IssueMII),
+                 1, ctrl_mem_items)
+    Each bound is an interpretable ceil(demand/capacity) term. Records the
+    prediction and every bound in an `analytical_cost_model` attribute (and
+    prints a diagnostic). x-tiles/y-tiles/valid-tiles select any CGRA shape.
+    No mapper call, no workload name, no training data, no fitted thresholds.
   }];
   let options =
       [Option<
@@ -125,8 +118,8 @@ def CostModelAnalytical : Pass<"cost-model-analytical", "ModuleOp"> {
            "non-rectangular shape; empty = all tiles in the rectangle.">,
        Option<
            "write_attr", "write-attr", "bool", /*default=*/"true",
-           "Record analytical_ii and each bound in the mapping_info attribute "
-           "(default true).">];
+           "Record the prediction + bounds in the analytical_cost_model "
+           "attribute (default true).">];
   let constructor = "neura::createCostModelAnalyticalPass()";
 }
 

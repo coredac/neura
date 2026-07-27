@@ -43,13 +43,13 @@ bool isMaterializedForCost(Operation *op) {
 }
 
 // Builds the inverse of kFuTypesToOperations: OperationKind -> FU class name.
-const std::map<OperationKind, std::string> &kindToFuClass() {
+const std::map<OperationKind, std::string> &kindToFuClassTable() {
   static const std::map<OperationKind, std::string> table = [] {
-    std::map<OperationKind, std::string> m;
-    for (const auto &[fu_name, ops] : kFuTypesToOperations)
-      for (OperationKind k : ops)
-        m[k] = fu_name;
-    return m;
+    std::map<OperationKind, std::string> inverse;
+    for (const auto &[fu_class_name, kinds] : kFuTypesToOperations)
+      for (OperationKind kind : kinds)
+        inverse[kind] = fu_class_name;
+    return inverse;
   }();
   return table;
 }
@@ -57,40 +57,41 @@ const std::map<OperationKind, std::string> &kindToFuClass() {
 // FU class name of an op (handles fused ops via their pattern_name attribute).
 std::string fuClassOf(Operation *op) {
   if (isa<neura::FusedOp>(op)) {
-    if (auto name = op->getAttrOfType<StringAttr>("pattern_name"))
-      return name.getValue().str();
+    if (auto pattern_name = op->getAttrOfType<StringAttr>("pattern_name"))
+      return pattern_name.getValue().str();
     return "fused";
   }
-  OperationKind k = getOperationKindFromMlirOp(op);
-  auto it = kindToFuClass().find(k);
-  return it == kindToFuClass().end() ? "other" : it->second;
+  OperationKind kind = getOperationKindFromMlirOp(op);
+  auto found = kindToFuClassTable().find(kind);
+  return found == kindToFuClassTable().end() ? "other" : found->second;
 }
 
 // Number of tiles that physically provide a given FU class.
-int tilesSupportingClass(const Architecture &arch, const std::string &fu_class) {
-  auto it = kFuTypesToOperations.find(fu_class);
-  if (it == kFuTypesToOperations.end() || it->second.empty())
+int tilesSupportingClass(const Architecture &arch,
+                         const std::string &fu_class) {
+  auto found = kFuTypesToOperations.find(fu_class);
+  if (found == kFuTypesToOperations.end() || found->second.empty())
     return arch.getNumTiles(); // unknown class: don't over-constrain.
-  OperationKind probe = it->second.front();
-  int count = 0;
-  for (Tile *t : arch.getAllTiles())
-    if (t->canSupportOperation(probe))
-      ++count;
-  return count;
+  OperationKind probe_kind = found->second.front();
+  int supporting_tiles = 0;
+  for (Tile *tile : arch.getAllTiles())
+    if (tile->canSupportOperation(probe_kind))
+      ++supporting_tiles;
+  return supporting_tiles;
 }
 
 // Bit width carried by an SSA value (for routing channel demand).
-int valueBits(Value v) {
-  Type t = v.getType();
-  if (t.isIntOrFloat())
-    return static_cast<int>(t.getIntOrFloatBitWidth());
+int valueBitWidth(Value value) {
+  Type type = value.getType();
+  if (type.isIntOrFloat())
+    return static_cast<int>(type.getIntOrFloatBitWidth());
   return 32; // predicated / opaque types: conservative single-channel default.
 }
 
-int ceilDiv(long long a, long long b) {
-  if (b <= 0)
-    b = 1;
-  return static_cast<int>((a + b - 1) / b);
+int ceilDiv(long long numerator, long long denominator) {
+  if (denominator <= 0)
+    denominator = 1;
+  return static_cast<int>((numerator + denominator - 1) / denominator);
 }
 
 } // namespace
@@ -102,29 +103,30 @@ namespace neura {
 // ResMII — per-FU-class, latency-weighted.
 //===----------------------------------------------------------------------===//
 IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
-  std::map<std::string, long long> work; // class -> sum of op latencies.
+  std::map<std::string, long long> work_by_class; // class -> sum of latencies.
   region.walk([&](Operation *op) {
     if (!isMaterializedForCost(op))
       return;
-    work[fuClassOf(op)] += std::max(1, getOpLatency(op));
+    work_by_class[fuClassOf(op)] += std::max(1, getOpLatency(op));
   });
 
-  IIBound b;
-  b.value = 1;
-  for (const auto &[fu_class, w] : work) {
-    int cap = std::max(1, tilesSupportingClass(arch, fu_class));
-    int v = ceilDiv(w, cap);
-    if (v > b.value) {
-      b.value = v;
-      b.demand = w;
-      b.capacity = cap;
-      b.detail = "class=" + fu_class + " work=" + std::to_string(w) +
-                 " fus=" + std::to_string(cap);
+  IIBound bound;
+  bound.value = 1;
+  for (const auto &[fu_class, class_work] : work_by_class) {
+    int fu_count = std::max(1, tilesSupportingClass(arch, fu_class));
+    int class_ii = ceilDiv(class_work, fu_count);
+    if (class_ii > bound.value) {
+      bound.value = class_ii;
+      bound.demand = class_work;
+      bound.capacity = fu_count;
+      bound.detail = "class=" + fu_class + " work=" +
+                     std::to_string(class_work) + " fus=" +
+                     std::to_string(fu_count);
     }
   }
-  if (b.detail.empty())
-    b.detail = "no materialized ops";
-  return b;
+  if (bound.detail.empty())
+    bound.detail = "no materialized ops";
+  return bound;
 }
 
 //===----------------------------------------------------------------------===//
@@ -132,71 +134,72 @@ IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
 //===----------------------------------------------------------------------===//
 IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
   (void)arch;
-  IIBound b;
-  b.value = 1;
-  b.detail = "no recurrence";
-  auto cycles = collectRecurrenceCycles(region);
-  int idx = 0;
-  for (auto &cycle : cycles) {
-    long long lat = 0;
-    int nmat = 0;
+  IIBound bound;
+  bound.value = 1;
+  bound.detail = "no recurrence";
+  auto recurrence_cycles = collectRecurrenceCycles(region);
+  int cycle_index = 0;
+  for (auto &cycle : recurrence_cycles) {
+    long long cycle_latency = 0;
+    int num_materialized = 0;
     for (Operation *op : cycle.operations) {
       if (is_non_materialized(op))
         continue;
-      lat += std::max(1, getOpLatency(op));
-      ++nmat;
+      cycle_latency += std::max(1, getOpLatency(op));
+      ++num_materialized;
     }
     // Distance is 1 for a single reserve/ctrl_mov back-edge pair (this IR).
     const long long distance = 1;
-    int v = ceilDiv(lat, distance);
-    if (v > b.value) {
-      b.value = v;
-      b.demand = lat;
-      b.capacity = distance;
-      b.detail = "cycle#" + std::to_string(idx) + " ops=" +
-                 std::to_string(nmat) + " latency=" + std::to_string(lat) +
-                 " dist=" + std::to_string(distance);
+    int cycle_ii = ceilDiv(cycle_latency, distance);
+    if (cycle_ii > bound.value) {
+      bound.value = cycle_ii;
+      bound.demand = cycle_latency;
+      bound.capacity = distance;
+      bound.detail = "cycle#" + std::to_string(cycle_index) + " ops=" +
+                     std::to_string(num_materialized) + " latency=" +
+                     std::to_string(cycle_latency) + " dist=" +
+                     std::to_string(distance);
     }
-    ++idx;
+    ++cycle_index;
   }
-  return b;
+  return bound;
 }
 
 //===----------------------------------------------------------------------===//
 // MemMII — load/store contention on memory FUs.
 //===----------------------------------------------------------------------===//
 IIBound calculateMemMii(Region &region, const Architecture &arch) {
-  long long mem_ops = 0, indexed_ops = 0;
+  long long num_mem_ops = 0, num_indexed_ops = 0;
   region.walk([&](Operation *op) {
     if (!isMaterializedForCost(op))
       return;
-    OperationKind k = getOperationKindFromMlirOp(op);
-    if (k == ILoad || k == IStore)
-      ++mem_ops;
-    else if (k == ILoadIndexed || k == IStoreIndexed)
-      ++indexed_ops;
+    OperationKind kind = getOperationKindFromMlirOp(op);
+    if (kind == ILoad || kind == IStore)
+      ++num_mem_ops;
+    else if (kind == ILoadIndexed || kind == IStoreIndexed)
+      ++num_indexed_ops;
   });
 
   int mem_tiles = std::max(1, tilesSupportingClass(arch, "mem"));
-  int idx_tiles = std::max(1, tilesSupportingClass(arch, "mem_indexed"));
-  int v_mem = ceilDiv(mem_ops, mem_tiles);
-  int v_idx = ceilDiv(indexed_ops, idx_tiles);
+  int indexed_tiles = std::max(1, tilesSupportingClass(arch, "mem_indexed"));
+  int mem_ii = ceilDiv(num_mem_ops, mem_tiles);
+  int indexed_ii = ceilDiv(num_indexed_ops, indexed_tiles);
 
-  IIBound b;
-  if (v_idx >= v_mem) {
-    b.value = std::max(1, v_idx);
-    b.demand = indexed_ops;
-    b.capacity = idx_tiles;
-    b.detail = "indexed=" + std::to_string(indexed_ops) + " mem_indexed_fus=" +
-               std::to_string(idx_tiles);
+  IIBound bound;
+  if (indexed_ii >= mem_ii) {
+    bound.value = std::max(1, indexed_ii);
+    bound.demand = num_indexed_ops;
+    bound.capacity = indexed_tiles;
+    bound.detail = "indexed=" + std::to_string(num_indexed_ops) +
+                   " mem_indexed_fus=" + std::to_string(indexed_tiles);
   } else {
-    b.value = std::max(1, v_mem);
-    b.demand = mem_ops;
-    b.capacity = mem_tiles;
-    b.detail = "loads+stores=" + std::to_string(mem_ops) + " mem_fus=" +
-               std::to_string(mem_tiles);
+    bound.value = std::max(1, mem_ii);
+    bound.demand = num_mem_ops;
+    bound.capacity = mem_tiles;
+    bound.detail = "loads+stores=" + std::to_string(num_mem_ops) + " mem_fus=" +
+                   std::to_string(mem_tiles);
   }
-  return b;
+  return bound;
 }
 
 //===----------------------------------------------------------------------===//
@@ -206,131 +209,130 @@ IIBound calculateRouteMii(Region &region, const Architecture &arch) {
   // Each neura.data_mov is one physical move; fanout is already expanded into
   // one data_mov per real consumer, so replicated traffic is counted here.
   long long channel_demand = 0;
-  long long moves = 0;
-  region.walk([&](neura::DataMovOp mov) {
-    ++moves;
-    int bw = 32;
-    for (Link *l : arch.getAllLinks()) {
-      bw = l->getBandwidth();
+  long long num_moves = 0;
+  region.walk([&](neura::DataMovOp move) {
+    ++num_moves;
+    int link_bandwidth = 32;
+    for (Link *link : arch.getAllLinks()) {
+      link_bandwidth = link->getBandwidth();
       break; // links are homogeneous by default; use the common bandwidth.
     }
-    if (bw <= 0)
-      bw = 32;
-    channel_demand += ceilDiv(valueBits(mov.getResult()), bw);
+    if (link_bandwidth <= 0)
+      link_bandwidth = 32;
+    channel_demand += ceilDiv(valueBitWidth(move.getResult()), link_bandwidth);
   });
 
-  long long links = static_cast<long long>(arch.getAllLinks().size());
-  if (links <= 0)
-    links = 1;
+  long long total_links = static_cast<long long>(arch.getAllLinks().size());
+  if (total_links <= 0)
+    total_links = 1;
 
-  IIBound b;
-  b.value = std::max(1, ceilDiv(channel_demand, links));
-  b.demand = channel_demand;
-  b.capacity = links;
-  b.detail = "moves=" + std::to_string(moves) + " channel_demand=" +
-             std::to_string(channel_demand) + " links=" +
-             std::to_string(links);
-  return b;
+  IIBound bound;
+  bound.value = std::max(1, ceilDiv(channel_demand, total_links));
+  bound.demand = channel_demand;
+  bound.capacity = total_links;
+  bound.detail = "moves=" + std::to_string(num_moves) + " channel_demand=" +
+                 std::to_string(channel_demand) + " links=" +
+                 std::to_string(total_links);
+  return bound;
 }
 
 //===----------------------------------------------------------------------===//
 // RegMII — peak simultaneously-live values vs total register capacity.
 //===----------------------------------------------------------------------===//
 IIBound calculateRegMii(Region &region, const Architecture &arch) {
-  // ASAP levels over the materialized DAG (recurrence is broken by reserve).
   // ASAP levels over the whole op graph (data_mov/reserve are their own nodes).
   // Uses the direct SSA producer — getTopologicallySortedOps guarantees
   // producers precede consumers, and the reserve op (no operands) breaks the
   // loop-carried back-edge so this is a finite DAG traversal.
-  std::vector<Operation *> topo = getTopologicallySortedOps(region);
-  llvm::DenseMap<Operation *, int> level;
-  for (Operation *op : topo) {
-    int lv = 0;
+  std::vector<Operation *> topo_ops = getTopologicallySortedOps(region);
+  llvm::DenseMap<Operation *, int> asap_level;
+  for (Operation *op : topo_ops) {
+    int op_level = 0;
     for (Value operand : op->getOperands()) {
-      Operation *prod = operand.getDefiningOp();
-      if (prod && level.count(prod))
-        lv = std::max(lv, level[prod] + 1);
+      Operation *producer = operand.getDefiningOp();
+      if (producer && asap_level.count(producer))
+        op_level = std::max(op_level, asap_level[producer] + 1);
     }
-    level[op] = lv;
+    asap_level[op] = op_level;
   }
 
   // Live range of each materialized value: [def_level, last_materialized_use].
+  // Accumulate +1 at each value's def level and -1 at its last-use level, then
+  // prefix-sum to find the peak number of simultaneously-live values.
   int max_level = 0;
-  for (auto &kv : level)
-    max_level = std::max(max_level, kv.second);
-  std::vector<long long> delta(max_level + 2, 0);
+  for (auto &entry : asap_level)
+    max_level = std::max(max_level, entry.second);
+  std::vector<long long> live_delta(max_level + 2, 0);
 
-  long long values_with_range = 0;
   region.walk([&](Operation *op) {
     if (!isMaterializedForCost(op) || op->getNumResults() == 0)
       return;
-    if (!level.count(op))
+    if (!asap_level.count(op))
       return;
-    int def_lv = level[op];
-    int last_use = def_lv;
-    for (Value res : op->getResults()) {
-      for (Operation *user : res.getUsers()) {
+    int def_level = asap_level[op];
+    int last_use_level = def_level;
+    for (Value result : op->getResults()) {
+      for (Operation *user : result.getUsers()) {
         // Unwrap routing users (data_mov) to the materialized consumer.
-        Operation *muser = user;
+        Operation *materialized_user = user;
         if (is_non_materialized(user)) {
-          for (Operation *uu : user->getUsers()) {
-            if (level.count(uu))
-              muser = uu;
-          }
+          for (Operation *router_user : user->getUsers())
+            if (asap_level.count(router_user))
+              materialized_user = router_user;
         }
-        if (level.count(muser))
-          last_use = std::max(last_use, level[muser]);
+        if (asap_level.count(materialized_user))
+          last_use_level = std::max(last_use_level, asap_level[materialized_user]);
       }
     }
-    if (last_use > def_lv) {
-      delta[def_lv] += 1;
-      delta[last_use] -= 1;
-      ++values_with_range;
+    if (last_use_level > def_level) {
+      live_delta[def_level] += 1;
+      live_delta[last_use_level] -= 1;
     }
   });
 
-  long long peak = 0, running = 0;
+  long long peak_live = 0, running_live = 0;
   int peak_level = 0;
-  for (int i = 0; i <= max_level; ++i) {
-    running += delta[i];
-    if (running > peak) {
-      peak = running;
-      peak_level = i;
+  for (int level = 0; level <= max_level; ++level) {
+    running_live += live_delta[level];
+    if (running_live > peak_live) {
+      peak_live = running_live;
+      peak_level = level;
     }
   }
 
-  long long total_regs = 0;
-  for (Tile *t : arch.getAllTiles())
-    total_regs += static_cast<long long>(t->getRegisters().size());
-  if (total_regs <= 0)
-    total_regs = 1;
+  long long total_registers = 0;
+  for (Tile *tile : arch.getAllTiles())
+    total_registers += static_cast<long long>(tile->getRegisters().size());
+  if (total_registers <= 0)
+    total_registers = 1;
 
-  IIBound b;
-  b.value = std::max(1, ceilDiv(peak, total_regs));
-  b.demand = peak;
-  b.capacity = total_regs;
-  b.detail = "peak_live=" + std::to_string(peak) + " @level=" +
-             std::to_string(peak_level) + " regs=" +
-             std::to_string(total_regs);
-  return b;
+  IIBound bound;
+  bound.value = std::max(1, ceilDiv(peak_live, total_registers));
+  bound.demand = peak_live;
+  bound.capacity = total_registers;
+  bound.detail = "peak_live=" + std::to_string(peak_live) + " @level=" +
+                 std::to_string(peak_level) + " regs=" +
+                 std::to_string(total_registers);
+  return bound;
 }
 
 //===----------------------------------------------------------------------===//
 // IssueMII — tile issue-slot occupancy (crude ceil(#ops / #tiles) baseline).
 //===----------------------------------------------------------------------===//
 IIBound calculateIssueMii(Region &region, const Architecture &arch) {
-  long long ops = 0;
+  long long num_ops = 0;
   region.walk([&](Operation *op) {
     if (isMaterializedForCost(op))
-      ++ops;
+      ++num_ops;
   });
-  int tiles = std::max(1, arch.getNumTiles());
-  IIBound b;
-  b.value = std::max(1, ceilDiv(ops, tiles));
-  b.demand = ops;
-  b.capacity = tiles;
-  b.detail = "ops=" + std::to_string(ops) + " tiles=" + std::to_string(tiles);
-  return b;
+  int num_tiles = std::max(1, arch.getNumTiles());
+  IIBound bound;
+  bound.value = std::max(1, ceilDiv(num_ops, num_tiles));
+  bound.demand = num_ops;
+  bound.capacity = num_tiles;
+  bound.detail = "ops=" + std::to_string(num_ops) + " tiles=" +
+                 std::to_string(num_tiles);
+  return bound;
 }
 
 //===----------------------------------------------------------------------===//
@@ -338,38 +340,39 @@ IIBound calculateIssueMii(Region &region, const Architecture &arch) {
 //===----------------------------------------------------------------------===//
 AnalyticalIIBreakdown computeAnalyticalII(Region &region,
                                           const Architecture &arch) {
-  AnalyticalIIBreakdown out;
-  out.res = calculateResMiiPerClass(region, arch);
-  out.rec = calculateRecMiiWeighted(region, arch);
-  out.mem = calculateMemMii(region, arch);
-  out.route = calculateRouteMii(region, arch);
-  out.reg = calculateRegMii(region, arch);
-  out.issue = calculateIssueMii(region, arch);
+  AnalyticalIIBreakdown breakdown;
+  breakdown.res = calculateResMiiPerClass(region, arch);
+  breakdown.rec = calculateRecMiiWeighted(region, arch);
+  breakdown.mem = calculateMemMii(region, arch);
+  breakdown.route = calculateRouteMii(region, arch);
+  breakdown.reg = calculateRegMii(region, arch);
+  breakdown.issue = calculateIssueMii(region, arch);
 
-  struct Named {
+  struct NamedBound {
     const char *name;
     int value;
   };
-  Named bounds[] = {{"res", out.res.value},     {"rec", out.rec.value},
-                    {"mem", out.mem.value},     {"route", out.route.value},
-                    {"reg", out.reg.value},     {"issue", out.issue.value}};
-  int raw = 1;
-  const char *dom = "res";
-  for (const Named &n : bounds)
-    if (n.value > raw) {
-      raw = n.value;
-      dom = n.name;
+  NamedBound named_bounds[] = {
+      {"res", breakdown.res.value},     {"rec", breakdown.rec.value},
+      {"mem", breakdown.mem.value},     {"route", breakdown.route.value},
+      {"reg", breakdown.reg.value},     {"issue", breakdown.issue.value}};
+  int max_bound_ii = 1;
+  const char *dominant_name = "res";
+  for (const NamedBound &named_bound : named_bounds)
+    if (named_bound.value > max_bound_ii) {
+      max_bound_ii = named_bound.value;
+      dominant_name = named_bound.name;
     }
-  out.dominant = dom;
+  breakdown.dominant = dominant_name;
 
-  out.max_ii = arch.getMaxCtrlMemItems();
-  if (out.max_ii > 0 && raw > out.max_ii) {
-    out.final_ii = out.max_ii;
-    out.clamped = true;
+  breakdown.max_ii = arch.getMaxCtrlMemItems();
+  if (breakdown.max_ii > 0 && max_bound_ii > breakdown.max_ii) {
+    breakdown.final_ii = breakdown.max_ii;
+    breakdown.clamped = true;
   } else {
-    out.final_ii = std::max(1, raw);
+    breakdown.final_ii = std::max(1, max_bound_ii);
   }
-  return out;
+  return breakdown;
 }
 
 void AnalyticalIIBreakdown::print(llvm::raw_ostream &os) const {

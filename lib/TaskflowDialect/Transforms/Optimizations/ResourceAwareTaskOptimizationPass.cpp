@@ -549,8 +549,13 @@ private:
         for (auto &cycle : cycles)
           rec_mii = std::max(rec_mii, cycle.length);
         if (use_full_cost_model) {
-          // Full parametric model: max of all resource bounds. Strictly >=
-          // max(res_mii, rec_mii), so this only tightens the estimate.
+          // Full parametric model: max of all resource bounds. computeAnalyticalII
+          // internally recomputes its own (stronger, per-FU-class + latency-
+          // weighted) ResMII/RecMII, so bd.final_ii already subsumes the crude
+          // res_mii/rec_mii above. We deliberately keep those two crude values in
+          // the max() below as a redundant-but-harmless floor rather than
+          // restructure the surrounding compiled/analytical code paths that also
+          // rely on res_mii/rec_mii; bd.final_ii dominates them.
           neura::AnalyticalIIBreakdown bd =
               neura::computeAnalyticalII(region, architecture);
           llvm::errs() << "[cost-model-analytical] task profiling:\n";
