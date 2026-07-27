@@ -12,11 +12,20 @@ OperationKind getOperationKindFromMlirOp(Operation *op);
 // Returns true if the operation does not need CGRA tile placement.
 bool is_non_materialized(Operation *op);
 
-// Returns true if the op occupies a tile/FU and must be placed (not a
-// routing/structural op or a fused-region interior). Shared by DumpDfgJsonPass
-// (which emits these ops in walk order) and MapToAcceleratorPass's
+// Returns true if the op occupies a tile/FU and must be placed by the mapper
+// (not a routing/structural op or a fused-region interior). NOTE: this is a
+// STRICTER predicate than !is_non_materialized -- besides the routing movs it
+// also excludes container ops (func/module/kernel) and fused-region interior
+// ops, so do not substitute a negation of is_non_materialized for it. Shared by
+// DumpDfgJsonPass (which emits these ops in walk order) and MapToAcceleratorPass's
 // import-mapping (which replays onto them), so their op indices stay aligned.
-bool isMaterializedOp(Operation *op);
+bool occupiesFU(Operation *op);
+
+// FU class name an op maps to (the inverse of Architecture's
+// kFuTypesToOperations). A fused op reports its pattern_name (or "fused" if it
+// carries none); an op with no known class reports "other". Shared by the
+// analytical cost model and --dump-dfg-json so both bucket ops identically.
+std::string fuClassOf(Operation *op);
 
 // Returns true if the operation is a steering-mode operation that doesn't
 // require DataMovOp wrapping (e.g., constants, carry, invariant, etc.).

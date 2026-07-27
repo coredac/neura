@@ -227,13 +227,13 @@ struct MapToAcceleratorPass
 
   // Materialized ops in the SAME order --dump-dfg-json emits them, so the i-th
   // op here corresponds to placements[i] of the exact-mapper JSON. Uses the
-  // shared neura::isMaterializedOp (the exact predicate DumpDfgJsonPass emits
+  // shared neura::occupiesFU (the exact predicate DumpDfgJsonPass emits
   // with) so the two indexings cannot drift apart.
   static std::vector<Operation *>
   collectMaterializedInDumpOrder(Region &region) {
     std::vector<Operation *> materialized;
     region.walk([&](Operation *walked) {
-      if (isMaterializedOp(walked)) {
+      if (occupiesFU(walked)) {
         materialized.push_back(walked);
       }
     });
@@ -298,26 +298,27 @@ struct MapToAcceleratorPass
         if (!record) {
           continue;
         }
-        std::optional<int64_t> s = record->getInteger("s");
-        std::optional<int64_t> d = record->getInteger("d");
+        std::optional<int64_t> src_idx = record->getInteger("s");
+        std::optional<int64_t> dst_idx = record->getInteger("d");
         llvm::json::Array *path = record->getArray("path");
-        if (!s || !d || !path) {
+        if (!src_idx || !dst_idx || !path) {
           continue;
         }
         std::vector<RouteHop> hops;
         for (llvm::json::Value &node : *path) {
-          llvm::json::Array *pair = node.getAsArray();
-          if (!pair || pair->size() != 2) {
+          llvm::json::Array *hop_pair = node.getAsArray();
+          if (!hop_pair || hop_pair->size() != 2) {
             continue;
           }
-          std::optional<int64_t> tl = (*pair)[0].getAsInteger();
-          std::optional<int64_t> cy = (*pair)[1].getAsInteger();
-          if (tl && cy) {
-            hops.push_back(
-                RouteHop{static_cast<int>(*tl), static_cast<int>(*cy)});
+          std::optional<int64_t> hop_tile = (*hop_pair)[0].getAsInteger();
+          std::optional<int64_t> hop_cycle = (*hop_pair)[1].getAsInteger();
+          if (hop_tile && hop_cycle) {
+            hops.push_back(RouteHop{static_cast<int>(*hop_tile),
+                                    static_cast<int>(*hop_cycle)});
           }
         }
-        routes[{static_cast<int>(*s), static_cast<int>(*d)}] = std::move(hops);
+        routes[{static_cast<int>(*src_idx), static_cast<int>(*dst_idx)}] =
+            std::move(hops);
       }
     }
     return true;
@@ -386,46 +387,48 @@ struct MapToAcceleratorPass
   bool buildRoutePath(const std::vector<RouteHop> &hops,
                       llvm::DenseMap<int, Tile *> &tile_by_id,
                       MappingState &mapping_state, neura::DataMovOp mov_op,
-                      std::vector<MappingLoc> &out) {
-    size_t k = 0;
-    while (k + 1 < hops.size()) {
-      if (hops[k].tile == hops[k + 1].tile) {
+                      std::vector<MappingLoc> &out_path) {
+    size_t hop_idx = 0;
+    while (hop_idx + 1 < hops.size()) {
+      if (hops[hop_idx].tile == hops[hop_idx + 1].tile) {
         // Maximal same-tile run -> a single register holds the value across it.
-        size_t j = k;
-        while (j + 1 < hops.size() && hops[j + 1].tile == hops[k].tile) {
-          ++j;
+        size_t run_end = hop_idx;
+        while (run_end + 1 < hops.size() &&
+               hops[run_end + 1].tile == hops[hop_idx].tile) {
+          ++run_end;
         }
-        Tile *tile = tile_by_id[hops[k].tile];
-        int c_start = hops[k].cycle, c_end = hops[j].cycle; // exclusive
-        Register *reg =
-            getAvailableRegister(mapping_state, tile, c_start, c_end, mov_op);
+        Tile *tile = tile_by_id[hops[hop_idx].tile];
+        int cycle_begin = hops[hop_idx].cycle,
+            cycle_end = hops[run_end].cycle; // exclusive
+        Register *reg = getAvailableRegister(mapping_state, tile, cycle_begin,
+                                             cycle_end, mov_op);
         if (!reg) {
           llvm::errs() << "[MapToAcceleratorPass] no free register on tile "
-                       << hops[k].tile << " for [" << c_start << "," << c_end
-                       << ")\n";
+                       << hops[hop_idx].tile << " for [" << cycle_begin << ","
+                       << cycle_end << ")\n";
           return false;
         }
-        for (int c = c_start; c < c_end; ++c) {
-          out.push_back(MappingLoc{reg, c});
+        for (int cycle = cycle_begin; cycle < cycle_end; ++cycle) {
+          out_path.push_back(MappingLoc{reg, cycle});
         }
-        k = j;
+        hop_idx = run_end;
       } else {
         // Tile change -> the link between the two tiles at this cycle.
-        Tile *src = tile_by_id[hops[k].tile];
+        Tile *src = tile_by_id[hops[hop_idx].tile];
         Link *link = nullptr;
         for (Link *candidate : src->getOutLinks()) {
-          if (candidate->getDstTile()->getId() == hops[k + 1].tile) {
+          if (candidate->getDstTile()->getId() == hops[hop_idx + 1].tile) {
             link = candidate;
             break;
           }
         }
         if (!link) {
-          llvm::errs() << "[MapToAcceleratorPass] no link " << hops[k].tile
-                       << "->" << hops[k + 1].tile << "\n";
+          llvm::errs() << "[MapToAcceleratorPass] no link " << hops[hop_idx].tile
+                       << "->" << hops[hop_idx + 1].tile << "\n";
           return false;
         }
-        out.push_back(MappingLoc{link, hops[k].cycle});
-        ++k;
+        out_path.push_back(MappingLoc{link, hops[hop_idx].cycle});
+        ++hop_idx;
       }
     }
     return true;
@@ -480,14 +483,14 @@ struct MapToAcceleratorPass
 
     // Pass 2: reserve the exact route of every value move.
     auto reserve = [&](Operation *mov, int producer_idx, int consumer_idx) {
-      auto it = routes.find({producer_idx, consumer_idx});
-      if (it == routes.end()) {
+      auto route_it = routes.find({producer_idx, consumer_idx});
+      if (route_it == routes.end()) {
         llvm::errs() << "[MapToAcceleratorPass] missing route " << producer_idx
                      << "->" << consumer_idx << "\n";
         return false;
       }
       std::vector<MappingLoc> path;
-      if (!buildRoutePath(it->second, tile_by_id, mapping_state,
+      if (!buildRoutePath(route_it->second, tile_by_id, mapping_state,
                           dyn_cast<neura::DataMovOp>(mov), path)) {
         return false;
       }
@@ -767,25 +770,25 @@ struct MapToAcceleratorPass
         // provided.
         for (int y = 0; y < y_tiles.getValue(); ++y) {
           for (int x = 0; x < x_tiles.getValue(); ++x) {
-            TileOverride to;
-            to.tile_x = x;
-            to.tile_y = y;
-            to.existence = false;
-            additional_overrides.push_back(to);
+            TileOverride tile_override;
+            tile_override.tile_x = x;
+            tile_override.tile_y = y;
+            tile_override.existence = false;
+            additional_overrides.push_back(tile_override);
           }
         }
 
         // Then mark the valid ones as existent.
         for (llvm::StringRef coord : coords) {
-          auto pair = coord.split('_');
+          auto coord_pair = coord.split('_');
           int x, y;
-          if (!pair.first.getAsInteger(10, x) &&
-              !pair.second.getAsInteger(10, y)) {
-            TileOverride to;
-            to.tile_x = x;
-            to.tile_y = y;
-            to.existence = true;
-            additional_overrides.push_back(to);
+          if (!coord_pair.first.getAsInteger(10, x) &&
+              !coord_pair.second.getAsInteger(10, y)) {
+            TileOverride tile_override;
+            tile_override.tile_x = x;
+            tile_override.tile_y = y;
+            tile_override.existence = true;
+            additional_overrides.push_back(tile_override);
           }
         }
       }

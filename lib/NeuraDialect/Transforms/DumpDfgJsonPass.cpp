@@ -1,6 +1,6 @@
 //===- DumpDfgJsonPass.cpp - Emit pre-map DFG + arch as JSON -------------===//
 //
-// Emits the lowered Neura DFG (materialized ops, dependence edges with a
+// Emits the lowered Neura DFG (placed ops, dependence edges with a
 // loop-carried iteration distance omega) together with the target CGRA
 // architecture (tiles, per-FU-class tile support, mesh links, registers,
 // ctrl_mem_items) as a JSON document. This feeds the exact modulo-scheduling
@@ -36,33 +36,13 @@ using namespace mlir::neura;
 
 namespace {
 
-// Inverse of kFuTypesToOperations: OperationKind -> FU class name.
-const std::map<OperationKind, std::string> &kindToFuClassTable() {
-  static const std::map<OperationKind, std::string> table = [] {
-    std::map<OperationKind, std::string> inverse;
-    for (const auto &[fu_class_name, kinds] : kFuTypesToOperations) {
-      for (OperationKind kind : kinds) {
-        inverse[kind] = fu_class_name;
-      }
-    }
-    return inverse;
-  }();
-  return table;
-}
+// occupiesFU (placement set) and fuClassOf (an op's FU class) come from
+// mapping_util.h -- the single source of truth shared with the mapper, so the
+// JSON this pass emits buckets ops exactly as the mapper does.
 
-std::string fuClassOf(Operation *op) {
-  if (isa<neura::FusedOp>(op)) {
-    if (auto pattern_name = op->getAttrOfType<StringAttr>("pattern_name")) {
-      return pattern_name.getValue().str();
-    }
-  }
-  auto found = kindToFuClassTable().find(getOperationKindFromMlirOp(op));
-  return found == kindToFuClassTable().end() ? "other" : found->second;
-}
-
-// Safe materialized-producer unwrap (does not assert like
+// Safe placed-producer unwrap (does not assert like
 // getMaterializedProducer).
-Operation *materializedProducer(Value value) {
+Operation *placedProducer(Value value) {
   Operation *producer = value.getDefiningOp();
   if (!producer) {
     return nullptr;
@@ -148,13 +128,13 @@ struct DumpDfgJsonPass
 
   void emitRegion(Region &region, const Architecture &arch,
                   llvm::raw_ostream &os) {
-    // Assign dense ids to materialized ops.
+    // Assign dense ids to placed ops.
     llvm::DenseMap<Operation *, int> op_id;
-    std::vector<Operation *> materialized_ops;
+    std::vector<Operation *> placed_ops;
     region.walk([&](Operation *op) {
-      if (isMaterializedOp(op)) {
-        op_id[op] = (int)materialized_ops.size();
-        materialized_ops.push_back(op);
+      if (occupiesFU(op)) {
+        op_id[op] = (int)placed_ops.size();
+        placed_ops.push_back(op);
       }
     });
 
@@ -163,9 +143,9 @@ struct DumpDfgJsonPass
     };
     std::vector<Edge> edges;
     // Forward (intra-iteration) edges, omega=0.
-    for (Operation *consumer : materialized_ops) {
+    for (Operation *consumer : placed_ops) {
       for (Value operand : consumer->getOperands()) {
-        Operation *producer = materializedProducer(operand);
+        Operation *producer = placedProducer(operand);
         if (producer && op_id.count(producer)) {
           edges.push_back({op_id[producer], op_id[consumer], 0});
         }
@@ -175,22 +155,22 @@ struct DumpDfgJsonPass
     // the reserve it targets. Represents value[i] feeding the placeholder for
     // iteration i+1.
     region.walk([&](neura::CtrlMovOp ctrl_mov) {
-      Operation *producer = materializedProducer(ctrl_mov.getValue());
+      Operation *producer = placedProducer(ctrl_mov.getValue());
       auto reserve = ctrl_mov.getTarget().getDefiningOp<neura::ReserveOp>();
       if (!producer || !op_id.count(producer) || !reserve) {
         return;
       }
       for (Operation *user : reserve.getResult().getUsers()) {
-        Operation *materialized_user = user;
+        Operation *placed_user = user;
         if (is_non_materialized(user)) {
           for (Operation *router_user : user->getUsers()) {
             if (op_id.count(router_user)) {
-              materialized_user = router_user;
+              placed_user = router_user;
             }
           }
         }
-        if (op_id.count(materialized_user)) {
-          edges.push_back({op_id[producer], op_id[materialized_user], 1});
+        if (op_id.count(placed_user)) {
+          edges.push_back({op_id[producer], op_id[placed_user], 1});
         }
       }
     });
@@ -236,10 +216,10 @@ struct DumpDfgJsonPass
 
     // Ops.
     os << "  \"ops\": [";
-    for (size_t i = 0; i < materialized_ops.size(); ++i) {
+    for (size_t i = 0; i < placed_ops.size(); ++i) {
       os << (i ? ", " : "") << "{\"id\": " << i << ", \"class\": \""
-         << fuClassOf(materialized_ops[i]) << "\", \"latency\": "
-         << std::max(1, getOpLatency(materialized_ops[i])) << "}";
+         << fuClassOf(placed_ops[i]) << "\", \"latency\": "
+         << std::max(1, getOpLatency(placed_ops[i])) << "}";
     }
     os << "],\n  \"edges\": [";
     for (size_t i = 0; i < edges.size(); ++i) {

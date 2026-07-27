@@ -26,53 +26,10 @@ using namespace mlir::neura;
 
 namespace {
 
-// An op occupies a functional unit / tile (and thus contributes to resource
-// demand) unless it is a pure routing / structural op or lives inside a fused
-// region (the fused op itself is what gets mapped).
-bool isMaterializedForCost(Operation *op) {
-  if (isa<func::FuncOp, ModuleOp>(op)) {
-    return false;
-  }
-  if (isa<neura::KernelOp>(op)) {
-    return false;
-  }
-  if (is_non_materialized(op)) { // reserve / ctrl_mov / data_mov / yield
-    return false;
-  }
-  if (Operation *parent = op->getParentOp()) {
-    if (isa<neura::FusedOp>(parent)) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// Builds the inverse of kFuTypesToOperations: OperationKind -> FU class name.
-const std::map<OperationKind, std::string> &kindToFuClassTable() {
-  static const std::map<OperationKind, std::string> table = [] {
-    std::map<OperationKind, std::string> inverse;
-    for (const auto &[fu_class_name, kinds] : kFuTypesToOperations) {
-      for (OperationKind kind : kinds) {
-        inverse[kind] = fu_class_name;
-      }
-    }
-    return inverse;
-  }();
-  return table;
-}
-
-// FU class name of an op (handles fused ops via their pattern_name attribute).
-std::string fuClassOf(Operation *op) {
-  if (isa<neura::FusedOp>(op)) {
-    if (auto pattern_name = op->getAttrOfType<StringAttr>("pattern_name")) {
-      return pattern_name.getValue().str();
-    }
-    return "fused";
-  }
-  OperationKind kind = getOperationKindFromMlirOp(op);
-  auto found = kindToFuClassTable().find(kind);
-  return found == kindToFuClassTable().end() ? "other" : found->second;
-}
+// occupiesFU (which ops need a tile/FU) and fuClassOf (an op's FU class) both
+// live in mapping_util.h -- the single source of truth shared with the mapper.
+// Reusing them keeps the cost model's op set and FU bucketing identical to the
+// mapper's; do not re-define either here.
 
 // Number of tiles that physically provide a given FU class.
 int tilesSupportingClass(const Architecture &arch,
@@ -114,11 +71,23 @@ namespace neura {
 
 //===----------------------------------------------------------------------===//
 // ResMII — per-FU-class, latency-weighted.
+//
+//   work(c)  = sum over placed ops of class c of max(1, latency(op))
+//   fus(c)   = #tiles that physically provide FU class c
+//   ResMII   = max over classes c of ceil( work(c) / fus(c) )
+//
+// Why not reuse neura::calculateResMii (mapping_util.cpp)? That one is just
+// ceil(#ops / #tiles): it treats every tile as interchangeable and every op as
+// unit-cost, so it under-predicts whenever an FU class is scarce (e.g. 6 muls
+// but only 2 mul-capable tiles) or ops are multi-cycle. Reusing it would defeat
+// the point of a sharper model. Its exact formula is preserved as IssueMII
+// below, and the legacy value is still max()'d in as a redundant floor by the
+// caller, so nothing is lost by superseding it here.
 //===----------------------------------------------------------------------===//
 IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
   std::map<std::string, long long> work_by_class; // class -> sum of latencies.
   region.walk([&](Operation *op) {
-    if (!isMaterializedForCost(op)) {
+    if (!occupiesFU(op)) {
       return;
     }
     work_by_class[fuClassOf(op)] += std::max(1, getOpLatency(op));
@@ -139,13 +108,24 @@ IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
     }
   }
   if (bound.detail.empty()) {
-    bound.detail = "no materialized ops";
+    bound.detail = "no placed ops";
   }
   return bound;
 }
 
 //===----------------------------------------------------------------------===//
 // RecMII — loop-carried recurrence latency / distance.
+//
+//   lat(K)   = sum over placed ops on recurrence cycle K of max(1,latency)
+//   dist(K)  = iteration distance omega around K (= 1 for one reserve/ctrl_mov
+//              back-edge, which is all this IR produces)
+//   RecMII   = max over cycles K of ceil( lat(K) / dist(K) )
+//
+// Why not reuse the existing rec_mii (ResourceAwareTaskOptimizationPass)? That
+// one uses cycle.length — the raw op/hop count around the cycle — without
+// latency weighting or dividing by the iteration distance. This version charges
+// each cycle its true latency and divides by omega, which is the actual RecMII
+// definition. The legacy value is still max()'d in by the caller as a floor.
 //===----------------------------------------------------------------------===//
 IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
   (void)arch;
@@ -156,13 +136,13 @@ IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
   int cycle_index = 0;
   for (auto &cycle : recurrence_cycles) {
     long long cycle_latency = 0;
-    int num_materialized = 0;
+    int num_placed = 0;
     for (Operation *op : cycle.operations) {
       if (is_non_materialized(op)) {
         continue;
       }
       cycle_latency += std::max(1, getOpLatency(op));
-      ++num_materialized;
+      ++num_placed;
     }
     // Distance is 1 for a single reserve/ctrl_mov back-edge pair (this IR).
     const long long distance = 1;
@@ -172,7 +152,7 @@ IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
       bound.demand = cycle_latency;
       bound.capacity = distance;
       bound.detail = "cycle#" + std::to_string(cycle_index) +
-                     " ops=" + std::to_string(num_materialized) +
+                     " ops=" + std::to_string(num_placed) +
                      " latency=" + std::to_string(cycle_latency) +
                      " dist=" + std::to_string(distance);
     }
@@ -183,11 +163,17 @@ IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
 
 //===----------------------------------------------------------------------===//
 // MemMII — load/store contention on memory FUs.
+//
+//   MemMII = max( ceil( #plain_loads_stores / #mem_tiles ),
+//                 ceil( #indexed_loads_stores / #mem_indexed_tiles ) )
+//
+// Plain and indexed memory ops are counted against their own tile pools, since
+// a tile may support one class but not the other.
 //===----------------------------------------------------------------------===//
 IIBound calculateMemMii(Region &region, const Architecture &arch) {
   long long num_mem_ops = 0, num_indexed_ops = 0;
   region.walk([&](Operation *op) {
-    if (!isMaterializedForCost(op)) {
+    if (!occupiesFU(op)) {
       return;
     }
     OperationKind kind = getOperationKindFromMlirOp(op);
@@ -222,6 +208,14 @@ IIBound calculateMemMii(Region &region, const Architecture &arch) {
 
 //===----------------------------------------------------------------------===//
 // RouteMII — routed move demand vs total link capacity.
+//
+//   demand  = sum over data_mov m of ceil( bitwidth(m) / link_bandwidth )
+//   links   = total #links in the mesh
+//   RouteMII = ceil( demand / links )
+//
+// Each data_mov is one physical transfer (fanout is pre-expanded into one
+// data_mov per consumer). This is an aggregate link-throughput bound; it ignores
+// placement, so it under-predicts when routing is topologically constrained.
 //===----------------------------------------------------------------------===//
 IIBound calculateRouteMii(Region &region, const Architecture &arch) {
   // Each neura.data_mov is one physical move; fanout is already expanded into
@@ -258,6 +252,15 @@ IIBound calculateRouteMii(Region &region, const Architecture &arch) {
 
 //===----------------------------------------------------------------------===//
 // RegMII — peak simultaneously-live values vs total register capacity.
+//
+//   For each placed value v with an ASAP def level and a later use, it is
+//   live over [def_level(v), last_use_level(v)); peak_live = max over levels of
+//   the count of values whose live range covers that level (via a +1/-1 sweep).
+//   regs     = total registers across all tiles
+//   RegMII   = ceil( peak_live / regs )
+//
+// ASAP levels come from the topological order; the reserve op breaks the
+// loop-carried back-edge so the traversal is a finite DAG.
 //===----------------------------------------------------------------------===//
 IIBound calculateRegMii(Region &region, const Architecture &arch) {
   // ASAP levels over the whole op graph (data_mov/reserve are their own nodes).
@@ -277,7 +280,7 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
     asap_level[op] = op_level;
   }
 
-  // Live range of each materialized value: [def_level, last_materialized_use].
+  // Live range of each placed value: [def_level, last_use].
   // Accumulate +1 at each value's def level and -1 at its last-use level, then
   // prefix-sum to find the peak number of simultaneously-live values.
   int max_level = 0;
@@ -287,7 +290,7 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
   std::vector<long long> live_delta(max_level + 2, 0);
 
   region.walk([&](Operation *op) {
-    if (!isMaterializedForCost(op) || op->getNumResults() == 0) {
+    if (!occupiesFU(op) || op->getNumResults() == 0) {
       return;
     }
     if (!asap_level.count(op)) {
@@ -297,18 +300,18 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
     int last_use_level = def_level;
     for (Value result : op->getResults()) {
       for (Operation *user : result.getUsers()) {
-        // Unwrap routing users (data_mov) to the materialized consumer.
-        Operation *materialized_user = user;
+        // Unwrap routing users (data_mov) to the placed consumer.
+        Operation *placed_user = user;
         if (is_non_materialized(user)) {
           for (Operation *router_user : user->getUsers()) {
             if (asap_level.count(router_user)) {
-              materialized_user = router_user;
+              placed_user = router_user;
             }
           }
         }
-        if (asap_level.count(materialized_user)) {
+        if (asap_level.count(placed_user)) {
           last_use_level =
-              std::max(last_use_level, asap_level[materialized_user]);
+              std::max(last_use_level, asap_level[placed_user]);
         }
       }
     }
@@ -348,11 +351,17 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
 
 //===----------------------------------------------------------------------===//
 // IssueMII — tile issue-slot occupancy (crude ceil(#ops / #tiles) baseline).
+//
+//   IssueMII = ceil( #placed_ops / #tiles )
+//
+// FU-agnostic floor: every op needs some tile-slot per iteration regardless of
+// class. This is exactly the legacy calculateResMii formula, kept as its own
+// bound so nothing is lost by replacing that coarse ResMII with the per-class one.
 //===----------------------------------------------------------------------===//
 IIBound calculateIssueMii(Region &region, const Architecture &arch) {
   long long num_ops = 0;
   region.walk([&](Operation *op) {
-    if (isMaterializedForCost(op)) {
+    if (occupiesFU(op)) {
       ++num_ops;
     }
   });
@@ -368,6 +377,14 @@ IIBound calculateIssueMii(Region &region, const Architecture &arch) {
 
 //===----------------------------------------------------------------------===//
 // Combine.
+//
+//   II = clamp( max(ResMII, RecMII, MemMII, RouteMII, RegMII, IssueMII),
+//               1, ctrl_mem_items )
+//
+// Every bound is an independent lower bound on the achievable II, so their max
+// is the tightest analytical lower bound. ctrl_mem_items is the hardware cap on
+// schedulable II (control-memory depth); exceeding it means "not mappable at
+// this shape", recorded via clamped=true.
 //===----------------------------------------------------------------------===//
 AnalyticalIIBreakdown computeAnalyticalII(Region &region,
                                           const Architecture &arch) {
