@@ -25,7 +25,9 @@
 #include "llvm/Support/raw_ostream.h"
 
 #include <map>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace mlir;
@@ -116,21 +118,24 @@ struct DumpDfgJsonPass
       return nullptr;
     std::vector<TileOverride> overrides;
     if (!valid_tiles.getValue().empty()) {
+      // applyTileOverrides can only REMOVE tiles (existence=false); it cannot
+      // re-add a removed tile. So emit a removal override for every tile NOT in
+      // the valid set, and leave the valid tiles untouched.
+      std::set<std::pair<int, int>> keep;
       llvm::SmallVector<llvm::StringRef, 4> coords;
       llvm::StringRef(valid_tiles.getValue()).split(coords, ',');
-      for (int y = 0; y < y_tiles.getValue(); ++y)
-        for (int x = 0; x < x_tiles.getValue(); ++x) {
-          TileOverride to; to.tile_x = x; to.tile_y = y; to.existence = false;
-          overrides.push_back(to);
-        }
       for (llvm::StringRef c : coords) {
         auto pr = c.split('_');
         int x, y;
-        if (!pr.first.getAsInteger(10, x) && !pr.second.getAsInteger(10, y)) {
-          TileOverride to; to.tile_x = x; to.tile_y = y; to.existence = true;
-          overrides.push_back(to);
-        }
+        if (!pr.first.getAsInteger(10, x) && !pr.second.getAsInteger(10, y))
+          keep.insert({x, y});
       }
+      for (int y = 0; y < y_tiles.getValue(); ++y)
+        for (int x = 0; x < x_tiles.getValue(); ++x)
+          if (!keep.count({x, y})) {
+            TileOverride to; to.tile_x = x; to.tile_y = y; to.existence = false;
+            overrides.push_back(to);
+          }
     }
     return global.cloneWithNewDimensions(y_tiles.getValue(), x_tiles.getValue(),
                                          overrides);
