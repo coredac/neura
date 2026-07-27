@@ -209,30 +209,53 @@ def main():
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--emit", default=None,
                     help="Write the concrete placement+schedule mapping to JSON.")
+    ap.add_argument("--fallback", action="store_true",
+                    help="Unified mode: if the schedule times out (or does not "
+                         "route) within the solve budget at this II, back off "
+                         "to II+1 and retry, instead of giving up. Yields the "
+                         "smallest II for which a real, routable mapping is "
+                         "actually found within budget (>= the true minimum).")
+    ap.add_argument("--emit-cap", type=float, default=12.0,
+                    help="When emitting, cap each per-II solve at this many "
+                         "seconds. We only need a compact, ROUTABLE witness, "
+                         "not a proven-optimal makespan, and the compact "
+                         "solution is found early -- the long tail is just the "
+                         "solver proving minimality. Keeps emit fast.")
     a = ap.parse_args()
     data = json.load(open(a.json))
     hops = shortest_hops(data["arch"])
     max_ii = a.max_ii or data["arch"]["ctrl_mem_items"]
     # When emitting a mapping for the backend, prefer low-hop (router-friendly)
-    # placements so the greedy per-net router can reproduce them.
+    # placements so the greedy per-net router can reproduce them. We do NOT need
+    # to prove the makespan optimal (the compact witness appears early), so cap
+    # the per-solve time to avoid the optimality-proving tail.
     minimize_routing = bool(a.emit)
+    solve_seconds = min(a.seconds, a.emit_cap) if a.emit else a.seconds
     for ii in range(a.min_ii, max_ii + 1):
-        sched = schedule(data, ii, a.seconds, hops, minimize_routing)
+        sched = schedule(data, ii, solve_seconds, hops, minimize_routing)
         if sched is None:
             if a.v: print(f"  II={ii}: schedule infeasible", file=sys.stderr)
             continue
         if sched == "unknown":
+            # Solver could not settle this II within the time budget.
+            if a.fallback:
+                if a.v: print(f"  II={ii}: schedule timeout, backing off to "
+                              f"II+1", file=sys.stderr)
+                continue
             print(f"TRUE_MIN_II >= {ii} (schedule timeout)"); return
-        ok = route(data, sched, ii, a.seconds)
+        ok = route(data, sched, ii, solve_seconds)
         if a.v: print(f"  II={ii}: schedule OK, routing={'OK' if ok else 'FAIL'}",
                       file=sys.stderr)
         if ok:
-            print(f"TRUE_MIN_II = {ii} (placement+schedule+routing all feasible)")
+            # In fallback mode this II may be above the proven minimum, so the
+            # tag reflects "found within budget" rather than "proven optimal".
+            tag = ("MAPPED_II" if a.fallback else "TRUE_MIN_II")
+            print(f"{tag} = {ii} (placement+schedule+routing all feasible)")
             if a.emit:
                 emit_mapping(data, sched, ii, a.emit)
             return
         # else: this schedule did not route; try II+1 (conservative).
-    print(f"TRUE_MIN_II > {max_ii}")
+    print(f"{'MAPPED_II' if a.fallback else 'TRUE_MIN_II'} > {max_ii}")
 
 
 if __name__ == "__main__":
