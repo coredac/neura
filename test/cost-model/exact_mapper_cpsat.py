@@ -49,7 +49,7 @@ def shortest_hops(arch):
     return dist
 
 
-def schedule(data, ii, seconds, hops):
+def schedule(data, ii, seconds, hops, minimize_routing=False):
     ops, edges, arch = data["ops"], data["edges"], data["arch"]
     tiles = arch["tiles"]
     tid = [t["id"] for t in tiles]
@@ -76,6 +76,7 @@ def schedule(data, ii, seconds, hops):
     m.AddAllDifferent(cells)
     # Precedence/recurrence with true shortest-path hop latency (place-dependent).
     maxhop = max((h for h in hops.values() if h != float("inf")), default=0)
+    hop_vars = []
     for e in edges:
         s, d, w = e["s"], e["d"], e["w"]
         lat = ops[s]["latency"]
@@ -85,6 +86,17 @@ def schedule(data, ii, seconds, hops):
                    if hops[(a, b)] != float("inf")]
         m.AddAllowedAssignments([place[s], place[d], hop], allowed)
         m.Add(t[d] >= t[s] + lat + hop - w * ii)
+        hop_vars.append(hop)
+    # Optional: make the schedule reproducible by the backend's greedy per-net
+    # router. That router struggles with long register-hold spans and long
+    # paths, so prefer a COMPACT schedule (small makespan => short holds) first
+    # and LOCAL placements (few hops) second. Neither changes which II is
+    # feasible; both just pick a router-friendly witness. Off for the fast sweep.
+    if minimize_routing:
+        makespan = m.NewIntVar(0, Tmax, "makespan")
+        for i in range(n):
+            m.Add(makespan >= t[i])
+        m.Minimize(makespan * (int(maxhop) * len(edges) + 1) + sum(hop_vars))
     sol = cp_model.CpSolver()
     sol.parameters.max_time_in_seconds = seconds
     # Deterministic: single worker + fixed seed (reproducible for tests).
@@ -168,6 +180,26 @@ def route(data, sched, ii, seconds):
     return st in (cp_model.OPTIMAL, cp_model.FEASIBLE)
 
 
+def emit_mapping(data, sched, ii, path):
+    """Writes the concrete real mapping (op -> tile placement + modulo schedule)
+    as JSON. index_per_ii = time_step % II and invalid_iterations = time_step //
+    II follow the backend's convention, so this is directly comparable to the
+    heuristic mapper's per-op placement."""
+    xy = {t["id"]: (t.get("x"), t.get("y")) for t in data["arch"]["tiles"]}
+    placements = []
+    for i, op in enumerate(data["ops"]):
+        tile, t = sched[i]
+        x, y = xy.get(tile, (None, None))
+        placements.append({
+            "id": i, "class": op["class"], "tile": tile, "x": x, "y": y,
+            "time_step": t, "index_per_ii": t % ii, "invalid_iterations": t // ii,
+        })
+    json.dump({"compiled_ii": ii, "num_tiles": data["arch"]["num_tiles"],
+               "placements": placements}, open(path, "w"), indent=1)
+    print(f"[emit] wrote real mapping ({len(placements)} ops, II={ii}) -> {path}",
+          file=sys.stderr)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("json")
@@ -175,12 +207,17 @@ def main():
     ap.add_argument("--max-ii", type=int, default=0)
     ap.add_argument("--seconds", type=float, default=30.0)
     ap.add_argument("-v", action="store_true")
+    ap.add_argument("--emit", default=None,
+                    help="Write the concrete placement+schedule mapping to JSON.")
     a = ap.parse_args()
     data = json.load(open(a.json))
     hops = shortest_hops(data["arch"])
     max_ii = a.max_ii or data["arch"]["ctrl_mem_items"]
+    # When emitting a mapping for the backend, prefer low-hop (router-friendly)
+    # placements so the greedy per-net router can reproduce them.
+    minimize_routing = bool(a.emit)
     for ii in range(a.min_ii, max_ii + 1):
-        sched = schedule(data, ii, a.seconds, hops)
+        sched = schedule(data, ii, a.seconds, hops, minimize_routing)
         if sched is None:
             if a.v: print(f"  II={ii}: schedule infeasible", file=sys.stderr)
             continue
@@ -191,6 +228,8 @@ def main():
                       file=sys.stderr)
         if ok:
             print(f"TRUE_MIN_II = {ii} (placement+schedule+routing all feasible)")
+            if a.emit:
+                emit_mapping(data, sched, ii, a.emit)
             return
         # else: this schedule did not route; try II+1 (conservative).
     print(f"TRUE_MIN_II > {max_ii}")
