@@ -22,9 +22,10 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
+
 #include <set>
 #include <utility>
-#include "llvm/Support/raw_ostream.h"
 
 using namespace mlir;
 using namespace mlir::neura;
@@ -86,47 +87,48 @@ struct CostModelAnalyticalPass
     if (!valid_tiles.getValue().empty()) {
       // applyTileOverrides can only REMOVE tiles (existence=false), not re-add
       // them; so remove every tile NOT in the valid set, leaving valid ones.
-      std::set<std::pair<int, int>> keep;
+      std::set<std::pair<int, int>> valid_coords;
       llvm::SmallVector<llvm::StringRef, 4> coords;
       llvm::StringRef(valid_tiles.getValue()).split(coords, ',');
       for (llvm::StringRef coord : coords) {
-        auto pr = coord.split('_');
+        auto parts = coord.split('_');
         int x, y;
-        if (!pr.first.getAsInteger(10, x) && !pr.second.getAsInteger(10, y))
-          keep.insert({x, y});
+        if (!parts.first.getAsInteger(10, x) &&
+            !parts.second.getAsInteger(10, y))
+          valid_coords.insert({x, y});
       }
       for (int y = 0; y < y_tiles.getValue(); ++y)
         for (int x = 0; x < x_tiles.getValue(); ++x)
-          if (!keep.count({x, y})) {
-            TileOverride to;
-            to.tile_x = x;
-            to.tile_y = y;
-            to.existence = false;
-            overrides.push_back(to);
+          if (!valid_coords.count({x, y})) {
+            TileOverride tile_override;
+            tile_override.tile_x = x;
+            tile_override.tile_y = y;
+            tile_override.existence = false;
+            overrides.push_back(tile_override);
           }
     }
     return global_arch.cloneWithNewDimensions(y_tiles.getValue(),
                                               x_tiles.getValue(), overrides);
   }
 
-  void writeAttr(Operation *op, const AnalyticalIIBreakdown &bd) {
+  void writeAttr(Operation *op, const AnalyticalIIBreakdown &breakdown) {
     MLIRContext *ctx = op->getContext();
-    auto i32 = [&](int v) {
-      return IntegerAttr::get(IntegerType::get(ctx, 32), v);
+    auto i32 = [&](int value) {
+      return IntegerAttr::get(IntegerType::get(ctx, 32), value);
     };
     SmallVector<NamedAttribute, 10> attrs;
-    auto add = [&](StringRef k, Attribute v) {
-      attrs.push_back(NamedAttribute(StringAttr::get(ctx, k), v));
+    auto add = [&](StringRef key, Attribute value) {
+      attrs.push_back(NamedAttribute(StringAttr::get(ctx, key), value));
     };
-    add("analytical_ii", i32(bd.final_ii));
-    add("res_mii", i32(bd.res.value));
-    add("rec_mii", i32(bd.rec.value));
-    add("mem_mii", i32(bd.mem.value));
-    add("route_mii", i32(bd.route.value));
-    add("reg_mii", i32(bd.reg.value));
-    add("issue_mii", i32(bd.issue.value));
-    add("max_ii", i32(bd.max_ii));
-    add("dominant", StringAttr::get(ctx, bd.dominant));
+    add("analytical_ii", i32(breakdown.final_ii));
+    add("res_mii", i32(breakdown.res.value));
+    add("rec_mii", i32(breakdown.rec.value));
+    add("mem_mii", i32(breakdown.mem.value));
+    add("route_mii", i32(breakdown.route.value));
+    add("reg_mii", i32(breakdown.reg.value));
+    add("issue_mii", i32(breakdown.issue.value));
+    add("max_ii", i32(breakdown.max_ii));
+    add("dominant", StringAttr::get(ctx, breakdown.dominant));
     op->setAttr(kAnalyticalAttr, DictionaryAttr::get(ctx, attrs));
   }
 
@@ -136,43 +138,45 @@ struct CostModelAnalyticalPass
     std::unique_ptr<Architecture> custom = buildCustomArch(global_arch);
     const Architecture &arch = custom ? *custom : global_arch;
 
-    int processed = 0;
+    int num_processed = 0;
     auto process = [&](Operation *op, Region &region, StringRef name) {
       if (region.empty())
         return;
-      AnalyticalIIBreakdown bd = computeAnalyticalII(region, arch);
+      AnalyticalIIBreakdown breakdown = computeAnalyticalII(region, arch);
       llvm::errs() << "[cost-model-analytical] region=" << name
                    << " tiles=" << arch.getNumTiles() << "\n";
-      bd.print(llvm::errs());
+      breakdown.print(llvm::errs());
       if (write_attr.getValue())
-        writeAttr(op, bd);
-      ++processed;
+        writeAttr(op, breakdown);
+      ++num_processed;
     };
 
     bool any_accel = false;
-    module.walk([&](neura::KernelOp k) {
-      auto a = k->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
-      if (a && a.getValue() == accel::kNeuraTarget) {
+    module.walk([&](neura::KernelOp kernel) {
+      auto accel_attr =
+          kernel->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
+      if (accel_attr && accel_attr.getValue() == accel::kNeuraTarget) {
         any_accel = true;
-        process(k, k.getBody(), "kernel");
+        process(kernel, kernel.getBody(), "kernel");
       }
     });
-    module.walk([&](func::FuncOp f) {
-      auto a = f->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
-      if (a && a.getValue() == accel::kNeuraTarget) {
+    module.walk([&](func::FuncOp func) {
+      auto accel_attr =
+          func->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
+      if (accel_attr && accel_attr.getValue() == accel::kNeuraTarget) {
         any_accel = true;
-        process(f, f.getBody(), f.getName());
+        process(func, func.getBody(), func.getName());
       }
     });
 
     // Fallback: no op is explicitly tagged for the accelerator (e.g. a
     // hand-written regression kernel). Process every non-empty func so the
     // model is still usable standalone.
-    if (!any_accel) {
-      module.walk([&](func::FuncOp f) { process(f, f.getBody(), f.getName()); });
-    }
+    if (!any_accel)
+      module.walk(
+          [&](func::FuncOp func) { process(func, func.getBody(), func.getName()); });
 
-    if (processed == 0)
+    if (num_processed == 0)
       llvm::errs() << "[cost-model-analytical] no regions processed\n";
   }
 };
