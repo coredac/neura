@@ -108,7 +108,7 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
     return None if st == cp_model.INFEASIBLE else "unknown"
 
 
-def route(data, sched, ii, seconds):
+def route(data, sched, ii, seconds, want_routes=False):
     ops, edges, arch = data["ops"], data["edges"], data["arch"]
     tiles = arch["tiles"]
     tid = [t["id"] for t in tiles]
@@ -130,6 +130,10 @@ def route(data, sched, ii, seconds):
     # Presence + arc booleans per net over a per-net cycle window.
     link_use = collections.defaultdict(list)  # (link_key,residue) -> [bool]
     reg_use = collections.defaultdict(list)   # (tile,residue) -> [bool]
+    pres_of = {}                              # p -> {(tile,cyc): boolvar}
+    # p -> {(child_tile,child_cyc): [(kind, parent_node, boolvar)]}. Used after
+    # solving to trace each consumer back to the producer (the concrete route).
+    arcs_of = collections.defaultdict(lambda: collections.defaultdict(list))
     for p, cons in nets.items():
         src_tile = sched[p][0]
         c0 = prod_avail[p]
@@ -139,6 +143,7 @@ def route(data, sched, ii, seconds):
         cycles = list(range(c0, cmax + 1))
         pres = {(tl, c): m.NewBoolVar(f"pr{p}_{tl}_{c}")
                 for tl in tid for c in cycles}
+        pres_of[p] = pres
         m.Add(pres[(src_tile, c0)] == 1)
         for (ct, dl) in cons:
             m.Add(pres[(ct, dl)] == 1)
@@ -154,6 +159,7 @@ def route(data, sched, ii, seconds):
                     m.Add(pres[(tl, c - 1)] == 1).OnlyEnforceIf(h)
                     incoming.append(h)
                     reg_use[(tl, (c - 1) % ii)].append(h)
+                    arcs_of[p][(tl, c)].append(("hold", (tl, c - 1), h))
                     # link moves from neighbors into tl
                     for src in tid:
                         for (dst, lat) in out_links[src]:
@@ -162,6 +168,8 @@ def route(data, sched, ii, seconds):
                                 m.Add(pres[(src, c - lat)] == 1).OnlyEnforceIf(mv)
                                 incoming.append(mv)
                                 link_use[((src, dst), (c - lat) % ii)].append(mv)
+                                arcs_of[p][(tl, c)].append(
+                                    ("move", (src, c - lat), mv))
                 # present => at least one incoming arc chosen
                 m.Add(sum(incoming) >= 1).OnlyEnforceIf(pres[(tl, c)])
                 if not incoming:
@@ -177,10 +185,43 @@ def route(data, sched, ii, seconds):
     sol.parameters.num_search_workers = 1
     sol.parameters.random_seed = 0
     st = sol.Solve(m)
-    return st in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+    feasible = st in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+    if not want_routes or not feasible:
+        return (feasible, None)
+
+    # Reconstruct the concrete route of every edge: trace each consumer node
+    # back to the producer through the chosen arcs. routes[(s,d)] = ordered list
+    # of (tile, cycle) the value occupies, producer-tile first, consumer last.
+    def trace(p, start_node):
+        src_tile = sched[p][0]
+        c0 = prod_avail[p]
+        node = start_node
+        rev = [node]
+        guard = 0
+        while node != (src_tile, c0) and guard < 100000:
+            guard += 1
+            parent = None
+            for kind, pnode, var in arcs_of[p].get(node, []):
+                if sol.Value(var) and sol.Value(pres_of[p][pnode]):
+                    parent = pnode
+                    break
+            if parent is None:
+                return None
+            rev.append(parent)
+            node = parent
+        return list(reversed(rev))
+
+    routes = {}
+    for e in edges:
+        s, d, w = e["s"], e["d"], e["w"]
+        deadline = sched[d][1] + (ii if w == 1 else 0)
+        path = trace(s, (sched[d][0], deadline))
+        if path is not None:
+            routes[(s, d)] = path
+    return (feasible, routes)
 
 
-def emit_mapping(data, sched, ii, path):
+def emit_mapping(data, sched, ii, path, routes=None):
     """Writes the concrete real mapping (op -> tile placement + modulo schedule)
     as JSON. index_per_ii = time_step % II and invalid_iterations = time_step //
     II follow the backend's convention, so this is directly comparable to the
@@ -194,10 +235,21 @@ def emit_mapping(data, sched, ii, path):
             "id": i, "class": op["class"], "tile": tile, "x": x, "y": y,
             "time_step": t, "index_per_ii": t % ii, "invalid_iterations": t // ii,
         })
-    json.dump({"compiled_ii": ii, "num_tiles": data["arch"]["num_tiles"],
-               "placements": placements}, open(path, "w"), indent=1)
-    print(f"[emit] wrote real mapping ({len(placements)} ops, II={ii}) -> {path}",
-          file=sys.stderr)
+    out = {"compiled_ii": ii, "num_tiles": data["arch"]["num_tiles"],
+           "placements": placements}
+    if routes is not None:
+        # Concrete per-edge route: producer -> consumer as an ordered list of
+        # [tile, cycle] hops (consecutive different tiles => a link move; same
+        # tile across cycles => a register hold). The backend importer replays
+        # exactly this path instead of greedily re-routing, so it reproduces the
+        # solver's joint routing even on large kernels.
+        out["routes"] = [{"s": s, "d": d,
+                          "path": [[tl, c] for (tl, c) in routes[(s, d)]]}
+                         for (s, d) in sorted(routes)]
+    json.dump(out, open(path, "w"), indent=1)
+    nroutes = len(routes) if routes is not None else 0
+    print(f"[emit] wrote real mapping ({len(placements)} ops, {nroutes} routes, "
+          f"II={ii}) -> {path}", file=sys.stderr)
 
 
 def main():
@@ -243,7 +295,8 @@ def main():
                               f"II+1", file=sys.stderr)
                 continue
             print(f"TRUE_MIN_II >= {ii} (schedule timeout)"); return
-        ok = route(data, sched, ii, solve_seconds)
+        ok, routes = route(data, sched, ii, solve_seconds,
+                           want_routes=bool(a.emit))
         if a.v: print(f"  II={ii}: schedule OK, routing={'OK' if ok else 'FAIL'}",
                       file=sys.stderr)
         if ok:
@@ -252,7 +305,7 @@ def main():
             tag = ("MAPPED_II" if a.fallback else "TRUE_MIN_II")
             print(f"{tag} = {ii} (placement+schedule+routing all feasible)")
             if a.emit:
-                emit_mapping(data, sched, ii, a.emit)
+                emit_mapping(data, sched, ii, a.emit, routes)
             return
         # else: this schedule did not route; try II+1 (conservative).
     print(f"{'MAPPED_II' if a.fallback else 'TRUE_MIN_II'} > {max_ii}")
