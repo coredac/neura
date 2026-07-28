@@ -17,6 +17,7 @@
 #include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <string>
 #include <vector>
@@ -114,49 +115,146 @@ IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
 }
 
 //===----------------------------------------------------------------------===//
-// RecMII — loop-carried recurrence latency / distance.
+// RecMII — loop-carried recurrence latency / distance (the critical circuit).
 //
-//   lat(K)   = sum over placed ops on recurrence cycle K of max(1,latency)
-//   dist(K)  = iteration distance omega around K (= 1 for one reserve/ctrl_mov
-//              back-edge, which is all this IR produces)
-//   RecMII   = max over cycles K of ceil( lat(K) / dist(K) )
+//   RecMII = max over ALL cycles K of ceil( lat(K) / omega(K) )
+//     lat(K)   = sum of producer latencies of the edges around K
+//     omega(K) = sum of iteration distances (1 per loop-carried back-edge) on K
 //
-// Why not reuse the existing rec_mii (ResourceAwareTaskOptimizationPass)? That
-// one uses cycle.length — the raw op/hop count around the cycle — without
-// latency weighting or dividing by the iteration distance. This version charges
-// each cycle its true latency and divides by omega, which is the actual RecMII
-// definition. The legacy value is still max()'d in by the caller as a floor.
+// This is the maximum cycle ratio ("critical circuit") of the dependence graph,
+// computed exactly via binary search + a positive-cycle (Bellman-Ford) test —
+// NOT by enumerating cycles. The old version summed the ops that
+// collectRecurrenceCycles returned, but that helper walks one ctrl_mov/reserve
+// at a time, so it only sees single-recurrence-variable cycles and misses
+// circuits that thread through more than one loop-carried variable. On bicg,
+// for example, the enumerated bound was 5 while the true critical circuit (and
+// the mapper's proven optimum) is 9; this version returns 9. Because it is the
+// exact max cycle ratio it dominates any enumerated cycle, so nothing is lost.
+//
+// Edge set matches DumpDfgJsonPass exactly (same nodes/edges the exact mapper
+// solves over): forward operand edges (omega=0) plus ctrl_mov/reserve back
+// edges (omega=1). Edge "delay" is the producer's latency, matching the
+// scheduler's precedence  t[dst] >= t[src] + lat(src) + hop - omega*II  with
+// hop dropped (a lower bound, hop >= 0).
 //===----------------------------------------------------------------------===//
 IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
   (void)arch;
   IIBound bound;
   bound.value = 1;
   bound.detail = "no recurrence";
-  auto recurrence_cycles = collectRecurrenceCycles(region);
-  int cycle_index = 0;
-  for (auto &cycle : recurrence_cycles) {
-    long long cycle_latency = 0;
-    int num_placed = 0;
-    for (Operation *op : cycle.operations) {
-      if (is_non_materialized(op)) {
-        continue;
+
+  // Node ids for the materialized ops (same predicate the mapper/dump use).
+  llvm::DenseMap<Operation *, int> op_id;
+  region.walk([&](Operation *op) {
+    if (occupiesFU(op)) {
+      op_id[op] = (int)op_id.size();
+    }
+  });
+  if (op_id.empty()) {
+    return bound;
+  }
+
+  // Safe producer unwrap through a DataMovOp; ReserveOp (loop-carried
+  // placeholder) returns null and is handled by the back-edge walk. Mirrors
+  // DumpDfgJsonPass::materializedProducer (no asserts).
+  auto producerOf = [](Value value) -> Operation * {
+    Operation *producer = value.getDefiningOp();
+    if (!producer || isa<neura::ReserveOp>(producer)) {
+      return nullptr;
+    }
+    if (auto mov = dyn_cast<neura::DataMovOp>(producer)) {
+      Operation *inner = mov.getOperand().getDefiningOp();
+      return (inner && !isa<neura::ReserveOp>(inner)) ? inner : nullptr;
+    }
+    return producer;
+  };
+
+  struct Arc {
+    int dst;
+    int delay;
+    int omega;
+  };
+  std::vector<std::vector<Arc>> out(op_id.size());
+  long long total_delay = 0;
+  // Forward (intra-iteration) edges, omega=0.
+  for (auto &entry : op_id) {
+    Operation *consumer = entry.first;
+    for (Value operand : consumer->getOperands()) {
+      Operation *producer = producerOf(operand);
+      auto found = producer ? op_id.find(producer) : op_id.end();
+      if (found != op_id.end()) {
+        int delay = std::max(1, getOpLatency(producer));
+        out[found->second].push_back({entry.second, delay, 0});
+        total_delay += delay;
       }
-      cycle_latency += std::max(1, getOpLatency(op));
-      ++num_placed;
     }
-    // Distance is 1 for a single reserve/ctrl_mov back-edge pair (this IR).
-    const long long distance = 1;
-    int cycle_ii = ceilDiv(cycle_latency, distance);
-    if (cycle_ii > bound.value) {
-      bound.value = cycle_ii;
-      bound.demand = cycle_latency;
-      bound.capacity = distance;
-      bound.detail = "cycle#" + std::to_string(cycle_index) +
-                     " ops=" + std::to_string(num_placed) +
-                     " latency=" + std::to_string(cycle_latency) +
-                     " dist=" + std::to_string(distance);
+  }
+  // Loop-carried edges, omega=1: producer of a ctrl_mov's value -> the
+  // materialized users of the reserve it targets (value[i] feeding iteration
+  // i+1). Same construction as DumpDfgJsonPass.
+  region.walk([&](neura::CtrlMovOp ctrl_mov) {
+    Operation *producer = producerOf(ctrl_mov.getValue());
+    auto reserve = ctrl_mov.getTarget().getDefiningOp<neura::ReserveOp>();
+    auto found = producer ? op_id.find(producer) : op_id.end();
+    if (found == op_id.end() || !reserve) {
+      return;
     }
-    ++cycle_index;
+    int delay = std::max(1, getOpLatency(producer));
+    for (Operation *user : reserve.getResult().getUsers()) {
+      Operation *materialized_user = user;
+      if (is_non_materialized(user)) {
+        for (Operation *router_user : user->getUsers()) {
+          if (op_id.count(router_user)) {
+            materialized_user = router_user;
+          }
+        }
+      }
+      auto user_id = op_id.find(materialized_user);
+      if (user_id != op_id.end()) {
+        out[found->second].push_back({user_id->second, delay, 1});
+        total_delay += delay;
+      }
+    }
+  });
+
+  // Max cycle ratio via binary search on r: a cycle has ratio > r iff the graph
+  // with edge weight (delay - r*omega) has a positive cycle. Every cycle uses
+  // >=1 omega=1 back-edge (forward edges form a DAG), so the ratio is finite.
+  const int num_nodes = (int)op_id.size();
+  auto hasPositiveCycle = [&](double r) {
+    std::vector<double> dist(num_nodes, 0.0);
+    for (int iter = 0; iter < num_nodes; ++iter) {
+      bool updated = false;
+      for (int u = 0; u < num_nodes; ++u) {
+        for (const Arc &arc : out[u]) {
+          double relaxed = dist[u] + (arc.delay - r * arc.omega);
+          if (relaxed > dist[arc.dst] + 1e-9) {
+            dist[arc.dst] = relaxed;
+            updated = true;
+          }
+        }
+      }
+      if (!updated) {
+        return false; // settled with no positive cycle
+      }
+    }
+    return true; // still relaxing after |V| passes => positive cycle
+  };
+  double lo = 0.0, hi = (double)total_delay + 1.0;
+  if (hasPositiveCycle(0.0)) { // a recurrence exists at all
+    for (int iter = 0; iter < 100; ++iter) {
+      double mid = 0.5 * (lo + hi);
+      if (hasPositiveCycle(mid)) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    int rec_ii = std::max(1, (int)std::ceil(lo - 1e-6));
+    bound.value = rec_ii;
+    bound.demand = rec_ii;
+    bound.capacity = 1;
+    bound.detail = "critical circuit ratio=" + std::to_string(lo);
   }
   return bound;
 }
