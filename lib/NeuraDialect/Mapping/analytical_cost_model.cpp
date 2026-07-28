@@ -218,27 +218,45 @@ IIBound calculateMemMii(Region &region, const Architecture &arch) {
 // placement, so it under-predicts when routing is topologically constrained.
 //===----------------------------------------------------------------------===//
 IIBound calculateRouteMii(Region &region, const Architecture &arch) {
+  auto links = arch.getAllLinks();
+  long long total_links = static_cast<long long>(links.size());
+
+  // A single-tile / link-less arch needs no inter-tile routing, so RouteMII does
+  // not bind — dividing intra-tile moves by a phantom link would fabricate a
+  // bound. Returning 1 keeps it a valid (non-over-predicting) lower bound.
+  if (total_links <= 0) {
+    IIBound bound;
+    bound.value = 1;
+    bound.detail = "no inter-tile links; RouteMII not applied";
+    return bound;
+  }
+
+  // Charge each move against the WIDEST link bandwidth read from the arch spec
+  // (Link::getBandwidth, populated from architecture.yaml / defaults). Since
+  // RouteMII must be a lower bound, the most generous channel (fewest sub-
+  // channels per move) is the safe, non-over-predicting choice on a heterogeneous
+  // mesh; on the default homogeneous mesh every link is identical so it is exact.
+  int link_bandwidth = 0;
+  for (Link *link : links) {
+    link_bandwidth = std::max(link_bandwidth, link->getBandwidth());
+  }
+  if (link_bandwidth <= 0) {
+    // The arch specifies no usable link bandwidth; rather than invent one, treat
+    // routing bandwidth as unmodeled so RouteMII does not bind (safe for a LB).
+    IIBound bound;
+    bound.value = 1;
+    bound.detail = "no link bandwidth in arch spec; RouteMII not applied";
+    return bound;
+  }
+
   // Each neura.data_mov is one physical move; fanout is already expanded into
   // one data_mov per real consumer, so replicated traffic is counted here.
   long long channel_demand = 0;
   long long num_moves = 0;
   region.walk([&](neura::DataMovOp move) {
     ++num_moves;
-    int link_bandwidth = 32;
-    for (Link *link : arch.getAllLinks()) {
-      link_bandwidth = link->getBandwidth();
-      break; // links are homogeneous by default; use the common bandwidth.
-    }
-    if (link_bandwidth <= 0) {
-      link_bandwidth = 32;
-    }
     channel_demand += ceilDiv(valueBitWidth(move.getResult()), link_bandwidth);
   });
-
-  long long total_links = static_cast<long long>(arch.getAllLinks().size());
-  if (total_links <= 0) {
-    total_links = 1;
-  }
 
   IIBound bound;
   bound.value = std::max(1, ceilDiv(channel_demand, total_links));
@@ -246,7 +264,8 @@ IIBound calculateRouteMii(Region &region, const Architecture &arch) {
   bound.capacity = total_links;
   bound.detail = "moves=" + std::to_string(num_moves) +
                  " channel_demand=" + std::to_string(channel_demand) +
-                 " links=" + std::to_string(total_links);
+                 " links=" + std::to_string(total_links) +
+                 " link_bw=" + std::to_string(link_bandwidth);
   return bound;
 }
 
@@ -335,11 +354,28 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
   for (Tile *tile : arch.getAllTiles()) {
     total_registers += static_cast<long long>(tile->getRegisters().size());
   }
-  if (total_registers <= 0) {
-    total_registers = 1;
-  }
 
   IIBound bound;
+  if (total_registers <= 0) {
+    // No register files are modeled on this arch (e.g. a config with fewer than
+    // one regfile's worth of registers, where Architecture rounds down to zero).
+    // A register-pressure lower bound is meaningless here, so don't let RegMII
+    // bind — reporting peak_live/1 would grossly OVER-predict and wrongly reject
+    // otherwise-mappable shapes. Under-binding is the safe direction for a lower
+    // bound.
+    bound.value = 1;
+    bound.demand = peak_live;
+    bound.capacity = 0;
+    bound.detail = "no register files modeled; RegMII not applied";
+    return bound;
+  }
+
+  // NOTE: peak_live is the peak concurrency of a single ASAP schedule, which
+  // MAXIMISES overlap; a different valid schedule at the same II may realise
+  // lower register pressure. So this is a strong heuristic estimate, not a
+  // certified lower bound — it can over-predict on wide non-reconverging fan-out.
+  // It rarely dominates (registers are usually plentiful), and top-k + mapper
+  // verification absorbs the residual.
   bound.value = std::max(1, ceilDiv(peak_live, total_registers));
   bound.demand = peak_live;
   bound.capacity = total_registers;

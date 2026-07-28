@@ -92,21 +92,43 @@ struct CostModelAnalyticalPass
       llvm::SmallVector<llvm::StringRef, 4> coords;
       llvm::StringRef(valid_tiles.getValue()).split(coords, ',');
       for (llvm::StringRef coord : coords) {
+        coord = coord.trim(); // tolerate "0_0, 1_1" with spaces after commas.
+        if (coord.empty()) {
+          continue;
+        }
         auto parts = coord.split('_');
         int x, y;
-        if (!parts.first.getAsInteger(10, x) &&
-            !parts.second.getAsInteger(10, y)) {
-          valid_coords.insert({x, y});
+        if (!parts.first.trim().getAsInteger(10, x) &&
+            !parts.second.trim().getAsInteger(10, y)) {
+          // Ignore coords outside the x/y-tiles grid rather than letting a typo
+          // silently remove real tiles.
+          if (x >= 0 && x < x_tiles.getValue() && y >= 0 &&
+              y < y_tiles.getValue()) {
+            valid_coords.insert({x, y});
+          } else {
+            llvm::errs() << "[cost-model-analytical] valid-tiles coord " << x
+                         << "_" << y << " is outside the " << x_tiles.getValue()
+                         << "x" << y_tiles.getValue() << " grid; ignored\n";
+          }
         }
       }
-      for (int y = 0; y < y_tiles.getValue(); ++y) {
-        for (int x = 0; x < x_tiles.getValue(); ++x) {
-          if (!valid_coords.count({x, y})) {
-            TileOverride tile_override;
-            tile_override.tile_x = x;
-            tile_override.tile_y = y;
-            tile_override.existence = false;
-            overrides.push_back(tile_override);
+      if (valid_coords.empty()) {
+        // Every valid tile would be removed -> a 0-tile arch, whose predictions
+        // are meaningless. Fall back to the full rectangle and warn.
+        llvm::errs() << "[cost-model-analytical] valid-tiles selected no tiles "
+                        "in the grid; using the full "
+                     << x_tiles.getValue() << "x" << y_tiles.getValue()
+                     << " rectangle\n";
+      } else {
+        for (int y = 0; y < y_tiles.getValue(); ++y) {
+          for (int x = 0; x < x_tiles.getValue(); ++x) {
+            if (!valid_coords.count({x, y})) {
+              TileOverride tile_override;
+              tile_override.tile_x = x;
+              tile_override.tile_y = y;
+              tile_override.existence = false;
+              overrides.push_back(tile_override);
+            }
           }
         }
       }

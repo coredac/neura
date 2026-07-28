@@ -549,18 +549,21 @@ private:
         for (auto &cycle : cycles)
           rec_mii = std::max(rec_mii, cycle.length);
         if (use_full_cost_model) {
-          // Full parametric model: max of all resource bounds. computeAnalyticalII
-          // internally recomputes its own (stronger, per-FU-class + latency-
-          // weighted) ResMII/RecMII, so bd.final_ii already subsumes the crude
-          // res_mii/rec_mii above. We deliberately keep those two crude values in
-          // the max() below as a redundant-but-harmless floor rather than
-          // restructure the surrounding compiled/analytical code paths that also
-          // rely on res_mii/rec_mii; bd.final_ii dominates them.
+          // Full parametric model: II = max of all resource bounds, computed by
+          // computeAnalyticalII. Do NOT fold in the crude res_mii/rec_mii here.
+          // The crude rec_mii is max(cycle.length) — the raw hop count around the
+          // recurrence, INCLUDING the non-materialized reserve/ctrl_mov/data_mov
+          // hops — so it can exceed the parametric (latency-weighted, materialized-
+          // only) RecMII inside bd.final_ii. Folding it back in would let that
+          // coarse hop-count override the parametric prediction on recurrence-
+          // bound kernels and perturb cross-kernel ranking — exactly the metric
+          // this model replaces. bd.final_ii already includes IssueMII, which
+          // subsumes the crude res_mii.
           neura::AnalyticalIIBreakdown bd =
               neura::computeAnalyticalII(region, architecture);
           llvm::errs() << "[cost-model-analytical] task profiling:\n";
           bd.print(llvm::errs());
-          compiled_ii = std::max({compiled_ii, res_mii, rec_mii, bd.final_ii});
+          compiled_ii = std::max(compiled_ii, bd.final_ii);
         } else {
           compiled_ii = std::max({compiled_ii, res_mii, rec_mii});
         }

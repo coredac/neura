@@ -103,21 +103,40 @@ struct DumpDfgJsonPass
       llvm::SmallVector<llvm::StringRef, 4> coords;
       llvm::StringRef(valid_tiles.getValue()).split(coords, ',');
       for (llvm::StringRef coord : coords) {
+        coord = coord.trim(); // tolerate "0_0, 1_1" with spaces after commas.
+        if (coord.empty()) {
+          continue;
+        }
         auto parts = coord.split('_');
         int x, y;
-        if (!parts.first.getAsInteger(10, x) &&
-            !parts.second.getAsInteger(10, y)) {
-          valid_coords.insert({x, y});
+        if (!parts.first.trim().getAsInteger(10, x) &&
+            !parts.second.trim().getAsInteger(10, y)) {
+          // Ignore out-of-grid coords rather than silently removing real tiles.
+          if (x >= 0 && x < x_tiles.getValue() && y >= 0 &&
+              y < y_tiles.getValue()) {
+            valid_coords.insert({x, y});
+          } else {
+            llvm::errs() << "[dump-dfg-json] valid-tiles coord " << x << "_" << y
+                         << " is outside the " << x_tiles.getValue() << "x"
+                         << y_tiles.getValue() << " grid; ignored\n";
+          }
         }
       }
-      for (int y = 0; y < y_tiles.getValue(); ++y) {
-        for (int x = 0; x < x_tiles.getValue(); ++x) {
-          if (!valid_coords.count({x, y})) {
-            TileOverride tile_override;
-            tile_override.tile_x = x;
-            tile_override.tile_y = y;
-            tile_override.existence = false;
-            overrides.push_back(tile_override);
+      if (valid_coords.empty()) {
+        llvm::errs() << "[dump-dfg-json] valid-tiles selected no tiles in the "
+                        "grid; using the full "
+                     << x_tiles.getValue() << "x" << y_tiles.getValue()
+                     << " rectangle\n";
+      } else {
+        for (int y = 0; y < y_tiles.getValue(); ++y) {
+          for (int x = 0; x < x_tiles.getValue(); ++x) {
+            if (!valid_coords.count({x, y})) {
+              TileOverride tile_override;
+              tile_override.tile_x = x;
+              tile_override.tile_y = y;
+              tile_override.existence = false;
+              overrides.push_back(tile_override);
+            }
           }
         }
       }
@@ -142,12 +161,18 @@ struct DumpDfgJsonPass
       int src, dst, omega;
     };
     std::vector<Edge> edges;
-    // Forward (intra-iteration) edges, omega=0.
+    // Forward (intra-iteration) edges, omega=0. Dedup by (producer, consumer):
+    // an op that uses the same value twice (e.g. x + x) has two data_movs to the
+    // same producer, but that is ONE dependence net — emitting it twice would
+    // double-book the shared link/route on import.
+    std::set<std::pair<int, int>> seen_forward;
     for (Operation *consumer : placed_ops) {
       for (Value operand : consumer->getOperands()) {
         Operation *producer = placedProducer(operand);
         if (producer && op_id.count(producer)) {
-          edges.push_back({op_id[producer], op_id[consumer], 0});
+          if (seen_forward.insert({op_id[producer], op_id[consumer]}).second) {
+            edges.push_back({op_id[producer], op_id[consumer], 0});
+          }
         }
       }
     }
@@ -183,9 +208,13 @@ struct DumpDfgJsonPass
     auto tiles = arch.getAllTiles();
     for (size_t i = 0; i < tiles.size(); ++i) {
       Tile *tile = tiles[i];
+      // regs = total registers on the tile; regfiles = number of register files
+      // (each with one read + one write port) — both read straight from the arch
+      // so the oracle's port model doesn't hardcode the regs-per-file constant.
       os << (i ? ", " : "") << "{\"id\": " << tile->getId()
          << ", \"x\": " << tile->getX() << ", \"y\": " << tile->getY()
-         << ", \"regs\": " << (int)tile->getRegisters().size() << "}";
+         << ", \"regs\": " << (int)tile->getRegisters().size()
+         << ", \"regfiles\": " << (int)tile->getRegisterFiles().size() << "}";
     }
     os << "],\n    \"fu_class_tiles\": {";
     bool first_class = true;

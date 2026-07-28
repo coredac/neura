@@ -49,7 +49,8 @@ struct AnalyticalIIBreakdown {
   int final_ii = 1;     // clamp(max(all bounds), 1, max_ii).
   int max_ii = 0;       // architecture II ceiling (ctrl_mem_items).
   bool clamped = false; // true if max(bounds) exceeded max_ii.
-  std::string dominant; // name of the bound equal to final_ii.
+  std::string dominant; // name of the largest-demand bound (== final_ii unless
+                        // clamped to max_ii).
 
   // Prints the structured diagnostic block:
   //   [cost-model-analytical]
@@ -61,7 +62,7 @@ struct AnalyticalIIBreakdown {
 // ===-- Individual bounds (each independently testable) --===================
 // //
 
-// ResMII: partitions materialized ops by FU class (add/mul/mem/cmp/... per
+// ResMII: partitions placed ops by FU class (add/mul/mem/cmp/... per
 // kFuTypesToOperations), weights each by its execution latency, and divides by
 // the number of tiles that physically provide that FU class.
 //   ResMII = max_class ceil( sum_latency(class) / #tiles_supporting(class) )
@@ -89,7 +90,7 @@ IIBound calculateRouteMii(Region &region, const Architecture &arch);
 //   RegMII = ceil( max_level(#live values) / sum_tiles(#registers) )
 IIBound calculateRegMii(Region &region, const Architecture &arch);
 
-// IssueMII: total materialized-op issue slots against total tile issue
+// IssueMII: total placed-op issue slots against total tile issue
 // bandwidth (1 issue / tile / cycle here). Coincides with the crude
 // ceil(#ops / #tiles) baseline and is kept separate so multi-issue tiles are
 // expressible.

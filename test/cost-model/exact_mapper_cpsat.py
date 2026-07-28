@@ -69,10 +69,12 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
     fu_class_tiles = arch["fu_class_tiles"]
     num_ops = len(ops)
     # Upper bound on any op's issue time. A modulo schedule fits within one II
-    # window per op plus slack for the dependence chain; 2*num_ops + 2*ii + 8 is
-    # a deliberately loose ceiling (never binds for these kernels, just bounds
-    # the integer-variable domains so CP-SAT stays finite).
-    max_time = 2 * num_ops + 2 * ii + 8
+    # window per op plus slack for the dependence chain and the pipeline depth of
+    # multi-cycle ops; include the total op latency so a long chain of latency>1
+    # ops can't overflow the domain and get mislabeled INFEASIBLE. Still a loose
+    # ceiling that just keeps CP-SAT's integer domains finite.
+    total_latency = sum(max(1, op["latency"]) for op in ops)
+    max_time = 2 * num_ops + 2 * ii + total_latency + 8
     model = cp_model.CpModel()
     place = []                                  # place[i]      = tile of op i
     issue_time = []                             # issue_time[i] = cycle op i fires
@@ -84,21 +86,30 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
             cp_model.Domain.FromValues(valid_tiles), f"place{i}")
         place.append(place_var)
         issue_time.append(model.NewIntVar(0, max_time, f"time{i}"))
-    # FU modulo resource: at most one op per (tile, residue). Encoded as a single
-    # AllDifferent over cell = place*II + (time mod II): equal cells would mean
-    # two ops share a tile at congruent times, which is exactly the conflict to
-    # ban. Example (II=4): an op on tile 1 at t=5 has residue 5%4=1 and cell
-    # 1*4+1=5; any other op wanting tile 1 at t=1, 9, 13, ... (also residue 1)
-    # would need the same cell 5 -> AllDifferent rejects it. An op on tile 2 at
-    # t=5 has cell 2*4+1=9, no conflict.
+    # FU modulo resource: a latency-L op occupies its tile for the WHOLE pipeline
+    # window [t, t+L) -- matching the backend, which marks START/IN/END pipe
+    # stages and rejects any overlap (MappingState bindMultiCycleOp). Model it as
+    # a single AllDifferent over one cell per occupied (tile, residue): for op i
+    # and pipeline offset k in [0,L_i), occupied residue = (time+k) mod II and
+    # cell = place*II + that residue. Equal cells => two ops (or two stages) share
+    # a tile at congruent times, exactly the conflict to ban. The L=1 case reduces
+    # to the old "one cell per op". If L_i > II the op's own stages collide on a
+    # residue -> AllDifferent is infeasible -> that II is correctly rejected (the
+    # FU cannot be re-issued every II). Example (II=4): op on tile 1 at t=5,
+    # latency 2 occupies residues 5%4=1 and 6%4=2 -> cells 1*4+1=5 and 1*4+2=6.
     cells = []
     for i in range(num_ops):
         residue = model.NewIntVar(0, ii - 1, f"residue{i}")
         iteration = model.NewIntVar(0, max_time, f"iter{i}")
         model.Add(issue_time[i] == iteration * ii + residue)  # residue = time % II
-        cell = model.NewIntVar(0, (max(tile_ids) + 1) * ii, f"cell{i}")
-        model.Add(cell == place[i] * ii + residue)
-        cells.append(cell)
+        latency_i = max(1, ops[i]["latency"])
+        for k in range(latency_i):
+            # occ_residue = (residue + k) mod II (the k-th pipeline stage's slot).
+            occ_residue = model.NewIntVar(0, ii - 1, f"occ{i}_{k}")
+            model.AddModuloEquality(occ_residue, residue + k, ii)
+            cell = model.NewIntVar(0, (max(tile_ids) + 1) * ii, f"cell{i}_{k}")
+            model.Add(cell == place[i] * ii + occ_residue)
+            cells.append(cell)
     model.AddAllDifferent(cells)
     # Precedence/recurrence. hop is the place-dependent travel latency between the
     # producer and consumer tiles, pinned to the shortest-path table so the timing
@@ -165,9 +176,12 @@ def route(data, sched, ii, seconds, want_routes=False):
     for i, (tile, fire_time) in sched.items():
         produce_cycle[i] = fire_time + ops[i]["latency"]
     for edge in edges:
-        src, dst, is_loop_carried = edge["s"], edge["d"], edge["w"]
+        src, dst, omega = edge["s"], edge["d"], edge["w"]
         cons_tile, cons_time = sched[dst]
-        deadline = cons_time + (ii if is_loop_carried else 0)  # recurrence
+        # A distance-omega loop-carried edge is consumed omega iterations later;
+        # use omega*ii (not a boolean) so this matches schedule()'s -w*ii bound
+        # for any omega, not just 0/1.
+        deadline = cons_time + omega * ii
         nets[src].append((cons_tile, deadline))
     model = cp_model.CpModel()
     # Each net is routed as a presence flow on a time-expanded graph:
@@ -176,8 +190,22 @@ def route(data, sched, ii, seconds, want_routes=False):
     # either holds (a register on the same tile, next cycle) or moves (a link
     # into the tile). link_use / reg_use collect the booleans that share a modulo
     # slot so we can cap them.
+    # Each backend register file exposes ONE write and ONE read port, so a tile
+    # can write (or read) at most #regfiles values in one modulo slot -- a real
+    # limit the storage-count cap below misses, which is what makes a register-
+    # routing hub fail to import. The regfile count is read straight from the arch
+    # (emitted by --dump-dfg-json); older dumps without it fall back to regs/8
+    # (Architecture.cpp k_num_regs_per_regfile). We enforce it as a necessary
+    # condition: every value MOVING INTO a tile takes a write port, every value
+    # MOVING OUT takes a read port. (Conservative: an arrival consumed the same
+    # cycle need not persist, so this may slightly over-constrain, but it never
+    # lets the oracle claim a mapping the backend cannot realize.)
+    num_regfiles = {t["id"]: max(1, t.get("regfiles", t["regs"] // 8))
+                    for t in arch["tiles"]}
     link_use = collections.defaultdict(list)  # (link_key, residue) -> [bool]
     reg_use = collections.defaultdict(list)   # (tile, residue)     -> [bool]
+    write_port_use = collections.defaultdict(list)  # (tile, residue) -> [bool] in
+    read_port_use = collections.defaultdict(list)   # (tile, residue) -> [bool] out
     present_of = {}                           # producer -> {(tile,cycle): boolvar}
     # producer -> {(child_tile,child_cyc): [(kind, parent_node, boolvar)]}. Used
     # after solving to trace each consumer back to the producer (concrete route).
@@ -225,6 +253,12 @@ def route(data, sched, ii, seconds, want_routes=False):
                                 incoming.append(move_var)
                                 link_use[((neighbor, dst_tile),
                                           (cycle - latency) % ii)].append(move_var)
+                                # A move consumes a write port on the destination
+                                # (arrival residue) and a read port on the source
+                                # (departure residue).
+                                write_port_use[(tile, cycle % ii)].append(move_var)
+                                read_port_use[(neighbor,
+                                               (cycle - latency) % ii)].append(move_var)
                                 arcs_of[producer][(tile, cycle)].append(
                                     ("move", (neighbor, cycle - latency), move_var))
                 # present => at least one incoming arc chosen
@@ -236,7 +270,13 @@ def route(data, sched, ii, seconds, want_routes=False):
     for key, bool_vars in link_use.items():
         model.Add(sum(bool_vars) <= 1)          # one net-move per (link, residue)
     for (tile, residue), bool_vars in reg_use.items():
-        model.Add(sum(bool_vars) <= max(1, num_regs[tile]))
+        model.Add(sum(bool_vars) <= max(1, num_regs[tile]))  # storage capacity
+    # Regfile port limits (see num_regfiles above): writes-in / reads-out per
+    # modulo slot cannot exceed the tile's regfile count.
+    for (tile, residue), bool_vars in write_port_use.items():
+        model.Add(sum(bool_vars) <= num_regfiles[tile])
+    for (tile, residue), bool_vars in read_port_use.items():
+        model.Add(sum(bool_vars) <= num_regfiles[tile])
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = seconds
     # Deterministic: single worker + fixed seed (reproducible for tests).
@@ -274,8 +314,8 @@ def route(data, sched, ii, seconds, want_routes=False):
 
     routes = {}
     for edge in edges:
-        src, dst, is_loop_carried = edge["s"], edge["d"], edge["w"]
-        deadline = sched[dst][1] + (ii if is_loop_carried else 0)
+        src, dst, omega = edge["s"], edge["d"], edge["w"]
+        deadline = sched[dst][1] + omega * ii
         path = trace(src, (sched[dst][0], deadline))
         if path is not None:
             routes[(src, dst)] = path

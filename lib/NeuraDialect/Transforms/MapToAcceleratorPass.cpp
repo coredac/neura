@@ -397,7 +397,13 @@ struct MapToAcceleratorPass
                hops[run_end + 1].tile == hops[hop_idx].tile) {
           ++run_end;
         }
-        Tile *tile = tile_by_id[hops[hop_idx].tile];
+        auto tile_it = tile_by_id.find(hops[hop_idx].tile);
+        if (tile_it == tile_by_id.end()) {
+          llvm::errs() << "[MapToAcceleratorPass] route references tile "
+                       << hops[hop_idx].tile << " not in architecture\n";
+          return false;
+        }
+        Tile *tile = tile_it->second;
         int cycle_begin = hops[hop_idx].cycle,
             cycle_end = hops[run_end].cycle; // exclusive
         Register *reg = getAvailableRegister(mapping_state, tile, cycle_begin,
@@ -414,7 +420,13 @@ struct MapToAcceleratorPass
         hop_idx = run_end;
       } else {
         // Tile change -> the link between the two tiles at this cycle.
-        Tile *src = tile_by_id[hops[hop_idx].tile];
+        auto src_it = tile_by_id.find(hops[hop_idx].tile);
+        if (src_it == tile_by_id.end()) {
+          llvm::errs() << "[MapToAcceleratorPass] route references tile "
+                       << hops[hop_idx].tile << " not in architecture\n";
+          return false;
+        }
+        Tile *src = src_it->second;
         Link *link = nullptr;
         for (Link *candidate : src->getOutLinks()) {
           if (candidate->getDstTile()->getId() == hops[hop_idx + 1].tile) {
