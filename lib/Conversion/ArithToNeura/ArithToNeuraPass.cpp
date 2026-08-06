@@ -221,6 +221,43 @@ struct ArithCmpiToNeuraICmp : public OpRewritePattern<mlir::arith::CmpIOp> {
   }
 };
 
+// arith.cmpf(a, b, pred) → neura.fcmp(a, b, pred). Mirrors ArithCmpiToNeuraICmp
+// for floating-point comparisons (neura.fcmp already exists and is used by the
+// min/max lowerings). Enables fp programs (e.g. softmax) through the pipeline.
+struct ArithCmpfToNeuraFCmp : public OpRewritePattern<mlir::arith::CmpFOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(arith::CmpFOp op,
+                                PatternRewriter &rewriter) const override {
+    Value lhs = op.getLhs();
+    Value rhs = op.getRhs();
+    Type result_type = op.getType();
+    arith::CmpFPredicate pred = op.getPredicate();
+    StringRef cmp_type;
+    switch (pred) {
+    case arith::CmpFPredicate::OEQ: cmp_type = "oeq"; break;
+    case arith::CmpFPredicate::OGT: cmp_type = "ogt"; break;
+    case arith::CmpFPredicate::OGE: cmp_type = "oge"; break;
+    case arith::CmpFPredicate::OLT: cmp_type = "olt"; break;
+    case arith::CmpFPredicate::OLE: cmp_type = "ole"; break;
+    case arith::CmpFPredicate::ONE: cmp_type = "one"; break;
+    case arith::CmpFPredicate::ORD: cmp_type = "ord"; break;
+    case arith::CmpFPredicate::UEQ: cmp_type = "ueq"; break;
+    case arith::CmpFPredicate::UGT: cmp_type = "ugt"; break;
+    case arith::CmpFPredicate::UGE: cmp_type = "uge"; break;
+    case arith::CmpFPredicate::ULT: cmp_type = "ult"; break;
+    case arith::CmpFPredicate::ULE: cmp_type = "ule"; break;
+    case arith::CmpFPredicate::UNE: cmp_type = "une"; break;
+    case arith::CmpFPredicate::UNO: cmp_type = "uno"; break;
+    default:
+      return rewriter.notifyMatchFailure(op, "Unsupported arith CmpFOp type");
+    }
+    rewriter.replaceOpWithNewOp<neura::FCmpOp>(
+        op, result_type, lhs, rhs, rewriter.getStringAttr(cmp_type));
+    return success();
+  }
+};
+
 struct ArithSelectToNeuraSel : public OpRewritePattern<mlir::arith::SelectOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -386,7 +423,7 @@ struct LowerArithToNeuraPass
     RewritePatternSet patterns(context);
     patterns.add<
         ArithFAddToNeuraFAdd, ArithConstantToNeuraConstant, ArithAddIToNeuraAdd,
-        ArithCmpiToNeuraICmp, ArithSelectToNeuraSel, ArithExtUIToNeuraCast,
+        ArithCmpiToNeuraICmp, ArithCmpfToNeuraFCmp, ArithSelectToNeuraSel, ArithExtUIToNeuraCast,
         ArithIndexCastToNeuraCast, ArithFDivToNeuraFDiv, ArithExtfToNeuraCast,
         ArithMulFToNeuraFMul, ArithSubIToNeuraSub, ArithSubFToNeuraFSub,
         ArithMulIToNeuraMul, ArithDivSIToNeuraDiv, ArithRemSIToNeuraOp,
