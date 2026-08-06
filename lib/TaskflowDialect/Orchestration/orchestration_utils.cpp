@@ -3,6 +3,7 @@
 #include "TaskflowDialect/Orchestration/orchestration_utils.h"
 #include "TaskflowDialect/TaskflowOps.h"
 #include "mlir/IR/Builders.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
@@ -14,6 +15,8 @@
 #include <cassert>
 #include <climits>
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <string>
@@ -828,7 +831,7 @@ TaskPlacement TaskScheduler::findBestPlacement(TaskNode *task_node,
                   : 0;
 
   for (int t = t_start; t <= t_max; t += task_duration) {
-    int best_score = INT_MIN;
+    int64_t best_score = INT64_MIN;
     TaskPlacement best_at_t;
 
     for (const CgraShape &shape : shapes_to_try) {
@@ -863,7 +866,7 @@ TaskPlacement TaskScheduler::findBestPlacement(TaskNode *task_node,
           if (!valid) {
             continue;
           }
-          int score = computeScore(task_node, candidate, graph);
+          int64_t score = computeScore(task_node, candidate, graph);
           if (score > best_score) {
             best_score = score;
             best_at_t = candidate;
@@ -990,15 +993,27 @@ SmallVector<CgraShape> TaskScheduler::rotationsOf(const CgraShape &base) {
 //                   task in a different context.
 //
 // Higher score is better; 0 means all neighbours are co-located.
-int TaskScheduler::computeScore(TaskNode *task_node,
-                                const TaskPlacement &placement,
-                                TaskMemoryGraph &graph) {
+int64_t TaskScheduler::computeScore(TaskNode *task_node,
+                                    const TaskPlacement &placement,
+                                    TaskMemoryGraph &graph) {
   // Weight constants (tunable).
-  constexpr int kAlpha = 10;   // SSA proximity weight.
-  constexpr int kBeta = 50;    // Memory proximity weight (high priority).
-  constexpr int kGamma = 1000; // Context switch cost is higher than NoC.
+  constexpr int64_t kAlpha = 10;   // SSA proximity weight.
+  constexpr int64_t kBeta = 50;    // Memory proximity weight (high priority).
+  constexpr int64_t kGamma = 1000; // Context switch cost is higher than NoC.
 
-  int ssa_score = 0, mem_score = 0, context_reuse_penalty = 0;
+  // OURS -- comm-aware placement (research toggle NEURA_COMM_AWARE=1): weight each
+  // memory-proximity penalty by the transferred DATA VOLUME (memref element count),
+  // so the placement minimizes sum(volume * manhattan_distance) = communication.
+  // Baseline (env unset) weights every memref uniformly (the original behavior).
+  static const bool comm_aware = (std::getenv("NEURA_COMM_AWARE") != nullptr);
+  auto volOf = [](MemoryNode *mem) -> int64_t {
+    if (auto st = llvm::dyn_cast<ShapedType>(mem->memref.getType()))
+      if (st.hasStaticShape())
+        return std::max<int64_t>(1, st.getNumElements());
+    return 1;
+  };
+
+  int64_t ssa_score = 0, mem_score = 0, context_reuse_penalty = 0;
 
   auto minDistToPlacement = [&](const SmallVector<CgraPosition> &other) -> int {
     int min_dist = INT_MAX;
@@ -1032,17 +1047,20 @@ int TaskScheduler::computeScore(TaskNode *task_node,
   }
 
   // 2. Memory proximity — penalise distance to assigned SRAMs.
+  // OURS: comm-aware weights the penalty by the memref volume (data size); baseline uses 1.
   // For read memrefs (data sources).
   for (MemoryNode *mem : task_node->read_memrefs) {
     if (mem->assigned_sram_pos) {
-      mem_score -= minDistToTarget(*mem->assigned_sram_pos);
+      int64_t w = comm_aware ? volOf(mem) : 1;
+      mem_score -= w * minDistToTarget(*mem->assigned_sram_pos);
     }
   }
   // For write memrefs: if the SRAM is already assigned (e.g. read by a
   // previous task), we want to be close to it too.
   for (MemoryNode *mem : task_node->write_memrefs) {
     if (mem->assigned_sram_pos) {
-      mem_score -= minDistToTarget(*mem->assigned_sram_pos);
+      int64_t w = comm_aware ? volOf(mem) : 1;
+      mem_score -= w * minDistToTarget(*mem->assigned_sram_pos);
     }
   }
 

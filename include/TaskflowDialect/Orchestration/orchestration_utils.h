@@ -161,8 +161,8 @@ private:
 
   // Scores a candidate placement using proximity to dependent tasks, assigned
   // SRAMs, and context reuse cost.
-  int computeScore(TaskNode *task_node, const TaskPlacement &placement,
-                   TaskMemoryGraph &graph);
+  int64_t computeScore(TaskNode *task_node, const TaskPlacement &placement,
+                       TaskMemoryGraph &graph);
 
   int grid_rows_;
   int grid_cols_;
