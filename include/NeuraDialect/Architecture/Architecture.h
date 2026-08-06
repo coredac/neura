@@ -504,7 +504,11 @@ public:
   // Example — create a 12×8 bounding box for a T-shape (4 CGRAs) where only
   // specific tiles are valid:
   //   std::vector<TileOverride> overrides;
-  //   // First mark all tiles as non-existent, then mark valid ones existent.
+  //   // Mark ONLY the tiles absent from the valid set as existence=false;
+  //   // leave valid tiles untouched so they keep their default configuration.
+  //   // Do NOT mark every tile non-existent and then re-mark the valid ones
+  //   // existent: removeTile() erases a tile destructively, so an
+  //   // existence=true override cannot resurrect it.
   //   // (see MapToAcceleratorPass for the full valid_tiles parsing logic)
   //   auto arch_T = getArchitecture().cloneWithNewDimensions(8, 12, overrides);
   std::unique_ptr<Architecture> cloneWithNewDimensions(

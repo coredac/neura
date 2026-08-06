@@ -1,6 +1,8 @@
 #include <deque>
 #include <fstream>
 #include <memory>
+#include <set>
+#include <utility>
 
 #include "Common/AcceleratorAttrs.h"
 #include "NeuraDialect/Architecture/Architecture.h"
@@ -778,28 +780,37 @@ struct MapToAcceleratorPass
         llvm::SmallVector<llvm::StringRef, 4> coords;
         llvm::StringRef(valid_tiles.getValue()).split(coords, ',');
 
-        // Default: mark all tiles as non-existent first if valid_tiles
-        // provided.
-        for (int y = 0; y < y_tiles.getValue(); ++y) {
-          for (int x = 0; x < x_tiles.getValue(); ++x) {
-            TileOverride tile_override;
-            tile_override.tile_x = x;
-            tile_override.tile_y = y;
-            tile_override.existence = false;
-            additional_overrides.push_back(tile_override);
-          }
-        }
-
-        // Then mark the valid ones as existent.
+        // Parses the requested valid tile coordinates into a set.
+        std::set<std::pair<int, int>> valid_coords;
         for (llvm::StringRef coord : coords) {
           auto coord_pair = coord.split('_');
           int x, y;
           if (!coord_pair.first.getAsInteger(10, x) &&
               !coord_pair.second.getAsInteger(10, y)) {
+            valid_coords.insert({x, y});
+          }
+        }
+
+        // Removes ONLY the tiles that are absent from the valid set. Tiles in
+        // the valid set are left untouched, so they keep their full
+        // default/YAML configuration (FU types, register files).
+        //
+        // Do NOT mark every tile non-existent and then try to re-mark the valid
+        // ones existent: removeTile() erases a tile destructively (from
+        // tile_storage_/id_to_tile_/coord_to_tile_), so a subsequent
+        // existence=true override cannot resurrect it -- it looks the tile up by
+        // coordinate, finds nothing, and is silently dropped. That left the
+        // cloned architecture with zero tiles, which inflated res_mii up to
+        // max_ii and made every op report "No candidate locations found".
+        for (int y = 0; y < y_tiles.getValue(); ++y) {
+          for (int x = 0; x < x_tiles.getValue(); ++x) {
+            if (valid_coords.count({x, y})) {
+              continue; // Keep valid tiles with their default configuration.
+            }
             TileOverride tile_override;
             tile_override.tile_x = x;
             tile_override.tile_y = y;
-            tile_override.existence = true;
+            tile_override.existence = false;
             additional_overrides.push_back(tile_override);
           }
         }
