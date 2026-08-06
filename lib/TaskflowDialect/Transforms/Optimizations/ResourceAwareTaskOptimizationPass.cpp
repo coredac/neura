@@ -1098,6 +1098,24 @@ public:
     return performFusion(func, node_a, node_b, graph, profile_fn);
   }
 
+  // Public: returns true if tasks a and b can be legally fused (independent,
+  // single-block bodies, dominance-safe). Used by the global fusion search to
+  // enumerate candidate pairs.
+  bool canFuse(TaskGraphNode *a, TaskGraphNode *b, TaskDependencyGraph &graph) {
+    if (!graph.areIndependent(a, b))
+      return false;
+    if (!a->op.getBody().hasOneBlock() || !b->op.getBody().hasOneBlock())
+      return false;
+    return canSafelyFuse(a, b, graph);
+  }
+
+  // Public: fuse two SPECIFIC nodes (bypasses the trip-diff selection). Used by
+  // the global fusion search to commit / speculate a chosen pair.
+  bool fuseNodes(func::FuncOp func, TaskGraphNode *a, TaskGraphNode *b,
+                 TaskDependencyGraph &graph, ProfileFn profile_fn) {
+    return performFusion(func, a, b, graph, profile_fn);
+  }
+
 private:
   // Finds the best pair of independent tasks to fuse.
   // Selects the pair with the most balanced trip_count (minimizes
@@ -1183,6 +1201,57 @@ private:
         }
       }
     }
+
+    // IR-level dominance soundness. performFusion inserts the fused task right
+    // after the LATEST-defined operand of either task, then replaces every use
+    // of both tasks' results with the fused task's results. That rewrite is
+    // legal only if every EXISTING use of either task's results is positioned
+    // strictly after that insertion point. The TaskDependencyGraph only tracks
+    // dependencies whose memref is directly a task result; memref dependencies
+    // threaded through memref.alloc + memref.copy (or bufferization.to_tensor)
+    // are INVISIBLE to it, so areIndependent can wrongly report an early
+    // producer (e.g. a bias-init task whose result is copied downstream) as
+    // independent of a late task. Fusing those places the fused op after an
+    // early consumer of the producer's result -> "operand does not dominate
+    // this use". Detect and reject such pairs here using the real SSA uses,
+    // which remain visible even when the graph edge is missing.
+    Operation *latest_def = task_a; // task_a is the earlier op (ensured above).
+    auto updateLatest = [&](ValueRange operands) {
+      for (Value v : operands)
+        if (Operation *d = v.getDefiningOp())
+          if (d->getBlock() == task_a->getBlock() &&
+              latest_def->isBeforeInBlock(d))
+            latest_def = d;
+    };
+    auto ta = cast<TaskflowTaskOp>(task_a);
+    auto tb = cast<TaskflowTaskOp>(task_b);
+    updateLatest(ta.getWillReads());
+    updateLatest(ta.getWillWrites());
+    updateLatest(ta.getValueInputs());
+    updateLatest(tb.getWillReads());
+    updateLatest(tb.getWillWrites());
+    updateLatest(tb.getValueInputs());
+
+    Block *task_block = task_a->getBlock();
+    auto allUsesAfterInsertion = [&](Operation *task) -> bool {
+      for (Value result : task->getResults()) {
+        for (OpOperand &use : result.getUses()) {
+          // Walk up to the ancestor op that lives in the tasks' block.
+          Operation *owner = use.getOwner();
+          while (owner && owner->getBlock() != task_block)
+            owner = owner->getParentOp();
+          if (!owner || owner == task_a || owner == task_b)
+            continue;
+          // The use must be strictly after the fused op's insertion point.
+          if (!latest_def->isBeforeInBlock(owner))
+            return false;
+        }
+      }
+      return true;
+    };
+    if (!allUsesAfterInsertion(task_a) || !allUsesAfterInsertion(task_b))
+      return false;
+
     return true;
   }
 
@@ -1723,6 +1792,59 @@ struct ResourceAwareTaskOptimizationPass
           "accurate compiled_ii during balance at the cost of compile time."),
       llvm::cl::init(true)};
 
+  // Cost-aware fusion guard. When true, UtilizationFusion is DEMAND-DRIVEN:
+  // a fusion is attempted only when the CGRA budget is actually under pressure
+  // (total allocated CGRAs >= the grid capacity), i.e. when co-locating tasks
+  // is required to free tiles for the pipeline bottleneck. The default (false)
+  // preserves the legacy behavior of fusing unconditionally whenever any legal
+  // independent pair exists — which over-fuses and can raise the pipeline
+  // interval when there is spare budget. See findBestFusionCandidate.
+  Option<bool> costGuidedFusion{
+      *this, "cost-guided-fusion",
+      llvm::cl::desc(
+          "Only fuse tasks when the CGRA budget is under pressure "
+          "(demand-driven), instead of unconditionally (default: false)."),
+      llvm::cl::init(false)};
+
+  // Ablation: disable UtilizationFusion entirely (balance-only). Used to isolate
+  // the contribution of fusion vs. the pipeline-balance replica allocation.
+  Option<bool> disableFusion{
+      *this, "disable-fusion",
+      llvm::cl::desc("Never fuse tasks (balance-only ablation; default false)."),
+      llvm::cl::init(false)};
+
+  // Global (best-first) fusion: instead of committing the first cost-guided
+  // fusion (greedy), score EVERY candidate pair by the balanced interval it
+  // would yield (analytical lookahead) and commit the globally-best pair, only
+  // if it beats not fusing. Still Pareto-safe; replaces the greedy trip-diff
+  // ordering with a global ranking of fusion candidates each step.
+  Option<bool> globalFusion{
+      *this, "global-fusion",
+      llvm::cl::desc("Best-first fusion: rank all candidate pairs by the "
+                     "resulting balanced interval, commit the best (default "
+                     "false)."),
+      llvm::cl::init(false)};
+
+  // Force a SPECIFIC fusion partition, e.g. "0,1;2,3,4;5" fuses original tasks
+  // {0,1}, {2,3,4}, leaves 5 a singleton. Used by the offline exhaustive search
+  // (enumerate all partitions -> evaluate each -> global optimum). Overrides the
+  // other fusion modes when non-empty.
+  Option<std::string> forcePartition{
+      *this, "force-partition",
+      llvm::cl::desc("Fuse exactly the given groups of original task indices, "
+                     "e.g. \"0,1;2,3\" (default: empty = off)."),
+      llvm::cl::init("")};
+
+  // Cost-model fission: replace Neura's greedy add-CGRA-to-bottleneck balance
+  // (AMOEBA's MoreReplicas hill-climb) with the EXACT min-max replica allocation
+  // over the analytical latency(task, cgra_count) curve (minimize the maximum
+  // task latency s.t. sum of cgra_count <= grid). Compares optimal vs greedy fission.
+  Option<bool> optimalFission{
+      *this, "optimal-fission",
+      llvm::cl::desc("Exact min-max replica allocation instead of greedy "
+                     "bottleneck balancing (default false)."),
+      llvm::cl::init(false)};
+
   void runOnOperation() override {
     func::FuncOp func = getOperation();
 
@@ -1752,10 +1874,10 @@ struct ResourceAwareTaskOptimizationPass
 
       int num_tasks = graph.nodes.size();
 
-      // Asserts that initial tasks fit in the grid.
-      assert(num_tasks <= kTotalCGRAs &&
-             "Number of tasks exceeds 4x4 CGRA grid capacity! "
-             "Reduce task count via streaming fusion or increase grid size.");
+      // NOTE: the previous hard assert(num_tasks <= kTotalCGRAs) is removed so that
+      // programs with MORE tasks than the 4x4 grid (AMOEBA scale, 9-28 tasks) can run:
+      // fusion + spatial-temporal context reuse are meant to fit them onto the 16 cores.
+      // Grid stays 4x4 (AMOEBA architecture); we do NOT increase kTotalCGRAs.
 
       llvm::errs() << "[ResourceAware] Iteration " << outer << ": " << num_tasks
                    << " tasks\n";
@@ -1776,7 +1898,192 @@ struct ResourceAwareTaskOptimizationPass
                                                  TaskflowTaskOp task) {
         graph.profileTask(node, task, /*skip_mapper=*/use_analytical);
       };
-      bool fuse_changed = fuser.fuse(func, graph, profile_fn);
+      // Cost-guided fusion is PARETO-SAFE via one-step speculative lookahead:
+      // clone the function and compute the converged-this-step interval both
+      // WITHOUT fusing (balance only) and WITH the next fusion (fuse + balance);
+      // commit the fusion only if it STRICTLY lowers the balanced interval.
+      // This never does worse than balance-only (over-fusion can't sneak in) and
+      // still captures beneficial fusion (freeing CGRAs for the bottleneck) — no
+      // separate budget guard needed. Legacy behavior fuses unconditionally.
+      auto graphInterval = [](TaskDependencyGraph &g) -> int64_t {
+        int64_t mx = 0;
+        for (auto &n : g.nodes)
+          mx = std::max(mx, n->estimatedLatency());
+        return mx;
+      };
+      // Speculatively runs (optional) one fusion + one balance pass on a clone
+      // of the current function and returns the resulting pipeline interval.
+      auto speculate = [&](bool do_fuse) -> int64_t {
+        auto tmp_mod = ModuleOp::create(func.getLoc());
+        OpBuilder tb(tmp_mod.getBodyRegion());
+        auto tmp_func = cast<func::FuncOp>(tb.clone(*func.getOperation()));
+        TaskDependencyGraph g;
+        g.use_full_cost_model = use_full_cost_model;
+        g.build(tmp_func, use_analytical);
+        if (do_fuse) {
+          auto pf = [&g, use_analytical](TaskGraphNode *n, TaskflowTaskOp t) {
+            g.profileTask(n, t, /*skip_mapper=*/use_analytical);
+          };
+          UtilizationFuser f;
+          if (f.fuse(tmp_func, g, pf)) {
+            g = TaskDependencyGraph();
+            g.use_full_cost_model = use_full_cost_model;
+            g.build(tmp_func, use_analytical);
+          } else {
+            tmp_mod.erase();
+            return -1; // no fusion possible
+          }
+        }
+        auto bpf = [&g](TaskGraphNode *n, TaskflowTaskOp t) {
+          g.profileTask(n, t, /*skip_mapper=*/true);
+        };
+        PipelineBalancer b;
+        b.balance(g, bpf);
+        int64_t itv = graphInterval(g);
+        tmp_mod.erase();
+        return itv;
+      };
+      // Speculatively fuses the SPECIFIC pair (i,j) of the current graph on a
+      // clone, balances, and returns the resulting interval (-1 if illegal).
+      // Node order is deterministic across graph.build, so (i,j) identifies the
+      // same pair in the clone as in the real graph.
+      auto speculatePair = [&](int i, int j) -> int64_t {
+        auto tmp_mod = ModuleOp::create(func.getLoc());
+        OpBuilder tb(tmp_mod.getBodyRegion());
+        auto tmp_func = cast<func::FuncOp>(tb.clone(*func.getOperation()));
+        TaskDependencyGraph g;
+        g.use_full_cost_model = use_full_cost_model;
+        g.build(tmp_func, use_analytical);
+        if (i >= (int)g.nodes.size() || j >= (int)g.nodes.size()) {
+          tmp_mod.erase();
+          return -1;
+        }
+        TaskGraphNode *na = g.nodes[i].get(), *nb = g.nodes[j].get();
+        UtilizationFuser f;
+        if (!f.canFuse(na, nb, g)) {
+          tmp_mod.erase();
+          return -1;
+        }
+        auto pf = [&g, use_analytical](TaskGraphNode *n, TaskflowTaskOp t) {
+          g.profileTask(n, t, /*skip_mapper=*/use_analytical);
+        };
+        f.fuseNodes(tmp_func, na, nb, g, pf);
+        g = TaskDependencyGraph();
+        g.use_full_cost_model = use_full_cost_model;
+        g.build(tmp_func, use_analytical);
+        auto bpf = [&g](TaskGraphNode *n, TaskflowTaskOp t) {
+          g.profileTask(n, t, /*skip_mapper=*/true);
+        };
+        PipelineBalancer b;
+        b.balance(g, bpf);
+        int64_t itv = graphInterval(g);
+        tmp_mod.erase();
+        return itv;
+      };
+      // --force-partition parsing: original task index -> target group id.
+      llvm::DenseMap<int, int> forceGroup;
+      if (!forcePartition.getValue().empty()) {
+        llvm::SmallVector<llvm::StringRef> groups;
+        llvm::StringRef(forcePartition.getValue()).split(groups, ';');
+        for (int gi = 0; gi < (int)groups.size(); ++gi) {
+          llvm::SmallVector<llvm::StringRef> ids;
+          groups[gi].split(ids, ',');
+          for (auto id : ids) {
+            int v;
+            if (!id.trim().getAsInteger(10, v))
+              forceGroup[v] = gi;
+          }
+        }
+      }
+      // Extracts original task indices from a (possibly fused) task name like
+      // "Task_3_Task_5_utilfused" -> {3,5}.
+      auto origIds = [](llvm::StringRef name) {
+        llvm::SmallVector<int> out;
+        size_t p = 0;
+        while ((p = name.find("Task_", p)) != llvm::StringRef::npos) {
+          p += 5;
+          size_t q = p;
+          while (q < name.size() && name[q] >= '0' && name[q] <= '9')
+            ++q;
+          int v;
+          if (q > p && !name.substr(p, q - p).getAsInteger(10, v))
+            out.push_back(v);
+          p = q;
+        }
+        return out;
+      };
+      bool fuse_changed = false;
+      if (!forcePartition.getValue().empty()) {
+        // Fuse one within-group pair per iteration until each target group is a
+        // single task (offline exhaustive-partition evaluation).
+        TaskGraphNode *fa = nullptr, *fb = nullptr;
+        for (int i = 0; i < (int)graph.nodes.size() && !fa; ++i)
+          for (int j = i + 1; j < (int)graph.nodes.size(); ++j) {
+            std::string na = graph.nodes[i]->op.getTaskName().str();
+            std::string nb = graph.nodes[j]->op.getTaskName().str();
+            auto ia = origIds(na), ib = origIds(nb);
+            if (ia.empty() || ib.empty())
+              continue;
+            int gid = forceGroup.count(ia[0]) ? forceGroup[ia[0]] : -1;
+            bool same = (gid >= 0);
+            for (int v : ia)
+              same = same && forceGroup.count(v) && forceGroup[v] == gid;
+            for (int v : ib)
+              same = same && forceGroup.count(v) && forceGroup[v] == gid;
+            if (same && fuser.canFuse(graph.nodes[i].get(),
+                                      graph.nodes[j].get(), graph)) {
+              fa = graph.nodes[i].get();
+              fb = graph.nodes[j].get();
+              break;
+            }
+          }
+        if (fa)
+          fuse_changed = fuser.fuseNodes(func, fa, fb, graph, profile_fn);
+      } else if (disableFusion.getValue()) {
+        // balance-only ablation: never fuse.
+      } else if (globalFusion.getValue()) {
+        // Best-first: rank ALL candidate pairs by resulting balanced interval,
+        // commit the globally-best one, only if it beats not fusing.
+        int64_t i_nofuse = speculate(/*do_fuse=*/false);
+        int64_t best = i_nofuse;
+        int bi = -1, bj = -1;
+        int n = (int)graph.nodes.size();
+        for (int i = 0; i < n; ++i)
+          for (int j = i + 1; j < n; ++j) {
+            int64_t v = speculatePair(i, j);
+            if (v >= 0 && v < best) {
+              best = v;
+              bi = i;
+              bj = j;
+            }
+          }
+        if (bi >= 0) {
+          llvm::errs() << "[ResourceAware] global-fusion: commit best pair ("
+                       << bi << "," << bj << ") interval " << i_nofuse << "->"
+                       << best << "\n";
+          fuse_changed = fuser.fuseNodes(func, graph.nodes[bi].get(),
+                                         graph.nodes[bj].get(), graph, profile_fn);
+        } else {
+          llvm::errs() << "[ResourceAware] global-fusion: no improving pair "
+                          "(nofuse="
+                       << i_nofuse << ")\n";
+        }
+      } else if (!costGuidedFusion.getValue()) {
+        fuse_changed = fuser.fuse(func, graph, profile_fn); // legacy unconditional
+      } else {
+        int64_t i_fuse = speculate(/*do_fuse=*/true);
+        if (i_fuse < 0) {
+          // no legal fusion available.
+        } else {
+          int64_t i_nofuse = speculate(/*do_fuse=*/false);
+          if (i_fuse < i_nofuse) {
+            fuse_changed = fuser.fuse(func, graph, profile_fn); // commit — it helps
+          } else {
+            llvm::errs() << "[ResourceAware] cost-guided: skip fusion (nofuse="
+                         << i_nofuse << " <= fuse=" << i_fuse << ")\n";
+          }
+        }
+      }
 
       llvm::errs() << "[ResourceAware] After fusion: total_cgras="
                    << graph.getTotalAllocatedCGRAs() << "\n";
@@ -1797,8 +2104,80 @@ struct ResourceAwareTaskOptimizationPass
                                          TaskflowTaskOp task) {
         graph.profileTask(node, task, /*skip_mapper=*/true);
       };
+      // Cost-model (optimal) fission: exact min-max replica allocation over the
+      // analytical latency(task, cgra) curve, vs Neura's greedy bottleneck balance.
+      auto optimalFissionAllocate = [&](TaskDependencyGraph &g) -> bool {
+        int n = (int)g.nodes.size();
+        if (n == 0)
+          return false;
+        std::vector<std::vector<int64_t>> lat(
+            n, std::vector<int64_t>(kMaxCgrasPerTask + 1, INT64_MAX));
+        for (int i = 0; i < n; ++i) {
+          TaskGraphNode *nd = g.nodes[i].get();
+          int savec = nd->cgra_count;
+          CgraShape saveshape = nd->shape;
+          int64_t saveii = nd->ii, savesteps = nd->steps;
+          for (int c = 1; c <= kMaxCgrasPerTask; ++c) {
+            if (!canFitOnGrid(c))
+              continue;
+            nd->cgra_count = c;
+            nd->shape = pickBestShape(c);
+            g.profileTask(nd, nd->op, /*skip_mapper=*/true);
+            lat[i][c] = nd->estimatedLatency();
+          }
+          nd->cgra_count = savec;
+          nd->shape = saveshape;
+          nd->ii = saveii;
+          nd->steps = savesteps;
+        }
+        // Min feasible target T: sum_i min{c : lat[i][c] <= T} <= grid budget.
+        std::vector<int64_t> cand;
+        for (auto &row : lat)
+          for (int c = 1; c <= kMaxCgrasPerTask; ++c)
+            if (row[c] < INT64_MAX)
+              cand.push_back(row[c]);
+        std::sort(cand.begin(), cand.end());
+        std::vector<int> bestAlloc;
+        for (int64_t T : cand) {
+          long sum = 0;
+          std::vector<int> alloc(n, 0);
+          bool ok = true;
+          for (int i = 0; i < n && ok; ++i) {
+            int mc = -1;
+            for (int c = 1; c <= kMaxCgrasPerTask; ++c)
+              if (lat[i][c] <= T) {
+                mc = c;
+                break;
+              }
+            if (mc < 0)
+              ok = false;
+            else {
+              alloc[i] = mc;
+              sum += mc;
+            }
+          }
+          if (ok && sum <= kTotalCGRAs) {
+            bestAlloc = alloc;
+            break;
+          }
+        }
+        if (bestAlloc.empty())
+          return false;
+        bool changed = false;
+        for (int i = 0; i < n; ++i) {
+          TaskGraphNode *nd = g.nodes[i].get();
+          if (nd->cgra_count != bestAlloc[i])
+            changed = true;
+          nd->cgra_count = bestAlloc[i];
+          nd->shape = pickBestShape(bestAlloc[i]);
+          g.profileTask(nd, nd->op, /*skip_mapper=*/true);
+        }
+        return changed;
+      };
       PipelineBalancer balancer;
-      bool balance_changed = balancer.balance(graph, balance_profile_fn);
+      bool balance_changed = optimalFission.getValue()
+                                 ? optimalFissionAllocate(graph)
+                                 : balancer.balance(graph, balance_profile_fn);
 
       // Writes back attributes so the next iteration sees them.
       if (balance_changed || fuse_changed) {
