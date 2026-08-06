@@ -13,6 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "TaskflowDialect/TaskFusionUtil.h"
 #include "TaskflowDialect/TaskflowOps.h"
 #include "TaskflowDialect/TaskflowPasses.h"
 
@@ -2376,4 +2377,109 @@ struct ResourceAwareTaskOptimizationPass
 std::unique_ptr<mlir::Pass>
 mlir::taskflow::createResourceAwareTaskOptimizationPass() {
   return std::make_unique<ResourceAwareTaskOptimizationPass>();
+}
+
+//===----------------------------------------------------------------------===//
+// Shared fusion entry point (see TaskFusionUtil.h)
+//===----------------------------------------------------------------------===//
+//
+// Reuses the file-local UtilizationFuser / TaskDependencyGraph -- the exact
+// tested merge path used by the resource-aware pass, dominance-safety guard
+// included -- so external-decision replay (e.g. --import-joint-mapping) never
+// re-implements the DFG merge. Defined here (not in a separate TU) precisely so
+// it can name the anonymous-namespace fusion classes above.
+mlir::FailureOr<mlir::taskflow::TaskflowTaskOp>
+mlir::taskflow::fuseTaskGroup(func::FuncOp func,
+                              llvm::ArrayRef<std::string> task_names,
+                              bool analytical, std::string &err) {
+  if (task_names.size() < 2) {
+    err = "fuseTaskGroup requires at least 2 tasks in the group";
+    return failure();
+  }
+
+  // Locates a TaskGraphNode by task name in a freshly built graph.
+  auto findNode = [](TaskDependencyGraph &g,
+                     llvm::StringRef name) -> TaskGraphNode * {
+    for (auto &n : g.nodes)
+      if (n->op.getTaskName() == name)
+        return n.get();
+    return nullptr;
+  };
+
+  // Pairwise chain: current = t0; for i in 1..N-1: current = fuse(current, ti).
+  // performFusion names the result "<earlier>_<later>_utilfused" (earlier =
+  // whichever op comes first in the block); we recompute that name so the next
+  // iteration can find the just-created fused task after the graph rebuild.
+  std::string current_name = task_names[0];
+  for (size_t i = 1; i < task_names.size(); ++i) {
+    llvm::StringRef next_name = task_names[i];
+
+    // Rebuild the dependency graph from the CURRENT IR state each step (the
+    // previous fusion erased two tasks and created one).
+    TaskDependencyGraph graph;
+    graph.build(func, /*skip_mapper=*/analytical);
+
+    TaskGraphNode *na = findNode(graph, current_name);
+    TaskGraphNode *nb = findNode(graph, next_name);
+    if (!na) {
+      err = "fuseTaskGroup: task '" + current_name +
+            "' not found in function";
+      return failure();
+    }
+    if (!nb) {
+      err = "fuseTaskGroup: task '" + next_name.str() +
+            "' not found in function";
+      return failure();
+    }
+    if (na == nb) {
+      err = "fuseTaskGroup: task '" + current_name +
+            "' appears more than once in the group";
+      return failure();
+    }
+
+    UtilizationFuser fuser;
+    // Same legality gate as resource-aware: independence + single-block bodies
+    // + the SSA dominance-safety guard. Rejecting here (instead of forcing the
+    // merge) is what prevents "operand does not dominate this use".
+    if (!fuser.canFuse(na, nb, graph)) {
+      err = "fuseTaskGroup: cannot fuse '" + current_name + "' + '" +
+            next_name.str() +
+            "' (tasks are dependent, have multi-block bodies, or the merge "
+            "would be dominance-unsafe)";
+      return failure();
+    }
+
+    // Recompute the name performFusion will assign to the merged task.
+    Operation *opa = na->op.getOperation();
+    Operation *opb = nb->op.getOperation();
+    std::string earlier = na->op.getTaskName().str();
+    std::string later = nb->op.getTaskName().str();
+    if (!opa->isBeforeInBlock(opb))
+      std::swap(earlier, later);
+    std::string fused_name = earlier + "_" + later + "_utilfused";
+
+    auto profile_fn = [&graph, analytical](TaskGraphNode *n,
+                                           TaskflowTaskOp t) {
+      graph.profileTask(n, t, /*skip_mapper=*/analytical);
+    };
+    if (!fuser.fuseNodes(func, na, nb, graph, profile_fn)) {
+      err = "fuseTaskGroup: fusion failed for '" + current_name + "' + '" +
+            next_name.str() + "'";
+      return failure();
+    }
+    current_name = fused_name;
+  }
+
+  // Return the final fused task (located by its computed name).
+  TaskflowTaskOp result;
+  func.walk([&](TaskflowTaskOp t) {
+    if (t.getTaskName() == current_name)
+      result = t;
+  });
+  if (!result) {
+    err = "fuseTaskGroup: fused task '" + current_name +
+          "' not found after fusion";
+    return failure();
+  }
+  return result;
 }
