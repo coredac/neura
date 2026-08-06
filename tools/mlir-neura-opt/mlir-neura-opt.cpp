@@ -28,6 +28,10 @@
 #include "NeuraDialect/Util/ArchParser.h"
 #include "TaskflowDialect/TaskflowDialect.h"
 #include "TaskflowDialect/TaskflowPasses.h"
+
+#include <list>
+#include <string>
+
 using mlir::neura::Architecture;
 using mlir::neura::util::ArchParser;
 
@@ -59,9 +63,38 @@ int main(int argc, char **argv) {
   std::vector<char *> forwarded_args;
   forwarded_args.reserve(argc);
   forwarded_args.push_back(argv[0]);
+  // Stable storage for rewritten argv entries (node-based => stable c_str()).
+  std::list<std::string> rewritten_args;
+  // Rewrites a bare --import-joint-mapping=<file.json> shorthand into the
+  // pass-option form --import-joint-mapping=file=<file.json> that the MLIR pass
+  // option parser understands. If the value already contains '=' (i.e. it is
+  // already file=..., or another key=value) it is forwarded unchanged.
+  auto forwardImportJointMapping = [&](llvm::StringRef value) {
+    std::string rewritten;
+    if (value.contains('='))
+      rewritten = ("--import-joint-mapping=" + value).str();
+    else
+      rewritten = ("--import-joint-mapping=file=" + value).str();
+    rewritten_args.push_back(std::move(rewritten));
+    forwarded_args.push_back(const_cast<char *>(rewritten_args.back().c_str()));
+  };
   for (int i = 1; i < argc; ++i) {
     llvm::StringRef arg_ref(argv[i]);
-    if (arg_ref == "--architecture-spec") {
+    if (arg_ref == "--import-joint-mapping") {
+      if (i + 1 < argc) {
+        forwardImportJointMapping(argv[i + 1]);
+        ++i; // skip value
+        continue;
+      } else {
+        llvm::errs() << "[mlir-neura-opt] Error: --import-joint-mapping option "
+                        "requires a value\n";
+        return EXIT_FAILURE;
+      }
+    } else if (arg_ref.starts_with("--import-joint-mapping=")) {
+      forwardImportJointMapping(
+          arg_ref.substr(strlen("--import-joint-mapping=")));
+      continue;
+    } else if (arg_ref == "--architecture-spec") {
       if (i + 1 < argc) {
         architecture_spec_file = argv[i + 1];
         ++i; // skip value
