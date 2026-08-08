@@ -127,45 +127,20 @@ def OrchestrateTasksOnAccelerators : Pass<"orchestrate-tasks-on-accelerators", "
   let constructor = "taskflow::createOrchestrateTasksOnAcceleratorsPass()";
 }
 
-def ImportJointMapping : Pass<"import-joint-mapping", "func::FuncOp"> {
-  let summary = "Replays an externally-computed joint multi-task mapping onto "
-                "Taskflow tasks (bypasses the greedy orchestrator).";
+def AnalyzeTaskPipelineInterval
+    : Pass<"analyze-task-pipeline-interval", "func::FuncOp"> {
+  let summary =
+      "Analyzes the pipeline interval of already-profiled and scheduled tasks";
   let description = [{
-    Joint-mapping analogue of MapToAcceleratorPass's --import-mapping option.
-    Instead of running the internal placer/scheduler
-    (orchestrate-tasks-on-accelerators), this pass reads a JSON decision file
-    and writes exactly the IR attributes the real orchestrate pass writes, so
-    downstream codegen is unchanged -- but the placement/shape decision comes
-    from the file, not the greedy scheduler.
-
-    SCOPE v1: the JSON assigns, per existing taskflow.task, a placement + shape
-    decision. It does NOT re-implement task fusion (that is v2); task bodies are
-    left untouched.
-
-    JSON schema: a top-level object with a "tasks" array (a bare top-level array
-    of entries is also accepted). Each entry has the fields "task", "cgra_count",
-    "cgra_shape", "row", "col" and "context_id", e.g.
-    task="Task_0", cgra_count=1, cgra_shape="1x1", row=0, col=0, context_id=0.
-    Only "task", "row" and "col" are required; "cgra_count" (default 1),
-    "cgra_shape" (default "1x1") and "context_id" (default 0) are optional.
-
-    For each taskflow.task @Name the pass:
-      1. sets cgra_count (i32) and cgra_shape (string) on the task op,
-         overriding resource-aware-task-optimization's shape choice;
-      2. sets task_orchestration_info with a cgra_positions array holding one
-         row/col/context_id record, replacing
-         orchestrate-tasks-on-accelerators's placement + temporal context
-         assignment;
-      3. leaves the task body untouched.
-
-    The mlir-neura-opt driver accepts the shorthand
-    --import-joint-mapping=<file.json> and rewrites it to
-    --import-joint-mapping=file=<file.json> before the pass option parser runs.
+    Reads taskflow.task operations that already contain profile_info.duration
+    and task_orchestration_info.cgra_positions. The pass reconstructs the
+    concrete task schedule from task dependences and per-CGRA context order,
+    invokes TaskPipelineIntervalAnalyzer, and emits task_pipeline_interval_info
+    on the parent func.func.
   }];
-  let options = [Option<
-      "mappingFile", "file", "std::string", /*default=*/"\"\"",
-      "Path to the JSON joint-mapping decision file.">];
-  let constructor = "taskflow::createImportJointMappingPass()";
+  let constructor = "taskflow::createAnalyzeTaskPipelineIntervalPass()";
+  let dependentDialects = ["mlir::func::FuncDialect",
+                           "mlir::taskflow::TaskflowDialect"];
 }
 
 def FuseTask : Pass<"fuse-task", "func::FuncOp"> {
@@ -231,21 +206,18 @@ def ResourceAwareTaskOptimization
     Use --estimation-mode to control how task II/steps are estimated:
       compiled   (default): runs the full Neura lowering + mapping pipeline
                   for accurate compiled_ii and steps.
-      cost-model-analytical : uses the full parametric cost model
-                  (max of ResMII/RecMII/MemMII/RouteMII/RegMII/IssueMII) without
-                  running the mapper. Interpretable and fast; predicts large II.
-      analytical : legacy mode using only ResMII/RecMII estimates without
-                  running the mapper — faster but less accurate.
+      analytical : uses only ResMII/RecMII analytical estimates without
+                  running the mapper — much faster but less accurate.
+                  Useful for rapid design-space exploration.
     Example:
-      --resource-aware-task-optimization estimation-mode=cost-model-analytical
+      --resource-aware-task-optimization estimation-mode=analytical
   }];
   let options = [Option<
       "estimationMode", "estimation-mode", "std::string",
       /*default=*/"\"compiled\"",
       "Profiling estimation mode: 'compiled' (default) runs the full "
-      "Neura lowering + mapping pipeline; 'cost-model-analytical' uses the full "
-      "parametric cost model (all resource bounds); 'analytical' uses only "
-      "ResMII/RecMII estimates. The latter two never invoke the mapper.">];
+      "Neura lowering + mapping pipeline; 'analytical' uses only "
+      "ResMII/RecMII analytical estimates (faster but less accurate).">];
   let constructor = "taskflow::createResourceAwareTaskOptimizationPass()";
   let dependentDialects = ["mlir::affine::AffineDialect",
                            "mlir::func::FuncDialect"];

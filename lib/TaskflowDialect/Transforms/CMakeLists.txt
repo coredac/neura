@@ -1,10 +1,8 @@
 get_property(dialect_libs GLOBAL PROPERTY MLIR_DIALECT_LIBS)
 
 add_mlir_library(MLIRTaskflowTransforms
+    AnalyzeTaskPipelineIntervalPass.cpp
     OrchestrateTasksOnAcceleratorsPass.cpp
-    # NOTE: ImportJointMappingPass now lives in Optimizations/ (compiled into
-    # MLIRTaskflowOptimization) so its v2 fusion path can link fuseTaskGroup /
-    # UtilizationFuser from ResourceAwareTaskOptimizationPass in-archive.
     ConstructHyperblockFromTaskPass.cpp
     ClassifyTaskAndCounterPass.cpp
     FuseTaskPass.cpp
