@@ -90,13 +90,13 @@ void Tile::unlinkDstTile(Link *link, Tile *tile) {
   tile->in_links.erase(link);
 }
 
-const std::set<Tile *> &Tile::getDstTiles() const { return dst_tiles; }
+const TileSet &Tile::getDstTiles() const { return dst_tiles; }
 
-const std::set<Tile *> &Tile::getSrcTiles() const { return src_tiles; }
+const TileSet &Tile::getSrcTiles() const { return src_tiles; }
 
-const std::set<Link *> &Tile::getOutLinks() const { return out_links; }
+const LinkSet &Tile::getOutLinks() const { return out_links; }
 
-const std::set<Link *> &Tile::getInLinks() const { return in_links; }
+const LinkSet &Tile::getInLinks() const { return in_links; }
 
 void Tile::addRegisterFileCluster(RegisterFileCluster *register_file_cluster) {
   assert(register_file_cluster && "Cannot add null register file cluster");

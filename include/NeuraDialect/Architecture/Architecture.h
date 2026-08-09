@@ -159,6 +159,25 @@ public:
 // Forward declaration for use in Tile.
 class Tile;
 class Link;
+
+// Sets of tiles and links, ordered by id rather than by address.
+//
+// `std::set<Tile *>` iterates in ADDRESS order, and these objects are
+// heap-allocated, so the order differs from one process to the next. Every
+// consumer that walks a tile's neighbours or outgoing links picks among
+// equal-cost candidates in the order given, which carries that difference into
+// the placement, the routing and the resulting II. Measured before this
+// comparator existed: the same binary on the same input produced
+// `plain_gemm` = 393218 seven times out of eight and 262147 once, the two runs
+// first differing at a data move routed through link#3-7-20 in one and
+// link#4-14-20 in the other -- same length, same arrival, different choice.
+struct ByResourceId {
+  template <typename T> bool operator()(const T *lhs, const T *rhs) const {
+    return lhs->getId() < rhs->getId();
+  }
+};
+using TileSet = std::set<Tile *, ByResourceId>;
+using LinkSet = std::set<Link *, ByResourceId>;
 class FunctionUnit;
 class Register;
 class RegisterFile;
@@ -237,10 +256,10 @@ public:
 
   void linkDstTile(Link *link, Tile *tile);
   void unlinkDstTile(Link *link, Tile *tile);
-  const std::set<Tile *> &getDstTiles() const;
-  const std::set<Tile *> &getSrcTiles() const;
-  const std::set<Link *> &getOutLinks() const;
-  const std::set<Link *> &getInLinks() const;
+  const TileSet &getDstTiles() const;
+  const TileSet &getSrcTiles() const;
+  const LinkSet &getOutLinks() const;
+  const LinkSet &getInLinks() const;
 
   void addFunctionUnit(std::unique_ptr<FunctionUnit> func_unit) {
     assert(func_unit && "Cannot add null function unit");
@@ -289,10 +308,10 @@ public:
 private:
   int id;
   int x, y;
-  std::set<Tile *> src_tiles;
-  std::set<Tile *> dst_tiles;
-  std::set<Link *> in_links;
-  std::set<Link *> out_links;
+  TileSet src_tiles;
+  TileSet dst_tiles;
+  LinkSet in_links;
+  LinkSet out_links;
   std::vector<std::unique_ptr<FunctionUnit>>
       functional_unit_storage;               // Owns FUs.
   std::set<FunctionUnit *> functional_units; // Non-owning, for fast lookup.

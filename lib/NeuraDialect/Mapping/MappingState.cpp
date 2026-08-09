@@ -4,6 +4,8 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 
@@ -580,7 +582,20 @@ std::vector<MappingLoc> MappingState::getNextStepTiles(MappingLoc loc) const {
   // Collects neighboring tiles at t+1 for both tile and link.
   if (loc.resource->getKind() == ResourceKind::Tile) {
     Tile *tile = dyn_cast<Tile>(loc.resource);
-    for (Tile *dst : tile->getDstTiles()) {
+    // `getDstTiles()` is a std::set<Tile *>, so it iterates in ADDRESS order,
+    // and tiles are heap-allocated: the order differs from one process to the
+    // next. Callers pick among equal-cost candidates in the order given, so
+    // that difference reaches the placement, then the routing, then the II.
+    // Measured before this was sorted: the same binary on the same input gave
+    // plain_gemm 393218 seven times out of eight and 262147 once, with the two
+    // runs differing first at a data_mov routed link#3-7-20 against
+    // link#4-14-20 -- same length, same arrival, different choice.
+    SmallVector<Tile *> destinations(tile->getDstTiles().begin(),
+                                     tile->getDstTiles().end());
+    llvm::sort(destinations, [](const Tile *lhs, const Tile *rhs) {
+      return lhs->getId() < rhs->getId();
+    });
+    for (Tile *dst : destinations) {
       MappingLoc next_step_dst_tile_loc = {dst, next_step};
       next_step_tiles.push_back(next_step_dst_tile_loc);
     }
