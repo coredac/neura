@@ -38,14 +38,29 @@ struct OrchestrateTasksOnAcceleratorsPass
                      "task count is not bounded by grid size)."),
       llvm::cl::init("spatial-temporal")};
 
+  Option<bool> commAware{
+      *this, "comm-aware",
+      llvm::cl::desc("Weight each memory-proximity penalty by the transferred "
+                     "data volume, so placement minimises "
+                     "sum(volume * distance) instead of sum(distance) "
+                     "(default: false)."),
+      llvm::cl::init(false)};
+
   void runOnOperation() override {
-    SchedulingMode mode = (schedulingMode.getValue() == "spatial")
+    const StringRef scheduling_mode = schedulingMode.getValue();
+    if (scheduling_mode != "spatial" && scheduling_mode != "spatial-temporal") {
+      getOperation().emitError()
+          << "unknown scheduling-mode '" << scheduling_mode
+          << "'; expected spatial or spatial-temporal";
+      return signalPassFailure();
+    }
+    SchedulingMode mode = (scheduling_mode == "spatial")
                               ? SchedulingMode::Spatial
                               : SchedulingMode::SpatialTemporal;
     const neura::Architecture &architecture = neura::getArchitecture();
     RoutingCriticalPathOrchestration strategy(
         architecture.getMultiCgraRows(), architecture.getMultiCgraColumns(),
-        mode);
+        mode, commAware.getValue());
     strategy.runTaskOrchestration(getOperation());
   }
 };

@@ -26,8 +26,10 @@ class RoutingCriticalPathOrchestration : public Orchestration {
 public:
   RoutingCriticalPathOrchestration(
       int grid_rows = kCgraGridRows, int grid_cols = kCgraGridCols,
-      SchedulingMode mode = SchedulingMode::SpatialTemporal)
-      : grid_rows_(grid_rows), grid_cols_(grid_cols), mode_(mode) {}
+      SchedulingMode mode = SchedulingMode::SpatialTemporal,
+      bool comm_aware = false)
+      : grid_rows_(grid_rows), grid_cols_(grid_cols), mode_(mode),
+        comm_aware_(comm_aware) {}
 
   // Places all taskflow.task ops in `func` onto the grid, annotating each
   // with a `task_orchestration_info` attribute.  Returns true on success.
@@ -58,6 +60,7 @@ private:
 
   int grid_rows_;
   int grid_cols_;
+  bool comm_aware_ = false;
   SchedulingMode mode_;
 };
 

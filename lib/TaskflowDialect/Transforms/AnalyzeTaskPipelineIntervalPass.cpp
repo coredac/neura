@@ -21,16 +21,17 @@ using namespace mlir::taskflow;
 
 namespace {
 
-static int getRequiredTaskDuration(TaskflowTaskOp task) {
+static int64_t getRequiredTaskDuration(TaskflowTaskOp task) {
   // Prefer `est_latency` = II*(trip_count-1) + steps when the resource-aware
   // pass published it. It is the same quantity TaskScheduler charged for
   // residency when it built this placement; analysing the placement with
   // `profile_info.duration` (the DFG depth) instead would measure a different
   // schedule from the one that was actually produced.
-  if (auto lat = task->getAttrOfType<IntegerAttr>("est_latency")) {
-    int64_t v = lat.getInt();
-    if (v > 0)
-      return static_cast<int>(std::min<int64_t>(v, INT32_MAX));
+  if (auto est_latency_attr =
+          task->getAttrOfType<IntegerAttr>("est_latency")) {
+    int64_t est_latency_cycles = est_latency_attr.getInt();
+    if (est_latency_cycles > 0)
+      return est_latency_cycles;
   }
   auto profile_info = task->getAttrOfType<DictionaryAttr>("profile_info");
   if (!profile_info) {
@@ -44,7 +45,7 @@ static int getRequiredTaskDuration(TaskflowTaskOp task) {
     return -1;
   }
 
-  return std::max(1, static_cast<int>(duration.getInt()));
+  return std::max<int64_t>(1, duration.getInt());
 }
 
 static std::optional<TaskScheduleResult::CgraOccupancy>
@@ -133,7 +134,7 @@ private:
 
   LogicalResult buildScheduleResults() {
     for (TaskflowTaskOp task : tasks_) {
-      int duration = getRequiredTaskDuration(task);
+      int64_t duration = getRequiredTaskDuration(task);
       if (duration < 0) {
         return failure();
       }
@@ -190,7 +191,7 @@ private:
     start_times_.assign(tasks_.size(), 0);
 
     for (auto [task_idx, task] : llvm::enumerate(tasks_)) {
-      const int my_group = tileGroupOf(task);
+      const int task_tile_group = tileGroupOf(task);
       for (Value operand : task->getOperands()) {
         auto producer = operand.getDefiningOp<TaskflowTaskOp>();
         if (!producer) {
@@ -198,22 +199,35 @@ private:
         }
         // An ordered group (cut on a dimension that does not index every
         // store) keeps its chain; only a parallel-safe group drops it.
-        auto par = task->getAttrOfType<BoolAttr>("tile_parallel");
-        if (my_group >= 0 && tileGroupOf(producer) == my_group &&
-            (!par || par.getValue())) {
+        auto tile_parallel_attr =
+            task->getAttrOfType<BoolAttr>("tile_parallel");
+        if (task_tile_group >= 0 && tileGroupOf(producer) == task_tile_group &&
+            (!tile_parallel_attr || tile_parallel_attr.getValue())) {
           continue;
         }
         // Consuming a group means consuming ALL of it. TaskTiler rewires the
         // original consumers onto the last tile, so once the intra-group chain
         // is dropped the earlier tiles have no path to this task and could be
         // ordered after it. Depend on every member instead.
-        const int pg = tileGroupOf(producer);
-        if (pg >= 0 && pg != my_group) {
-          for (auto [sib_idx, sib] : llvm::enumerate(tasks_)) {
-            if (sib == producer || tileGroupOf(sib) != pg)
+        const int producer_tile_group = tileGroupOf(producer);
+        if (producer_tile_group >= 0 && producer_tile_group != task_tile_group) {
+          for (auto [sibling_idx, sibling_task] : llvm::enumerate(tasks_)) {
+            if (sibling_task == producer ||
+                tileGroupOf(sibling_task) != producer_tile_group)
               continue;
-            addExecutionOrderDependence(static_cast<int>(sib_idx),
+            addExecutionOrderDependence(static_cast<int>(sibling_idx),
                                         static_cast<int>(task_idx));
+            // Also record it as a real predecessor. This local graph decides
+            // start times, but `TaskPipelineIntervalAnalyzer` builds its own
+            // edge set from `predecessor_tasks` alone, and a sibling edge that
+            // exists only here is invisible to the longest-path search that
+            // produces the reported interval. The omission under-reports:
+            // a consumer sharing a cell with tile 0 of an N-way group had no
+            // path back to it, so that cell's cycle collapsed to bare
+            // occupancy.
+            schedule_result_[task_idx].predecessor_tasks.push_back(
+                sibling_task);
+            schedule_result_[sibling_idx].successor_tasks.push_back(task);
           }
         }
 
@@ -281,7 +295,8 @@ private:
       ++processed_tasks;
 
       for (int next_task : successors_[task]) {
-        int next_start = start_times_[task] + schedule_result_[task].duration;
+        int64_t next_start =
+            start_times_[task] + schedule_result_[task].duration;
         start_times_[next_task] = std::max(start_times_[next_task], next_start);
 
         --predecessor_count_[next_task];
@@ -301,7 +316,7 @@ private:
 
   void updateScheduleTimes() {
     for (auto [task_idx, task_result] : llvm::enumerate(schedule_result_)) {
-      int start_time = start_times_[task_idx];
+      int64_t start_time = start_times_[task_idx];
       task_result.start_time = start_time;
       task_result.end_time = start_time + task_result.duration;
       for (TaskScheduleResult::CgraOccupancy &occupancy :
@@ -318,7 +333,7 @@ private:
   DenseSet<int64_t> execution_order_edge_keys_;
   SmallVector<SmallVector<int>> successors_;
   SmallVector<int> predecessor_count_;
-  SmallVector<int> start_times_;
+  SmallVector<int64_t> start_times_;
   SmallVector<TaskScheduleResult> schedule_result_;
 };
 
@@ -337,9 +352,23 @@ static void emitPipelineIntervalInfo(func::FuncOp func,
   OpBuilder builder(context);
 
   SmallVector<NamedAttribute> attrs;
+  // `pipeline_interval` stays i32 because the in-tree expectations pin that
+  // type. Whole-network kernels run past what i32 holds -- a GPT-2 prefill
+  // block already measures 1.85e9 cycles -- so when the analysis exceeds it,
+  // say so and publish the exact value alongside rather than emitting a
+  // silently truncated number under the same name.
+  const int64_t interval = result.pipeline_interval;
   attrs.push_back(builder.getNamedAttr(
       "pipeline_interval",
-      builder.getI32IntegerAttr(result.pipeline_interval)));
+      builder.getI32IntegerAttr(
+          static_cast<int32_t>(std::min<int64_t>(interval, INT32_MAX)))));
+  if (interval > INT32_MAX) {
+    func.emitWarning() << "pipeline interval " << interval
+                       << " exceeds i32; `pipeline_interval` is clamped, see "
+                          "`pipeline_interval_cycles` for the exact value";
+    attrs.push_back(builder.getNamedAttr(
+        "pipeline_interval_cycles", builder.getI64IntegerAttr(interval)));
+  }
 
   StringRef bottleneck_task_name = "";
   if (result.bottleneck_task) {
