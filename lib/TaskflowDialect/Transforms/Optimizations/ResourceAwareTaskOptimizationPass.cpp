@@ -3657,10 +3657,23 @@ public:
         TaskTiler::canReplicate(node->op, node->replicas + 1))
       options.replicas.push_back(node->replicas + 1);
     options.tiling.push_back(node->tiling);
+    // `canTile` asks whether the cut is LEGAL; `tilingIsParallel` asks whether
+    // the pieces may overlap in time. The pool needs both, and asking only the
+    // first is what let it price an ordered cut at latency/N.
+    //
+    // On bicg no dimension indexes every store, so an 8-way cut is legal and
+    // strictly sequential. The pool offered it, the closed form scored it at
+    // trip/8, and the shortlist measured 8195 -> 4099 -> 2051 -> 1027 -> 515
+    // through the pre-materialisation model. Materialising it produced eight
+    // serialised tasks and an interval of 8216 -- worse than the 8195 it
+    // started from, and 16x what the search believed. An ordered cut costs the
+    // same latency on more area, so it is never the right answer and the pool
+    // should not carry it.
     if (node->tile_group < 0 && node->tiling * 2 <= max_tiling &&
         (int64_t)std::max(1, node->replicas) * (node->tiling * 2) <=
             node->split_space &&
-        TaskTiler::canTile(node->op, node->tiling * 2))
+        TaskTiler::canTile(node->op, node->tiling * 2) &&
+        TaskTiler::tilingIsParallel(node->op, node->tiling * 2))
       options.tiling.push_back(node->tiling * 2);
     return options;
   }
@@ -6670,21 +6683,50 @@ struct ResourceAwareTaskOptimizationPass
                            std::max(1, n->tiling));
           return a;
         };
+        // One yardstick for the whole portfolio, and it is the same one the
+        // joint search uses inside a strategy.
+        //
+        // It was two. A strategy chose among ITS candidates on the verified
+        // interval -- lower the shortlist, measure it through orchestration and
+        // the analysis -- and then the portfolio chose among STRATEGIES on the
+        // analytical objective of an analytically re-profiled graph. The same
+        // allocation therefore had two scores, and on bicg they disagreed by
+        // 8x: the joint climb adopted tiling 2, 4 and 8, measuring 8195, 4099,
+        // 2051, 1027, and the portfolio scored that same allocation at 8195 and
+        // discarded it for the strategy that had not moved at all. The emitted
+        // IR carried tiling=1. A search whose selection rule changes between
+        // levels is not selecting on one objective, which is the property this
+        // design exists to have.
+        const bool measured_portfolio = jointSearchEnabled() && current_func &&
+                                        (bool)balancer.verify_profile_fn;
         auto restore = [&](const SmallVector<std::tuple<int, int, int>> &a) {
           for (auto [i, n] : llvm::enumerate(graph.nodes)) {
             std::tie(n->cgra_count, n->replicas, n->tiling) = a[i];
-            graph.profileWithBestShape(n.get(), n->op, /*skip_mapper=*/true);
+            // Verified when the portfolio is measured, so the II the interval
+            // is derived from is the solver's, exactly as inside a strategy.
+            // The profile cache makes this a handful of extra solves: the
+            // strategies revisit the same (task, shape) pairs.
+            graph.profileWithBestShape(n.get(), n->op,
+                                       /*skip_mapper=*/!measured_portfolio);
           }
+        };
+        // The score a candidate allocation is judged on.
+        auto scoreOf = [&]() -> int64_t {
+          if (!measured_portfolio)
+            return graph.objective();
+          writeDecisionAttributes(graph);
+          const int64_t measured = realPipelineIntervalOf(current_func);
+          return measured > 0 ? measured : graph.objective();
         };
 
         const auto initial = snapshot();
         SmallVector<std::tuple<int, int, int>> best = initial;
-        int64_t best_obj = graph.objective();
+        int64_t best_obj = scoreOf();
 
         auto consider =
             [&](const SmallVector<std::tuple<int, int, int>> &cand) {
               restore(cand);
-              const int64_t obj = graph.objective();
+              const int64_t obj = scoreOf();
               if (obj < best_obj) {
                 best_obj = obj;
                 best = cand;
