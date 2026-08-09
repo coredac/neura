@@ -1,7 +1,7 @@
-// ConversionPasses.h - Header file for conversion passes
+// NeuraConversionPasses.h - Header file for Neura conversion passes
 
-#ifndef CONVERSION_PASSES_H
-#define CONVERSION_PASSES_H
+#ifndef NEURA_CONVERSION_PASSES_H
+#define NEURA_CONVERSION_PASSES_H
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Pass/PassRegistry.h"
@@ -9,11 +9,11 @@
 
 namespace mlir {
 
-// Passes defined in GraphPasses.td.
+// Passes defined in NeuraConversionPasses.td.
 #define GEN_PASS_DECL
-#include "Conversion/ConversionPasses.h.inc"
+#include "Conversion/NeuraConversionPasses.h.inc"
 
-// Neura Conversion Passes.
+// Neura conversion passes.
 std::unique_ptr<mlir::Pass> createLowerArithToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerLlvmToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerMemRefToNeuraPass();
@@ -21,12 +21,9 @@ std::unique_ptr<mlir::Pass> createLowerBuiltinToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerTorchToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerAffineToNeuraPass();
 
-// Memref SubView and Copy Conversion Passes.
-std::unique_ptr<mlir::Pass> createFoldSubViewPass();
-std::unique_ptr<mlir::Pass> createConvertCopyToAffineLoopsPass();
 #define GEN_PASS_REGISTRATION
-#include "Conversion/ConversionPasses.h.inc"
+#include "Conversion/NeuraConversionPasses.h.inc"
 
 } // namespace mlir
 
-#endif // CONVERSION_PASSES_H
+#endif // NEURA_CONVERSION_PASSES_H

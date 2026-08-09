@@ -1,12 +1,12 @@
-// ConversionPasses.td - Passes for dialect conversion
+// NeuraConversionPasses.td - Passes for Neura dialect conversion
 
-#ifndef CONVERSION_PASSES_TD
-#define CONVERSION_PASSES_TD
+#ifndef NEURA_CONVERSION_PASSES_TD
+#define NEURA_CONVERSION_PASSES_TD
 
 include "mlir/Pass/PassBase.td"
 
 //=========================================================//
-// Neura Conversion Passes.
+// Neura conversion passes.
 //=========================================================//
 def LowerArithToNeura : Pass<"lower-arith-to-neura", "FuncOp"> {
   let summary = "Lower arith to Neura dialect";
@@ -59,4 +59,4 @@ def LowerAffineToNeura : Pass<"lower-affine-to-neura", "func::FuncOp"> {
                            "mlir::affine::AffineDialect"];
 }
 
-#endif // CONVERSION_PASSES_TD
+#endif // NEURA_CONVERSION_PASSES_TD

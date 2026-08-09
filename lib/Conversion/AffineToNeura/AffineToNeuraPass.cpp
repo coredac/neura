@@ -1,6 +1,6 @@
 #include "Common/AcceleratorAttrs.h"
 #include "Conversion/AffineToNeura/LoopNestAnalysis.h"
-#include "Conversion/ConversionPasses.h"
+#include "Conversion/NeuraConversionPasses.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -30,7 +30,7 @@ using namespace mlir::neura;
 using namespace mlir::func;
 
 #define GEN_PASS_DEF_LOWERAFFINETONEURA
-#include "Conversion/ConversionPasses.h.inc"
+#include "Conversion/NeuraConversionPasses.h.inc"
 
 namespace {
 // Converts an AffineMap to explicit index computations using Neura operations.
