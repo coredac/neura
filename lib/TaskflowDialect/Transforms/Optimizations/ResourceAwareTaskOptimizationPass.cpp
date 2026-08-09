@@ -3316,6 +3316,18 @@ public:
   // balancer must not grow a dependency on the pass to reach it.
   using RealIntervalFn = std::function<int64_t()>;
   RealIntervalFn real_interval_fn;
+  // Profiles a task the EXPENSIVE way: the real mapper, or the exact solver
+  // when one is configured. `profile_fn` obeys `estimation-mode`, so under
+  // `cost-model-analytical` it never maps anything -- which is right for the
+  // search, and wrong for the shortlist.
+  //
+  // Without this the design did not do what it claims. The pool was ranked in
+  // closed form (correct, and the point), but the top k were then "verified"
+  // with the same analytical II the ranking already used, so the verification
+  // could only re-order candidates the estimate had already ordered. The
+  // solver ran once, after the search, on whatever the search had settled on.
+  // "Rank cheaply, lower the top k for real" needs the second half.
+  ProfileFn verify_profile_fn;
   // Publishes the current configuration onto the IR so `real_interval_fn` sees
   // it. Same reason for the indirection.
   using PublishFn = std::function<void(TaskDependencyGraph &)>;
@@ -3536,11 +3548,25 @@ public:
                    << "search needs the real-measurement callback)\n";
       return balanceImpl(graph, profile_fn);
     }
+    // Falls back to the search's own profiler when no verifier is wired, so a
+    // configuration without one behaves exactly as before rather than silently
+    // losing the shortlist step.
+    const ProfileFn &verify =
+        verify_profile_fn ? verify_profile_fn : profile_fn;
     for (int round = 0; round < joint_rounds; ++round) {
       DenseSet<TaskGraphNode *> none;
       TaskGraphNode *bottleneck = findBottleneck(graph, none);
       if (!bottleneck)
         break;
+      // The centre is measured with the SAME profiler as the candidates.
+      //
+      // Verifying the candidates while leaving the centre on its analytical II
+      // would decide the round on which yardstick was applied, not on which
+      // configuration is better: the analytical II is a floor, so an
+      // unverified centre reads as faster than it is and no candidate can ever
+      // beat it. Verify first, then snapshot, so `restoreConfig` puts the
+      // verified value back and `centre_measured` below is comparable.
+      verify(bottleneck, bottleneck->op);
       const JointConfig centre = captureConfig(graph);
       const int64_t centre_score = graph.objective();
       const int budget_left = grid_budget - graph.getTotalAllocatedCGRAs() +
@@ -3683,7 +3709,7 @@ public:
         bottleneck->shape = candidate.shape;
         bottleneck->replicas = candidate.replicas;
         bottleneck->tiling = candidate.tiling;
-        profile_fn(bottleneck, bottleneck->op);
+        verify(bottleneck, bottleneck->op);
         publish_fn(graph);
         const int64_t measured = real_interval_fn();
         llvm::errs() << "[Joint]   cand " << i << " cgras="
@@ -3718,7 +3744,7 @@ public:
       bottleneck->shape = winner->shape;
       bottleneck->replicas = winner->replicas;
       bottleneck->tiling = winner->tiling;
-      profile_fn(bottleneck, bottleneck->op);
+      verify(bottleneck, bottleneck->op);
       changed = true;
       llvm::errs() << "[Joint]   adopted, measured " << best_measured
                    << " (was " << centre_measured << ")\n";
@@ -6143,6 +6169,23 @@ struct ResourceAwareTaskOptimizationPass
                                          TaskflowTaskOp task) {
         graph.profileWithBestShape(node, task, /*skip_mapper=*/true);
       };
+      // What the shortlist cashes in: one COMPLETE lowering of a candidate.
+      // The mapper runs, or the exact solver when one is configured, and the
+      // II that comes back is a measurement rather than the floor the ranking
+      // already used.
+      //
+      // `profileTask`, not `profileWithBestShape`, because the joint pool
+      // carries its own shape axis and already set `node->shape` to the
+      // candidate's. `profileWithBestShape` starts by overwriting that with
+      // `pickBestShape(cgra_count)` and runs its own shape shortlist, so
+      // routing the candidates through it discarded the axis the pool had just
+      // enumerated -- every candidate at a given cgra_count was profiled at the
+      // same shape, which is why they kept coming back with identical
+      // measurements.
+      auto balance_verify_fn = [&graph](TaskGraphNode *node,
+                                        TaskflowTaskOp task) {
+        graph.profileTask(node, task, /*skip_mapper=*/false);
+      };
       // Cost-model (optimal) fission: exact min-max allocation over the
       // analytical latency curve, vs Neura's greedy bottleneck balance.
       //
@@ -6439,6 +6482,11 @@ struct ResourceAwareTaskOptimizationPass
 
       PipelineBalancer balancer;
       configureBalancer(balancer);
+      // Only the committing balance gets it. The speculative call sites have no
+      // `real_interval_fn` and fall back to the one-axis climb, where a
+      // complete lowering per candidate would cost more than the lookahead it
+      // informs.
+      balancer.verify_profile_fn = balance_verify_fn;
       bool balance_changed = false;
       if (!importAllocation.getValue().empty()) {
         balance_changed =
