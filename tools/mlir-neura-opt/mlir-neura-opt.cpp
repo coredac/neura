@@ -116,7 +116,7 @@ int main(int argc, char **argv) {
 
   mlir::neura::registerPasses();
   mlir::registerAllPasses();
-  mlir::registerPasses();
+  mlir::registerNeuraConversionPasses();
   mlir::registerViewOpGraphPass();
 
   // Register all standard conversion passes
