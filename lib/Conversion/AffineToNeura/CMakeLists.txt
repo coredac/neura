@@ -3,7 +3,7 @@ add_mlir_dialect_library(MLIRNeuraAffineToNeuraPass
   LoopNestAnalysis.cpp
 
   DEPENDS
-  MLIRConversionIncGen
+  MLIRNeuraConversionIncGen
 
   LINK_LIBS PUBLIC
   MLIRAffineDialect

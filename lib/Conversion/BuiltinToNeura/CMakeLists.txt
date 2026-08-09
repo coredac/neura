@@ -4,7 +4,7 @@ add_mlir_conversion_library(MLIRNeuraBuiltinToNeuraPass
   BuiltinToNeuraPass.cpp
 
   DEPENDS
-  MLIRConversionIncGen
+  MLIRNeuraConversionIncGen
 
   LINK_LIBS PUBLIC
   MLIRArithDialect

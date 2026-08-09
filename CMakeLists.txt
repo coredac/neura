@@ -29,8 +29,8 @@ include(AddLLVM)
 include(AddMLIR)
 include(HandleLLVMOptions)
 
-include_directories(${PROJECT_SOURCE_DIR}/include)
-include_directories(${PROJECT_BINARY_DIR}/include)
+include_directories(BEFORE ${PROJECT_SOURCE_DIR}/include)
+include_directories(BEFORE ${PROJECT_BINARY_DIR}/include)
 
 add_subdirectory(include)
 add_subdirectory(lib)
@@ -40,6 +40,7 @@ add_subdirectory(tools)
 # LIT test setup
 # ===--------------------------------------------------------------------===#
 
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
 # Tools built by this project or LLVM
 set(MLIR_NEURA_OPT ${CMAKE_BINARY_DIR}/tools/mlir-neura-opt/mlir-neura-opt)
 set(NEURA_INTERPRETER ${CMAKE_BINARY_DIR}/tools/neura-interpreter/neura-interpreter)
@@ -65,3 +66,4 @@ add_custom_target(check-neura
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
   COMMENT "Running Sora Dialect Tests with lit"
 )
+endif()

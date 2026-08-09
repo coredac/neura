@@ -4,7 +4,7 @@ add_mlir_conversion_library(MLIRNeuraArithToNeuraPass
   ArithToNeuraPass.cpp
 
   DEPENDS
-  MLIRConversionIncGen
+  MLIRNeuraConversionIncGen
 
   LINK_LIBS PUBLIC
     MLIRIR
