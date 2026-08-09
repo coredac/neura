@@ -2344,6 +2344,53 @@ public:
   std::shared_ptr<ProfileCache> profile_cache =
       std::make_shared<ProfileCache>();
 
+  // The three body facts the ranking needs, read straight off the IR the main
+  // pipeline already produced. No clone, no temporary module, no pass.
+  //
+  // The filters match the ones the cloned path uses, so the numbers agree:
+  // `n_ops` uses `calculateResMii`'s filter (skip DataMov/CtrlMov/Reserve and
+  // anything inside a FusedOp) and `rec_mii`/`steps` come from the same
+  // `collectRecurrenceCycles` and ALAP-level helpers. Returns false when the
+  // task has no kernel to read, so the caller falls back rather than inventing
+  // numbers.
+  bool readBodyFactsInPlace(TaskflowTaskOp task, int64_t &n_ops,
+                            int64_t &rec_mii, int64_t &steps) {
+    neura::KernelOp kernel;
+    task.walk([&](neura::KernelOp k) { kernel = k; });
+    if (!kernel)
+      return false;
+    Region &region = kernel.getBody();
+    if (region.empty())
+      return false;
+
+    n_ops = 0;
+    region.walk([&](Operation *op) {
+      if (isa<func::FuncOp>(op) ||
+          isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op))
+        return;
+      if (op->getParentOp() && isa<neura::FusedOp>(op->getParentOp()))
+        return;
+      ++n_ops;
+    });
+
+    rec_mii = 1;
+    auto cycles = neura::collectRecurrenceCycles(region);
+    for (auto &cycle : cycles)
+      rec_mii = std::max<int64_t>(rec_mii, cycle.length);
+
+    steps = 1;
+    std::set<Operation *> critical_ops;
+    for (auto &cycle : cycles)
+      for (Operation *op : cycle.operations)
+        critical_ops.insert(op);
+    auto sorted_ops = neura::getTopologicallySortedOps(region);
+    if (!sorted_ops.empty())
+      steps = std::max<int64_t>(
+          1, (int64_t)neura::getOpsInAlapLevels(sorted_ops, critical_ops)
+                 .size());
+    return n_ops > 0;
+  }
+
   void profileTask(TaskGraphNode *node, TaskflowTaskOp task,
                    bool skip_mapper = false) {
     // The function name is part of the identity because the pass object, and
@@ -2357,16 +2404,78 @@ public:
         (node->tile_group >= 0
              ? ("tile_group:" + std::to_string(node->tile_group))
              : ("task:" + task.getTaskName().str()));
-    const auto key = std::make_tuple(identity, node->shape.irAttr(),
-                                     skip_mapper ? 1 : 0);
+    // An ANALYTICAL profile does not depend on the shape, so it is not keyed on
+    // one.
+    //
+    // Everything `profileTaskUncached` learns from the clone -- `n_ops`,
+    // `rec_mii`, `steps` -- is a property of the task BODY. The shape reaches
+    // the answer only through the closed form below, which needs no clone at
+    // all. Keying the analytical entry on the shape therefore paid the most
+    // expensive operation in the pass for a number arithmetic already had:
+    // gemver profiled Task_0 at 1x1, 1x2, 2x1, 2x2, 1x3, 3x1, 1x4, 4x1 and 2x3
+    // -- nine clones and nine full Neura lowerings -- and every one of them
+    // came back with the same n_ops and the same rec_mii. Across its three
+    // tasks that was 21 lowerings spent to rank shapes, which is exactly the
+    // enumerate-and-lower pattern the ranking is supposed to replace. The
+    // ranking was closed-form in the joint pool and not in
+    // `profileWithBestShape`, and the shape axis is where most candidates are.
+    //
+    // A VERIFIED profile still carries the shape: there the mapper or the
+    // solver is handed the actual tile array, and that is the whole point of
+    // running it.
+    const auto key = std::make_tuple(
+        identity, skip_mapper ? std::string("*") : node->shape.irAttr(),
+        skip_mapper ? 1 : 0);
     auto cached = profile_cache->find(key);
+    // The ranking compiles nothing at all.
+    //
+    // An analytical profile used to clone the kernel into a temporary module,
+    // run InsertDataMov over it, and only then count -- per task, per shape.
+    // None of the three numbers it was after needs any of that. `n_ops` is
+    // counted with a filter that EXCLUDES exactly the ops InsertDataMov adds;
+    // `rec_mii` and the ALAP depth read the dataflow IR the main pipeline has
+    // already produced. The shape enters only as the tile count in the closed
+    // form below.
+    //
+    // So the facts are read in place, once per task body, and every shape after
+    // that is arithmetic. On gemver this replaced 30 clone-and-lower rounds
+    // with 3 IR walks.
+    if (skip_mapper && cached == profile_cache->end()) {
+      int64_t body_ops = 0, body_rec = 1, body_steps = 1;
+      if (readBodyFactsInPlace(task, body_ops, body_rec, body_steps)) {
+        ProfileResult facts;
+        facts.ii = 1;
+        facts.steps = body_steps;
+        facts.avg_hop = 0.0;
+        facts.predicted_cost = 0.0;
+        facts.n_ops = body_ops;
+        facts.rec_mii = body_rec;
+        cached = profile_cache->emplace(key, facts).first;
+      }
+    }
     if (cached != profile_cache->end()) {
-      node->ii = cached->second.ii;
       node->steps = cached->second.steps;
-      node->avg_hop = cached->second.avg_hop;
-      node->predicted_cost = cached->second.predicted_cost;
       node->n_ops = cached->second.n_ops;
       node->rec_mii = cached->second.rec_mii;
+      if (!skip_mapper) {
+        node->ii = cached->second.ii;
+        node->avg_hop = cached->second.avg_hop;
+        node->predicted_cost = cached->second.predicted_cost;
+        return;
+      }
+      // Re-derive the two shape-dependent quantities. Same expressions the
+      // uncached analytical path uses, so a hit and a miss agree.
+      const int64_t tiles = (int64_t)node->shape.rows * per_cgra_rows *
+                            (int64_t)node->shape.cols * per_cgra_cols;
+      node->ii = node->n_ops > 0
+                     ? std::max<int64_t>(
+                           llvm::divideCeil(node->n_ops,
+                                            std::max<int64_t>(1, tiles)),
+                           node->rec_mii)
+                     : cached->second.ii;
+      node->avg_hop = hopForShape(node->shape);
+      node->predicted_cost =
+          predictedCost(node->ii, node->avg_hop, node->steps, hop_coef);
       return;
     }
     profileTaskUncached(node, task, skip_mapper);
@@ -2919,8 +3028,23 @@ private:
     if (verifier_is_cpsat && all_data_movs_ok) {
       int solved_ii = 0;
       bool proven = false;
+      // `compiled_ii` here is the analytical floor the block above just
+      // computed, and the solver starts its ladder there instead of at 1.
+      //
+      // Every II below a sound floor is infeasible by arithmetic, so probing
+      // one spends the whole per-II budget re-deriving what the cost model
+      // already proved -- and spends it the expensive way, because an
+      // infeasible II usually TIMES OUT rather than coming back UNSAT. On
+      // gesummv, whose true II is 3, a single solver call cost 48.4s: 20s
+      // failing to settle II=1, 20s failing to settle II=2, and the rest
+      // actually solving II=3.
+      //
+      // It also tightens the verdict. With the ladder starting at 1 a witness
+      // found at the floor is tagged an upper bound, because `--fallback`
+      // cannot distinguish "II-1 was proved infeasible" from "II-1 timed out".
+      // Starting at a proven floor, a witness AT the floor is optimal.
       if (solveWithCpsat(dst_module, ctx, x_tiles, y_tiles, valid_tiles,
-                         solved_ii, proven)) {
+                         std::max(1, compiled_ii), solved_ii, proven)) {
         compiled_ii = solved_ii;
         llvm::errs() << "[profileTask] cpsat returned II=" << solved_ii
                      << (proven ? " (proven optimal)" : " (upper bound)")
@@ -3000,8 +3124,8 @@ private:
   // and `out_proven` says so, because a table that cannot tell a proven optimum
   // from a budget-limited one will eventually report the second as the first.
   bool solveWithCpsat(ModuleOp dst_module, MLIRContext *ctx, int x_tiles,
-                      int y_tiles, StringRef valid_tiles, int &out_ii,
-                      bool &out_proven) {
+                      int y_tiles, StringRef valid_tiles, int min_ii,
+                      int &out_ii, bool &out_proven) {
     llvm::SmallString<128> dfg_path;
     if (llvm::sys::fs::createTemporaryFile("neura-dfg", "json", dfg_path)) {
       llvm::errs() << "[cpsat] cannot create a temporary file for the DFG\n";
@@ -3034,9 +3158,11 @@ private:
         [&] { llvm::sys::fs::remove(out_path.str()); });
 
     std::string seconds = std::to_string(std::max(1, cpsat_seconds));
+    // The ladder starts at the analytical lower bound, not at 1.
+    std::string min_ii_str = std::to_string(std::max(1, min_ii));
     SmallVector<StringRef> argv = {cpsat_python, cpsat_script, dfg_path.str(),
                                    "--seconds",  seconds,      "--fallback",
-                                   "-v"};
+                                   "--min-ii",   min_ii_str,   "-v"};
     argv.push_back(cpsat_minimize_routing ? "--minimize-routing"
                                           : "--no-minimize-routing");
     // The solver prints its verdict on stdout and its per-II trace on stderr,
@@ -3085,8 +3211,14 @@ private:
       if (rest.take_while(llvm::isDigit).getAsInteger(10, value) || value <= 0)
         continue;
       out_ii = value;
-      out_proven = !text.contains("schedule timeout") &&
-                   !text.contains("routing=FAIL");
+      // With the ladder starting at the analytical floor, a witness AT that
+      // floor is optimal without the solver having to prove anything below it:
+      // those IIs are infeasible by the cost model's own arithmetic. Above the
+      // floor the old rule stands, because then the solver did climb past IIs
+      // it may only have failed to settle.
+      out_proven = value <= std::max(1, min_ii) ||
+                   (!text.contains("schedule timeout") &&
+                    !text.contains("routing=FAIL"));
       return true;
     }
     // `... > N` is the solver's other outcome: no II up to the architecture's
@@ -6161,13 +6293,28 @@ struct ResourceAwareTaskOptimizationPass
       }
 
       // Phase 2: Latency-Aware Pipeline Balance.
-      // Balance probes always use analytical-only profiling (skip_mapper=true)
-      // to avoid exponential backtracking blowup during speculative probing.
-      // The balance-skip-mapper flag now only controls whether a final
-      // verification mapper run is performed after convergence (see below).
-      auto balance_profile_fn = [&graph](TaskGraphNode *node,
-                                         TaskflowTaskOp task) {
-        graph.profileWithBestShape(node, task, /*skip_mapper=*/true);
+      //
+      // Obeys `balance-skip-mapper`, which is what the flag has always claimed
+      // to do -- "set to false for accurate compiled_ii during balance at the
+      // cost of compile time". It could not: the value was hardcoded here, so
+      // the climb settled every shape analytically no matter what was passed,
+      // and the flag reached only the post-convergence verification below.
+      //
+      // The knob decides which baseline the compile time is measured against,
+      // so a knob that does not turn decides it silently. With it stuck at
+      // true the shipped climb lowers once or twice per kernel -- fewer times
+      // than the shortlist it is supposed to be more expensive than -- because
+      // it is not searching, not because it is searching cheaply. With it
+      // false the climb does what the greedy pattern actually costs: a
+      // complete lowering per probe, per shape it tries.
+      //
+      // Same expression as the verification below, so one flag means one thing
+      // in both places.
+      const bool balance_probes_skip_mapper =
+          use_analytical && balanceSkipMapper.getValue();
+      auto balance_profile_fn = [&graph, balance_probes_skip_mapper](
+                                    TaskGraphNode *node, TaskflowTaskOp task) {
+        graph.profileWithBestShape(node, task, balance_probes_skip_mapper);
       };
       // What the shortlist cashes in: one COMPLETE lowering of a candidate.
       // The mapper runs, or the exact solver when one is configured, and the
