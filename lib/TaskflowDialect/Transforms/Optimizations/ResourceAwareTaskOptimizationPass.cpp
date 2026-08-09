@@ -19,6 +19,11 @@
 
 #include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/analytical_cost_model.h"
+
+#include "llvm/ADT/ScopeExit.h"
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Program.h"
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraAttributes.h"
 #include "NeuraDialect/NeuraDialect.h"
@@ -32,6 +37,7 @@
 #include "mlir/IR/IRMapping.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
@@ -47,6 +53,8 @@
 #include <deque>
 #include <functional>
 #include <limits>
+#include <map>
+#include <memory>
 #include <set>
 
 using namespace mlir;
@@ -136,7 +144,7 @@ struct CgraShape {
 // asymmetric memory-FU tile_overrides). It is the topology feature that turns
 // the sound floor into a shape-aware *prediction*:
 //
-//   predicted_ii = LB + max(0, coef * avg_hop * cp_depth - 1)
+//   predicted_cost = LB + max(0, coef * avg_hop * cp_depth - 1)
 //
 // The floor `LB` is left untouched — it stays sound for proofs and pruning; the
 // prediction is used only for ranking/selection.
@@ -159,10 +167,10 @@ static double averageHop(const neura::Architecture &arch,
   // Adjacency over the real link graph.
   llvm::DenseMap<int, SmallVector<int, 4>> adj;
   llvm::DenseSet<int> ids;
-  for (neura::Tile *t : tiles)
-    ids.insert(t->getId());
-  for (neura::Link *l : arch.getAllLinks()) {
-    neura::Tile *src = l->getSrcTile(), *dst = l->getDstTile();
+  for (neura::Tile *tile : tiles)
+    ids.insert(tile->getId());
+  for (neura::Link *link : arch.getAllLinks()) {
+    neura::Tile *src = link->getSrcTile(), *dst = link->getDstTile();
     if (!src || !dst)
       continue;
     if (ids.contains(src->getId()) && ids.contains(dst->getId()))
@@ -171,12 +179,12 @@ static double averageHop(const neura::Architecture &arch,
   // Memory-capable tiles: the sources/sinks of every live value.
   llvm::DenseSet<int> mem_tiles;
   if (mem_weighted) {
-    for (neura::Tile *t : tiles)
-      if (t->canSupportOperation(neura::ILoadIndexed) ||
-          t->canSupportOperation(neura::IStoreIndexed) ||
-          t->canSupportOperation(neura::ILoad) ||
-          t->canSupportOperation(neura::IStore))
-        mem_tiles.insert(t->getId());
+    for (neura::Tile *tile : tiles)
+      if (tile->canSupportOperation(neura::ILoadIndexed) ||
+          tile->canSupportOperation(neura::IStoreIndexed) ||
+          tile->canSupportOperation(neura::ILoad) ||
+          tile->canSupportOperation(neura::IStore))
+        mem_tiles.insert(tile->getId());
     // No memory FU anywhere (or all of them): the weighting carries no signal.
     if (mem_tiles.empty() || mem_tiles.size() == tiles.size())
       mem_weighted = false;
@@ -201,9 +209,9 @@ static double averageHop(const neura::Architecture &arch,
     // Mean over tiles of the distance to the nearest memory tile.
     long long total = 0;
     int counted = 0;
-    for (neura::Tile *t : tiles) {
+    for (neura::Tile *tile : tiles) {
       llvm::DenseMap<int, int> dist;
-      bfs(t->getId(), dist);
+      bfs(tile->getId(), dist);
       int best = INT_MAX;
       for (int m : mem_tiles) {
         auto it = dist.find(m);
@@ -219,9 +227,9 @@ static double averageHop(const neura::Architecture &arch,
   }
 
   long long total = 0, pairs = 0;
-  for (neura::Tile *s : tiles) {
+  for (neura::Tile *src_tile : tiles) {
     llvm::DenseMap<int, int> dist;
-    bfs(s->getId(), dist);
+    bfs(src_tile->getId(), dist);
     for (auto &[id, d] : dist) {
       total += d;
       ++pairs;
@@ -255,24 +263,24 @@ static double averageHop(const neura::Architecture &arch,
 // Mean of |i - (j + offset)| over i in [0, n1), j in [0, n2). One axis of the
 // mean Manhattan distance between two tile blocks whose origins are `offset`
 // apart on that axis.
-static double meanAbsDiff(int n1, int n2, int offset) {
-  if (n1 <= 0 || n2 <= 0)
+static double meanAbsDiff(int a_extent, int b_extent, int offset) {
+  if (a_extent <= 0 || b_extent <= 0)
     return 0.0;
   long long total = 0;
-  for (int i = 0; i < n1; ++i)
-    for (int j = 0; j < n2; ++j)
-      total += std::abs(i - (j + offset));
-  return (double)total / ((double)n1 * (double)n2);
+  for (int a_pos = 0; a_pos < a_extent; ++a_pos)
+    for (int b_pos = 0; b_pos < b_extent; ++b_pos)
+      total += std::abs(a_pos - (b_pos + offset));
+  return (double)total / ((double)a_extent * (double)b_extent);
 }
 
 // The rectangle a packer gives `n` CGRAs: the most square factorisation.
-static std::pair<int, int> blockShape(int n) {
-  n = std::max(1, n);
+static std::pair<int, int> blockShape(int cgra_count) {
+  cgra_count = std::max(1, cgra_count);
   int rows = 1;
-  for (int r = 1; r * r <= n; ++r)
-    if (n % r == 0)
-      rows = r;
-  return {rows, n / rows};
+  for (int candidate = 1; candidate * candidate <= cgra_count; ++candidate)
+    if (cgra_count % candidate == 0)
+      rows = candidate;
+  return {rows, cgra_count / rows};
 }
 
 // `out_concurrency`, when non-null, receives how many transfers the fabric can
@@ -287,8 +295,8 @@ static double fabricMessageLatency(const neura::Architecture &arch,
     if (links.empty())
       return 1.0;
     long long total = 0;
-    for (neura::Link *l : links)
-      total += std::max(1, l->getLatency());
+    for (neura::Link *link : links)
+      total += std::max(1, link->getLatency());
     return (double)total / (double)links.size();
   };
 
@@ -325,17 +333,10 @@ static double fabricMessageLatency(const neura::Architecture &arch,
 // calibrated coef=0.05 is the common case: all shapes of a given cgra_count
 // then tie at LB and the "search" silently degenerates to picking the first
 // candidate (which happens to be the geometric pick, so the knob was inert).
-// Ranking uses this continuous value; reporting uses predictedII.
+// Ranking uses this continuous value.
 static double predictedCost(int64_t lb, double avg_hop, int64_t cp_depth,
                             double coef) {
   return (double)lb + std::max(0.0, coef * avg_hop * (double)cp_depth - 1.0);
-}
-
-// Integer form, kept for logging and for the IR attribute.
-static int64_t predictedII(int64_t lb, double avg_hop, int64_t cp_depth,
-                           double coef) {
-  double term = coef * avg_hop * (double)cp_depth - 1.0;
-  return lb + std::max<int64_t>(0, (int64_t)std::llround(term));
 }
 
 // Returns all valid rectangular shapes for `cgra_count` CGRAs.
@@ -504,63 +505,63 @@ public:
   // A counter dimension may therefore be partitioned only if EVERY store in the
   // task is indexed by it. Returns the set of counter_ids that satisfy this.
   static llvm::DenseSet<int> partitionableDims(TaskflowTaskOp task) {
-    llvm::DenseSet<int> ok;
+    llvm::DenseSet<int> partitionable;
     // All counter ids present in the task.
-    llvm::DenseSet<int> all;
-    task.walk([&](neura::CounterOp c) { all.insert((int)c.getCounterId()); });
-    if (all.empty())
-      return ok;
+    llvm::DenseSet<int> all_counter_ids;
+    task.walk([&](neura::CounterOp counter) { all_counter_ids.insert((int)counter.getCounterId()); });
+    if (all_counter_ids.empty())
+      return partitionable;
 
     // Counter ids reachable backwards from a value through the dataflow.
-    auto reaching = [](Value v) {
+    auto reaching = [](Value index_value) {
       llvm::DenseSet<int> ids;
-      llvm::SmallVector<Value, 8> work{v};
+      llvm::SmallVector<Value, 8> worklist{index_value};
       llvm::DenseSet<Value> seen;
-      while (!work.empty()) {
-        Value cur = work.pop_back_val();
+      while (!worklist.empty()) {
+        Value cur = worklist.pop_back_val();
         if (!seen.insert(cur).second)
           continue;
-        Operation *def = cur.getDefiningOp();
-        if (!def)
+        Operation *def_op = cur.getDefiningOp();
+        if (!def_op)
           continue;
-        if (auto c = dyn_cast<neura::CounterOp>(def)) {
-          ids.insert((int)c.getCounterId());
+        if (auto counter = dyn_cast<neura::CounterOp>(def_op)) {
+          ids.insert((int)counter.getCounterId());
           continue;
         }
-        for (Value operand : def->getOperands())
-          work.push_back(operand);
+        for (Value operand : def_op->getOperands())
+          worklist.push_back(operand);
       }
       return ids;
     };
 
-    ok = all;
+    partitionable = all_counter_ids;
     bool saw_store = false;
     task.walk([&](Operation *op) {
       llvm::SmallVector<Value, 4> indices;
-      if (auto st = dyn_cast<neura::StoreIndexedOp>(op)) {
-        llvm::append_range(indices, st.getIndices());
-      } else if (auto st = dyn_cast<neura::StoreOp>(op)) {
-        if (st.getAddr())
-          indices.push_back(st.getAddr());
+      if (auto store = dyn_cast<neura::StoreIndexedOp>(op)) {
+        llvm::append_range(indices, store.getIndices());
+      } else if (auto store = dyn_cast<neura::StoreOp>(op)) {
+        if (store.getAddr())
+          indices.push_back(store.getAddr());
       } else {
         return;
       }
       saw_store = true;
-      llvm::DenseSet<int> here;
+      llvm::DenseSet<int> dims_indexing_store;
       for (Value idx : indices)
         for (int id : reaching(idx))
-          here.insert(id);
+          dims_indexing_store.insert(id);
       // Keep only dimensions that index THIS store too.
-      llvm::DenseSet<int> next;
-      for (int id : ok)
-        if (here.contains(id))
-          next.insert(id);
-      ok = std::move(next);
+      llvm::DenseSet<int> still_partitionable;
+      for (int id : partitionable)
+        if (dims_indexing_store.contains(id))
+          still_partitionable.insert(id);
+      partitionable = std::move(still_partitionable);
     });
     // A task with no stores produces nothing observable; leave every dimension
     // available rather than inventing a restriction.
     (void)saw_store;
-    return ok;
+    return partitionable;
   }
 
   // True if ANY counter dimension of the task may legally be partitioned.
@@ -876,6 +877,23 @@ public:
     return resultToOperand(task, map);
   }
 
+  // Would a `factor`-way cut of `task` produce tiles that may overlap in time?
+  //
+  // The same rule `tile()` records on the IR as `tile_parallel`, answered
+  // before the cut is made. Scoring needs it: a cut on a dimension that does
+  // not index every store is legal but ORDERED, and modelling those tiles as
+  // concurrent prices an N-way cut at latency/N when it costs latency.
+  static bool tilingIsParallel(TaskflowTaskOp task, int factor) {
+    SmallVector<PartitionLevel> levels = partitionLevels(task);
+    SmallVector<int64_t> per_level = splitFactorAcrossLevels(levels, factor);
+    if (per_level.empty())
+      return false;
+    for (size_t level = 0; level < levels.size(); ++level)
+      if (per_level[level] > 1 && !levels[level].parallel)
+        return false;
+    return true;
+  }
+
   // Cuts `task` into `factor` tasks. Returns the new tasks in iteration order,
   // or an empty vector if the task could not be partitioned. `ii`/`steps` are
   // copied onto every tile so the rebuilt graph does not re-profile identical
@@ -955,11 +973,11 @@ public:
             target = cl.counter;
         if (!target)
           continue;
-        OpBuilder cb(target);
-        auto new_lb =
-            cb.create<arith::ConstantIndexOp>(target.getLoc(), ranges[i].first);
-        auto new_ub = cb.create<arith::ConstantIndexOp>(target.getLoc(),
-                                                        ranges[i].second);
+        OpBuilder clone_builder(target);
+        auto new_lb = clone_builder.create<arith::ConstantIndexOp>(
+            target.getLoc(), ranges[i].first);
+        auto new_ub = clone_builder.create<arith::ConstantIndexOp>(
+            target.getLoc(), ranges[i].second);
         target.getLowerBoundMutable().assign(new_lb);
         target.getUpperBoundMutable().assign(new_ub);
 
@@ -971,19 +989,19 @@ public:
         clone.walk([&](neura::CounterOp nc) {
           if ((int)nc.getCounterId() != id)
             return;
-          OpBuilder nb(nc);
+          OpBuilder counter_builder(nc);
           if (nc->hasAttr("lower_bound_value"))
-            nc->setAttr("lower_bound_value", nb.getIndexAttr(rlb));
+            nc->setAttr("lower_bound_value", counter_builder.getIndexAttr(rlb));
           if (nc->hasAttr("upper_bound_value"))
-            nc->setAttr("upper_bound_value", nb.getIndexAttr(rub));
+            nc->setAttr("upper_bound_value", counter_builder.getIndexAttr(rub));
           if (Value v = nc.getLowerBound())
             if (v.getDefiningOp<arith::ConstantIndexOp>()) {
-              auto c = nb.create<arith::ConstantIndexOp>(nc.getLoc(), rlb);
+              auto c = counter_builder.create<arith::ConstantIndexOp>(nc.getLoc(), rlb);
               nc.getLowerBoundMutable().assign(c);
             }
           if (Value v = nc.getUpperBound())
             if (v.getDefiningOp<arith::ConstantIndexOp>()) {
-              auto c = nb.create<arith::ConstantIndexOp>(nc.getLoc(), rub);
+              auto c = counter_builder.create<arith::ConstantIndexOp>(nc.getLoc(), rub);
               nc.getUpperBoundMutable().assign(c);
             }
         });
@@ -994,29 +1012,29 @@ public:
 
       // Records the decision on the IR and carries the (unchanged) profile so
       // the rebuilt graph does not re-lower identical bodies.
-      OpBuilder ab(clone);
+      OpBuilder attr_builder(clone);
       // A group is order-free only if EVERY level it cut is parallel-safe.
       bool group_parallel = true;
       for (size_t i = 0; i < levels.size(); ++i)
         if (per_level[i] > 1 && !levels[i].parallel)
           group_parallel = false;
-      clone->setAttr("tile_parallel", ab.getBoolAttr(group_parallel));
-      clone->setAttr("tile_group", ab.getI32IntegerAttr(group_id));
-      clone->setAttr("tile_index", ab.getI32IntegerAttr(t));
-      clone->setAttr("tile_count", ab.getI32IntegerAttr(factor));
-      clone->setAttr("tile_range", ab.getDenseI64ArrayAttr(flat_range));
-      clone->setAttr("tiling", ab.getI32IntegerAttr(1));
-      clone->setAttr("cgra_count", ab.getI32IntegerAttr(cgra_count));
-      clone->setAttr("replicas", ab.getI32IntegerAttr(replicas));
+      clone->setAttr("tile_parallel", attr_builder.getBoolAttr(group_parallel));
+      clone->setAttr("tile_group", attr_builder.getI32IntegerAttr(group_id));
+      clone->setAttr("tile_index", attr_builder.getI32IntegerAttr(t));
+      clone->setAttr("tile_count", attr_builder.getI32IntegerAttr(factor));
+      clone->setAttr("tile_range", attr_builder.getDenseI64ArrayAttr(flat_range));
+      clone->setAttr("tiling", attr_builder.getI32IntegerAttr(1));
+      clone->setAttr("cgra_count", attr_builder.getI32IntegerAttr(cgra_count));
+      clone->setAttr("replicas", attr_builder.getI32IntegerAttr(replicas));
       if (ii > 0)
-        clone->setAttr("compiled_ii", ab.getI32IntegerAttr((int)ii));
+        clone->setAttr("compiled_ii", attr_builder.getI32IntegerAttr((int)ii));
       if (steps > 0) {
         SmallVector<NamedAttribute, 1> pa;
         pa.push_back(
-            NamedAttribute(StringAttr::get(ab.getContext(), "duration"),
-                           ab.getI32IntegerAttr((int)steps)));
+            NamedAttribute(StringAttr::get(attr_builder.getContext(), "duration"),
+                           attr_builder.getI32IntegerAttr((int)steps)));
         clone->setAttr("profile_info",
-                       DictionaryAttr::get(ab.getContext(), pa));
+                       DictionaryAttr::get(attr_builder.getContext(), pa));
       }
       clone->removeAttr("trip_count"); // Recomputed from the new bounds.
 
@@ -1094,19 +1112,12 @@ struct TaskGraphNode {
   // indexes every store, i.e. the partitions would race in memory.
   bool partition_illegal = false;
 
-  // Partitions of the root dimension the two moves consume together.
-  int64_t partitionsUsed() const {
-    return (int64_t)std::max(1, replicas) * (int64_t)std::max(1, tiling);
-  }
-
-  // Set once tiling has been MATERIALIZED into the IR: the node is tile
-  // `tile_index` of `tile_count` cut from the task `tile_group`. Tiles of one
-  // group are chained through the memref dependence-state SSA (that is the only
-  // well-formed encoding), but the partitioned dimension is dependence-free by
-  // `dlp_replicable`, so the scheduler treats intra-group edges as unordered.
+  // Set once tiling has been MATERIALIZED into the IR: the node is one tile
+  // cut from the task `tile_group`. Tiles of one group are chained through the
+  // memref dependence-state SSA (that is the only well-formed encoding), but
+  // the partitioned dimension is dependence-free by `dlp_replicable`, so the
+  // scheduler treats intra-group edges as unordered.
   int tile_group = -1;
-  int tile_index = 0;
-  int tile_count = 1;
   // False when the tiles must stay in order (the cut dimension does not index
   // every store, e.g. a reduction through memory). Ordered tiles still help --
   // they are smaller and pack better -- but they may not overlap in time.
@@ -1116,21 +1127,27 @@ struct TaskGraphNode {
   // shuffle all-to-all.
   int tile_dim = -1;
 
-  // Profile facts kept for reporting: ResMII = ceilDiv(n_ops, n_tiles).
-  // NOTE: neither move rescales them. Cutting a loop bound (tiling) or handing
-  // a replica a sub-range (replicas) leaves the loop BODY — and therefore the
-  // DFG, its op count and its recurrence — bit-identical; only the trip count
-  // changes. An earlier version of this model scaled ResMII by the tiling
-  // factor, which is unroll-by-T semantics, not loop partitioning.
+  // Facts about the task BODY, which no shape changes: the operation count and
+  // the recurrence bound. One profile yields them, and every candidate shape's
+  // lower bound then follows in closed form as
+  // max(ceil(n_ops / tiles(shape)), rec_mii) -- which is what lets the shape
+  // search rank without profiling.
+  //
+  // Neither DLP move rescales them either: cutting a loop bound or handing a
+  // replica a sub-range leaves the loop body, and therefore its op count and
+  // its recurrence, bit-identical.
   int64_t n_ops = 0;
   int64_t rec_mii = 1;
-  int64_t n_tiles = 1;
 
   // Shape-aware PREDICTED II (LB + hop term). Used only for ranking candidate
   // shapes; `ii` remains the sound floor used for latency and for pruning.
+  //
+  // Neither DLP move rescales the underlying profile. Cutting a loop bound
+  // (tiling) or handing a replica a sub-range (replicas) leaves the loop BODY
+  // -- and therefore the DFG, its op count and its recurrence -- bit-identical;
+  // only the trip count changes. An earlier version of this model scaled ResMII
+  // by the tiling factor, which is unroll-by-T semantics, not partitioning.
   double avg_hop = 0.0;
-  int64_t predicted_ii = kUnprofiled;
-  // Continuous form of the same quantity, used for ranking (see predictedCost).
   double predicted_cost = 0.0;
 
   // Dependency edges (both SSA and memory).
@@ -1189,9 +1206,12 @@ struct TaskGraphNode {
 // One legal allocation of a single task: `c` CGRAs per tile array, `k` replicas
 // and a `t`-way loop cut, costing `cost` cells for `lat` cycles.
 struct TaskConfig {
-  int c, k, t;
-  int cost;
-  int64_t lat;
+  int cgra_count;
+  int replicas;
+  int tiling;
+  // Cells this configuration occupies: cgra_count * replicas * tiling.
+  int cells;
+  int64_t latency;
 };
 
 class TaskDependencyGraph {
@@ -1206,6 +1226,23 @@ public:
   // mode (skip_mapper is also forced true).
   bool use_full_cost_model = false;
 
+  // Take the cost model's shape-aware PREDICTION rather than its sound floor.
+  // The floor is what `estimation-mode=cost-model-analytical` has always
+  // served, and against the exact CP-SAT mapper it under-predicts exactly where
+  // routing binds (`plain_gemm` 4x4: floor 1, true 2). Off by default so the
+  // two can be measured against each other on the same binary.
+  bool use_predicted_ii = false;
+
+  // Verify the shortlist with the exact CP-SAT mapper instead of the heuristic
+  // backtracker. See `solveWithCpsat` for why this is the verifier the design
+  // asks for; the members carry the interpreter, the script and the per-II time
+  // budget so no path here hard-codes a machine-specific location.
+  bool verifier_is_cpsat = false;
+  std::string cpsat_python;
+  std::string cpsat_script;
+  int cpsat_seconds = 30;
+  bool cpsat_minimize_routing = true;
+
   // Mirrors the pass options: choose shapes by predicted II (LB + hop) rather
   // than by pickBestShape's geometric rule, and the topology-term coefficient.
   bool search_shape = false;
@@ -1213,6 +1250,13 @@ public:
   // Weight the topology term by distance to the nearest memory FU instead of
   // the all-pairs mean; makes it orientation-sensitive (8x4 vs 4x8).
   bool mem_weighted_hop = false;
+  // Shortlist depth for the shape ranking; see the pass option of the same
+  // name, which also governs the fusion-pair and allocation shortlists.
+  int verify_top_k = 4;
+  // Op-count ceiling above which `profileTask` serves the analytical estimate
+  // instead of running the mapper. See the guard itself for why it stopped
+  // being a constant.
+  int mapper_op_limit = 150;
   // Communication weight and temporal reuse. comm is a proxy
   // (Sum vol/BW over inter-task edges, scaled by how far the producer and
   // consumer are spread across replicas) -- the pass has no placement, so this
@@ -1244,7 +1288,6 @@ public:
   // Score with the steady-state pipeline interval instead.
   bool use_pipeline = false;
   // Upper bound on the loop-partitioning factor the search may propose.
-  int max_tiling = 8;
 
   // Bandwidth used by the comm proxy (matches the Category-B harness).
   static constexpr int kCommBW = 8;
@@ -1298,18 +1341,23 @@ public:
   //    cut DIFFERENT dimensions (a genuine shuffle). When they cut the same
   //    dimension the partitions line up and it is max(N,M) transfers. The cut
   //    dimension is on the IR as `tile_range`, so this is checked, not assumed.
-  double edgeCost(const TaskGraphNode *p, const TaskGraphNode *c) const {
-    const bool intra = p->tile_group >= 0 && p->tile_group == c->tile_group;
-    if (intra && p->tile_parallel)
+  double edgeCost(const TaskGraphNode *producer,
+                  const TaskGraphNode *consumer) const {
+    const bool intra = producer->tile_group >= 0 &&
+                       producer->tile_group == consumer->tile_group;
+    if (intra && producer->tile_parallel)
       return 0.0; // disjoint slices; the SSA chain is bookkeeping
-    double vol = edgeVolume(p, c);
+    double volume = edgeVolume(producer, consumer);
     if (intra)
       // Ordered group: the running state is handed down the chain. One message
       // per link, which an untiled task would not have paid at all.
-      return vol / (double)kCommBW + messageCost(p, c);
-    int spread = std::max(1, p->replicas) + std::max(1, c->replicas) - 1;
-    double messages = (double)groupMessages(p, c) * (double)spread;
-    return vol / (double)kCommBW + messages * messageCost(p, c);
+      return volume / (double)kCommBW + messageCost(producer, consumer);
+    const int spread =
+        std::max(1, producer->replicas) + std::max(1, consumer->replicas) - 1;
+    const double messages =
+        (double)groupMessages(producer, consumer) * (double)spread;
+    return volume / (double)kCommBW +
+           messages * messageCost(producer, consumer);
   }
 
   // Cycles for ONE message on this edge: how far it travels, times the per-link
@@ -1329,36 +1377,46 @@ public:
   //
   // A non-negative `comm_msg_cost` (set on the command line) overrides it with
   // a flat constant, which is what makes the term sweepable.
-  double messageCost(const TaskGraphNode *p, const TaskGraphNode *c) const {
+  double messageCost(const TaskGraphNode *producer,
+                     const TaskGraphNode *consumer) const {
     if (comm_msg_cost >= 0.0)
       return comm_msg_cost;
-    return blockPairHops(p->allocatedCgras(), c->allocatedCgras()) *
+    return blockPairHops(producer->allocatedCgras(),
+                         consumer->allocatedCgras()) *
            comm_link_latency;
   }
 
   // Mean tile-to-tile distance between two compactly packed CGRA blocks.
   double blockPairHops(int a_cgras, int b_cgras) const {
-    auto [ar, ac] = blockShape(a_cgras);
-    auto [br, bc] = blockShape(b_cgras);
-    const int ah = ar * per_cgra_rows, aw = ac * per_cgra_cols;
-    const int bh = br * per_cgra_rows, bw = bc * per_cgra_cols;
-    const double by_col = meanAbsDiff(ah, bh, 0) + meanAbsDiff(aw, bw, aw);
-    const double by_row = meanAbsDiff(ah, bh, ah) + meanAbsDiff(aw, bw, 0);
-    return std::min(by_col, by_row);
+    auto [a_cgra_rows, a_cgra_cols] = blockShape(a_cgras);
+    auto [b_cgra_rows, b_cgra_cols] = blockShape(b_cgras);
+    const int a_tile_rows = a_cgra_rows * per_cgra_rows;
+    const int a_tile_cols = a_cgra_cols * per_cgra_cols;
+    const int b_tile_rows = b_cgra_rows * per_cgra_rows;
+    const int b_tile_cols = b_cgra_cols * per_cgra_cols;
+    const double abut_by_col = meanAbsDiff(a_tile_rows, b_tile_rows, 0) +
+                               meanAbsDiff(a_tile_cols, b_tile_cols, a_tile_cols);
+    const double abut_by_row =
+        meanAbsDiff(a_tile_rows, b_tile_rows, a_tile_rows) +
+        meanAbsDiff(a_tile_cols, b_tile_cols, 0);
+    return std::min(abut_by_col, abut_by_row);
   }
 
   // Elements crossing the edge: the carrier memref when its shape is static,
   // otherwise the producer's trip count as a last-resort proxy.
-  double edgeVolume(const TaskGraphNode *p, const TaskGraphNode *c) const {
-    auto it = edge_volume.find(std::make_pair(const_cast<TaskGraphNode *>(p),
-                                              const_cast<TaskGraphNode *>(c)));
-    if (it != edge_volume.end() && it->second > 0.0)
-      return it->second;
-    return (double)std::max<int64_t>(1, p->trip_count);
+  double edgeVolume(const TaskGraphNode *producer,
+                    const TaskGraphNode *consumer) const {
+    auto recorded = edge_volume.find(
+        std::make_pair(const_cast<TaskGraphNode *>(producer),
+                       const_cast<TaskGraphNode *>(consumer)));
+    if (recorded != edge_volume.end() && recorded->second > 0.0)
+      return recorded->second;
+    return (double)std::max<int64_t>(1, producer->trip_count);
   }
 
   // Number of distinct transfers between the two sides' partitions.
-  int groupMessages(const TaskGraphNode *p, const TaskGraphNode *c) const {
+  int groupMessages(const TaskGraphNode *producer,
+                       const TaskGraphNode *consumer) const {
     auto members = [&](const TaskGraphNode *n) {
       if (n->tile_group < 0)
         return std::max(1, n->tiling); // not yet materialised
@@ -1368,18 +1426,20 @@ public:
           ++k;
       return std::max(1, k);
     };
-    const int np = members(p), nc = members(c);
-    if (np == 1 || nc == 1)
-      return std::max(np, nc);
+    const int producer_parts = members(producer);
+    const int consumer_parts = members(consumer);
+    if (producer_parts == 1 || consumer_parts == 1)
+      return std::max(producer_parts, consumer_parts);
     // The cut dimension has to be known the SAME way before and after the cut,
     // or the search scores one branch and the rewritten IR scores the other --
     // which is exactly what made predicted and materialised diverge. After
     // materialisation it is on the IR (`tile_range`); before, it is whatever
     // splitFactorAcrossLevels is going to choose for this factor.
-    const int dp = partitionDim(p), dc = partitionDim(c);
-    if (dp >= 0 && dp == dc)
-      return std::max(np, nc); // aligned partitions, 1:1
-    return np * nc;            // different dimensions: a real shuffle
+    const int producer_dim = partitionDim(producer);
+    const int consumer_dim = partitionDim(consumer);
+    if (producer_dim >= 0 && producer_dim == consumer_dim)
+      return std::max(producer_parts, consumer_parts); // aligned, 1:1
+    return producer_parts * consumer_parts; // different dims: a real shuffle
   }
 
   // Dimension a node is (or will be) cut on. -1 when it is not partitioned.
@@ -1435,10 +1495,40 @@ public:
   // other work instead of always paying it. Sharing edgeCost keeps the two
   // formulations from drifting apart -- they previously disagreed about whether
   // tiling raised or lowered communication.
-  double commDelay(const TaskGraphNode *p, const TaskGraphNode *c) const {
+  double commDelay(const TaskGraphNode *producer,
+                   const TaskGraphNode *consumer) const {
     if (comm_weight <= 0.0)
       return 0.0;
-    return comm_weight * edgeCost(p, c);
+    return comm_weight * edgeCost(producer, consumer);
+  }
+
+  // Communication delay charged on an edge INSIDE the modelled schedule.
+  //
+  // Zero in pipeline mode, and that is not an oversight. The reported number is
+  // what `--analyze-task-pipeline-interval` computes, and its graph carries no
+  // communication term at all: its edges are weighted by the producer's
+  // duration and nothing else. A model that lengthens the same path by a
+  // transfer time is therefore not an estimate of the reported quantity, and
+  // the search that trusts it optimises something else. Measured on three
+  // kernels, dropping the term makes the model exact where it was not:
+  //
+  //     cnn_tiled  57121 -> 50320 predicted, 50320 measured
+  //     ffn        40236 -> 30952 predicted, 30952 measured
+  //     gemv        1825 ->  1308 predicted,  1308 measured
+  //
+  // and gemv's allocation improves from 1512 to 1308, because the inflated
+  // edges had been discouraging the partitioning that pays.
+  //
+  // Communication still reaches the pipeline objective, through `commFloor()`:
+  // a throughput bound is a `max` term, which is the shape a fabric limit
+  // actually has. Makespan mode keeps the edge delay, because there the
+  // modelled quantity is a schedule length that a transfer genuinely extends
+  // and no external measurement contradicts it.
+  double scheduleEdgeDelay(const TaskGraphNode *producer,
+                           const TaskGraphNode *consumer) const {
+    if (use_pipeline)
+      return 0.0;
+    return commDelay(producer, consumer);
   }
 
   // Throughput floor from communication, in the same ceil(demand / capacity)
@@ -1523,7 +1613,7 @@ public:
         if (n->tile_group >= 0 && n->tile_group == s->tile_group &&
             n->tile_parallel)
           continue;
-        int64_t delay = (int64_t)std::llround(commDelay(n.get(), s));
+        int64_t delay = (int64_t)std::llround(scheduleEdgeDelay(n.get(), s));
         for (const TaskGraphNode *pn : expand(n.get()))
           for (const TaskGraphNode *sn : expand(s))
             for (unsigned pi : node_items[pn])
@@ -1634,10 +1724,13 @@ public:
     int64_t edges = 0;
     for (auto &n : nodes)
       edges += n->successors.size();
+    int64_t sched_items = 0, sched_edges = 0;
+    const int64_t cycle = pipelineCycle(&sched_items, &sched_edges);
     os << "[Comm] " << tag << ": nodes=" << nodes.size() << " edges=" << edges
+       << " sched_items=" << sched_items << " sched_edges=" << sched_edges
        << " task_floor=" << task_floor << " resource_floor="
        << llvm::divideCeil(area_time, (int64_t)kTotalCGRAs)
-       << " pipeline_cycle=" << pipelineCycle()
+       << " pipeline_cycle=" << cycle
        << " comm_demand=" << llvm::format("%.1f", commCost())
        << " comm_floor=" << commFloor() << " total=" << pipelineInterval()
        << "\n";
@@ -1693,7 +1786,14 @@ public:
   // orchestrator does -- dependence-respecting, list-scheduled onto kTotalCGRAs
   // cells, with communication delay on the edges -- keeps the cell assignment,
   // and then evaluates the analyzer's formula on it.
-  int64_t pipelineCycle() const {
+  // `out_items` / `out_edges` report the schedule this actually ran on, which
+  // is what has to match between a collapsed graph and the materialised one.
+  // Durations and areas already provably match -- `task_floor` and
+  // `resource_floor` are identical across `apply` -- so any remaining
+  // difference in the cycle is in the precedence structure, and these two
+  // counts are the cheapest way to see it.
+  int64_t pipelineCycle(int64_t *out_items = nullptr,
+                        int64_t *out_edges = nullptr) const {
     struct Item {
       const TaskGraphNode *node;
       int64_t duration;
@@ -1704,10 +1804,18 @@ public:
     };
     SmallVector<Item> items;
     DenseMap<const TaskGraphNode *, SmallVector<unsigned, 4>> node_items;
+    // Nodes whose proposed cut is legal but ORDERED. Their items are chained
+    // below; leaving them unordered prices such a cut at latency/N when the
+    // tiles cannot overlap and it costs latency.
+    DenseSet<const TaskGraphNode *> ordered_cut;
     for (auto &n : nodes) {
       const int64_t lat = n->estimatedLatency();
       const int area = std::min(std::max(1, n->allocatedCgras()), kTotalCGRAs);
-      for (int t = 0; t < std::max(1, n->tiling); ++t) {
+      const int tiling = std::max(1, n->tiling);
+      if (tiling > 1 && n->tile_group < 0 && n->op &&
+          !TaskTiler::tilingIsParallel(n->op, tiling))
+        ordered_cut.insert(n.get());
+      for (int t = 0; t < tiling; ++t) {
         node_items[n.get()].push_back(items.size());
         items.push_back({n.get(), lat, area});
       }
@@ -1719,26 +1827,52 @@ public:
     // internally; every other producer/consumer pair does, and a consumer waits
     // for all of the producer's tiles (the orchestrator and the analyzer both
     // enforce that, and not doing so is what let a consumer overtake tile 0).
-    SmallVector<SmallVector<std::pair<unsigned, int64_t>, 4>> succs(
+    SmallVector<SmallVector<std::pair<unsigned, int64_t>, 4>> successors_of(
         items.size());
     SmallVector<int> remaining(items.size(), 0);
+    for (const TaskGraphNode *node : ordered_cut) {
+      const SmallVector<unsigned, 4> &tiles = node_items[node];
+      for (size_t tile = 1; tile < tiles.size(); ++tile) {
+        successors_of[tiles[tile - 1]].push_back({tiles[tile], 0});
+        ++remaining[tiles[tile]];
+      }
+    }
     for (auto &n : nodes) {
-      for (const TaskGraphNode *sc : n->successors) {
-        if (n->tile_group >= 0 && n->tile_group == sc->tile_group &&
+      for (const TaskGraphNode *successor : n->successors) {
+        if (n->tile_group >= 0 && n->tile_group == successor->tile_group &&
             n->tile_parallel)
           continue;
-        const int64_t delay = (int64_t)std::llround(commDelay(n.get(), sc));
-        auto pit = node_items.find(n.get());
-        auto sit = node_items.find(sc);
-        if (pit == node_items.end() || sit == node_items.end())
+        const int64_t delay =
+            (int64_t)std::llround(scheduleEdgeDelay(n.get(), successor));
+        auto producer_items_it = node_items.find(n.get());
+        auto successor_items_it = node_items.find(successor);
+        if (producer_items_it == node_items.end() || successor_items_it == node_items.end())
           continue;
-        for (unsigned pi : pit->second)
-          for (unsigned si : sit->second)
-            if (pi != si) {
-              succs[pi].push_back({si, delay});
-              ++remaining[si];
+        // All pairs, deliberately, even though `TaskTiler::tile` threads the
+        // tiles and rewires consumers onto the LAST one, so the emitted graph
+        // has a single entry and exit per cut. Wiring only those endpoints was
+        // tried and measured worse: over 16 programs the model's mean error
+        // against the analyzer went from 5.2% to 30.9%, exact agreement fell
+        // from 13/16 to 3/16, and the measured interval regressed on five
+        // programs (cnn_tiled +23.9%, slam_jtj_21 +21.7%, dense_gemm_20
+        // +18.6%). A consumer does wait for the whole cut, and charging it
+        // against every tile is what reproduces that.
+        for (unsigned producer_item : producer_items_it->second)
+          for (unsigned successor_item : successor_items_it->second)
+            if (producer_item != successor_item) {
+              successors_of[producer_item].push_back({successor_item, delay});
+              ++remaining[successor_item];
             }
       }
+    }
+
+    if (out_items)
+      *out_items = (int64_t)items.size();
+    if (out_edges) {
+      int64_t edge_count = 0;
+      for (auto &succs : successors_of)
+        edge_count += (int64_t)succs.size();
+      *out_edges = edge_count;
     }
 
     // Longest remaining path first, the standard list-schedule priority.
@@ -1751,18 +1885,18 @@ public:
         if (indeg[i] == 0)
           ready.push_back(i);
       while (!ready.empty()) {
-        unsigned u = ready.pop_back_val();
-        order.push_back(u);
-        for (auto &[v, d] : succs[u])
-          if (--indeg[v] == 0)
-            ready.push_back(v);
+        unsigned ready_item = ready.pop_back_val();
+        order.push_back(ready_item);
+        for (auto &[succ_item, delay] : successors_of[ready_item])
+          if (--indeg[succ_item] == 0)
+            ready.push_back(succ_item);
       }
       for (int i = (int)order.size() - 1; i >= 0; --i) {
-        unsigned u = order[i];
+        unsigned ready_item = order[i];
         int64_t best = 0;
-        for (auto &[v, d] : succs[u])
-          best = std::max(best, d + prio[v]);
-        prio[u] = items[u].duration + best;
+        for (auto &[succ_item, delay] : successors_of[ready_item])
+          best = std::max(best, delay + prio[succ_item]);
+        prio[ready_item] = items[ready_item].duration + best;
       }
     }
 
@@ -1771,6 +1905,19 @@ public:
     SmallVector<unsigned> free_cells;
     for (unsigned c = 0; c < (unsigned)kTotalCGRAs; ++c)
       free_cells.push_back(c);
+    // Cells are handed out most-recently-freed first, so an item tends to land
+    // where its predecessor just finished.
+    //
+    // The downstream placer's scorer looks like it wants the opposite: it
+    // charges kGamma = 1000 for reusing an occupied CGRA against kAlpha = 10
+    // per hop of SSA distance, so it takes a never-used cell while one exists.
+    // Preferring fresh cells here was tried and is worse, because what this
+    // function must predict is not where the placer puts the first 16 tasks but
+    // what the analyzer then measures, and the interval is set by the cells
+    // that do end up stacked. Measured on bicg: reuse-first predicts 9730
+    // against a measured 9730, fresh-first predicts 9458 against a measured
+    // 45045 -- and the search, trusting the optimistic number, allocated 46
+    // tasks where 20 was better.
     SmallVector<unsigned> running;
     unsigned completed = 0;
     int64_t now = 0;
@@ -1792,7 +1939,7 @@ public:
             !(running.empty() && (int)free_cells.size() == kTotalCGRAs))
           continue;
         const int take = std::min(need, (int)free_cells.size());
-        for (int w = 0; w < take; ++w) {
+        for (int cell_slot = 0; cell_slot < take; ++cell_slot) {
           items[i].cells.push_back(free_cells.back());
           free_cells.pop_back();
         }
@@ -1815,21 +1962,21 @@ public:
       for (unsigned i : running)
         next_finish = std::min(next_finish, items[i].finish);
       now = next_finish;
-      SmallVector<unsigned> still;
+      SmallVector<unsigned> still_running;
       for (unsigned i : running) {
         if (items[i].finish > now) {
-          still.push_back(i);
+          still_running.push_back(i);
           continue;
         }
         ++completed;
         for (unsigned c : items[i].cells)
           free_cells.push_back(c);
-        for (auto &[v, d] : succs[i]) {
-          ready_at[v] = std::max(ready_at[v], items[i].finish + d);
-          --remaining[v];
+        for (auto &[succ_item, delay] : successors_of[i]) {
+          ready_at[succ_item] = std::max(ready_at[succ_item], items[i].finish + delay);
+          --remaining[succ_item];
         }
       }
-      running = still;
+      running = still_running;
     }
 
     // The analyzer's formula, on the cells this schedule produced.
@@ -1856,9 +2003,16 @@ public:
       const Item &first = items[on_cell.front()];
       const Item &last = items[on_cell.back()];
       if (first.node != last.node) {
+        // `longestPathBetween` counts BOTH endpoints, so it is already the
+        // analyzer's quantity: the analyzer's edges carry the source's
+        // duration, which excludes the target, and it then adds the target's
+        // duration once as the cycle's closing latency. Adding `last.duration`
+        // here charged it twice. On the vendored `chain_reuse_cgra0` case that
+        // reported 15 against the analyzer's 10, and the error scales with the
+        // last task on the cell, so it biased the search rather than shifting
+        // every configuration equally.
         const int64_t detour = longestPathBetween(first.node, last.node);
-        if (detour > 0)
-          cycle = std::max(cycle, detour + last.duration);
+        cycle = std::max(cycle, detour);
       }
       worst = std::max(worst, cycle);
     }
@@ -1882,38 +2036,40 @@ public:
         succ;
     DenseSet<std::pair<const void *, const void *>> seen;
     for (auto &n : nodes) {
-      const void *k = key(n.get());
-      int64_t &w = weight[k];
-      w = std::max(w, n->estimatedLatency());
-      for (const TaskGraphNode *s : n->successors) {
-        const void *ks = key(s);
-        if (ks == k)
+      const void *node_key = key(n.get());
+      int64_t &node_weight = weight[node_key];
+      node_weight = std::max(node_weight, n->estimatedLatency());
+      for (const TaskGraphNode *succ_key_of : n->successors) {
+        const void *succ_key = key(succ_key_of);
+        if (succ_key == node_key)
           continue;
-        if (seen.insert({k, ks}).second)
-          succ[k].push_back({ks, (int64_t)std::llround(commDelay(n.get(), s))});
+        if (seen.insert({node_key, succ_key}).second)
+          succ[node_key].push_back(
+              {succ_key,
+               (int64_t)std::llround(scheduleEdgeDelay(n.get(), succ_key_of))});
       }
     }
     // Longest path to `target`; -1 marks "cannot reach", so an unreachable
     // branch never contributes.
     DenseMap<const void *, int64_t> memo;
-    std::function<int64_t(const void *)> best = [&](const void *k) -> int64_t {
-      if (k == target)
+    std::function<int64_t(const void *)> best = [&](const void *node_key) -> int64_t {
+      if (node_key == target)
         return 0;
-      auto it = memo.find(k);
+      auto it = memo.find(node_key);
       if (it != memo.end())
         return it->second;
-      memo[k] = -1; // cycle guard
-      int64_t out = -1;
-      auto sit = succ.find(k);
-      if (sit != succ.end())
-        for (auto &[s, delay] : sit->second) {
-          int64_t sub = best(s);
-          if (sub < 0)
+      memo[node_key] = -1; // cycle guard
+      int64_t longest_tail = -1;
+      auto succ_it = succ.find(node_key);
+      if (succ_it != succ.end())
+        for (auto &[succ_key_of, delay] : succ_it->second) {
+          int64_t tail_len = best(succ_key_of);
+          if (tail_len < 0)
             continue;
-          out = std::max(out, weight.lookup(s) + delay + sub);
+          longest_tail = std::max(longest_tail, weight.lookup(succ_key_of) + delay + tail_len);
         }
-      memo[k] = out;
-      return out;
+      memo[node_key] = longest_tail;
+      return longest_tail;
     };
     const void *src = key(from);
     if (src == target)
@@ -2024,10 +2180,6 @@ public:
       // Tiles materialised by a previous outer iteration.
       if (auto attr = task->getAttrOfType<IntegerAttr>("tile_group"))
         node->tile_group = (int)attr.getInt();
-      if (auto attr = task->getAttrOfType<IntegerAttr>("tile_index"))
-        node->tile_index = (int)attr.getInt();
-      if (auto attr = task->getAttrOfType<IntegerAttr>("tile_count"))
-        node->tile_count = std::max(1, (int)attr.getInt());
       if (auto attr = task->getAttrOfType<BoolAttr>("tile_parallel"))
         node->tile_parallel = attr.getValue();
       if (auto attr = task->getAttrOfType<DenseI64ArrayAttr>("tile_range"))
@@ -2138,7 +2290,15 @@ public:
     int64_t steps;
     double avg_hop;
     double predicted_cost;
+    // Shape-independent, but cached with the rest: a hit on a node that has
+    // not been profiled before would otherwise leave them at zero, and the
+    // shape ranking reads them.
+    int64_t n_ops;
+    int64_t rec_mii;
   };
+  // (task identity, shape, mapper-or-not) -> profile.
+  using ProfileCache =
+      std::map<std::tuple<std::string, std::string, int>, ProfileResult>;
   // (task, rows, cols, non-rectangular fingerprint) -> profile.
   //
   // Profiling clones the task into a temporary module and re-runs the Neura
@@ -2146,27 +2306,73 @@ public:
   // The balancer re-profiles every task tied at the bottleneck on every
   // candidate move, which without this cache means thousands of lowerings and a
   // search that does not finish: axpy_20 ran over 10 minutes and was still
-  // going. The key is exactly what the result depends on, so the cache cannot
-  // return a stale value.
-  mutable llvm::DenseMap<std::tuple<Operation *, int, int, int>, ProfileResult>
-      profile_cache;
+  // going.
+  //
+  // Identity is the TILE GROUP when the task belongs to one, not the operation.
+  // Tiles cut from a single loop share a body and a tile array and differ only
+  // in their loop bounds, and the mapped DFG does not depend on the bounds: on
+  // the 28-task transformer every member of every group comes out with an
+  // identical (ii, steps, cgra_count). Keying on the operation made a t-way cut
+  // cost t mappings for one distinct kernel, which is most of what made
+  // partitioning look expensive to compile.
+  //
+  // `skip_mapper` is part of the key because the two modes answer different
+  // questions. Without it an analytical result cached during the search is
+  // handed to the final mapper verification, which then verifies nothing.
+  // The shape enters the key as its IR string, not as a bounding box plus a
+  // cell count. Two non-rectangular shapes can share both -- nothing in the
+  // shape tables forbids a second four-cell shape in a 2x3 box -- and they
+  // would then share a cache entry and one would silently be given the other's
+  // II. `irAttr()` distinguishes them because it lists the occupied positions,
+  // which is exactly what the mapper's tile array is built from.
+  // std::map, not DenseMap: LLVM ships no DenseMapInfo for std::string. The
+  // container is only ever looked up, never iterated, so its ordering does not
+  // reach any decision.
+  // Shared across every graph the pass builds, and keyed on the task NAME.
+  //
+  // `global-fusion` scores O(V^2) candidate pairs, and each score clones the
+  // function, rebuilds a graph and balances it. With the cache owned per graph
+  // and keyed on the task's `Operation *`, every one of those clones started
+  // cold and re-profiled every task: on bicg, 19 tasks meant 171 pairs and 136
+  // seconds where the same run without fusion ranking took 15.6. A clone's ops
+  // live at different addresses, so a shared cache alone would still have
+  // missed; the name is what survives cloning.
+  //
+  // Names identify a body within one run: fusion emits `A_B_utilfused` and
+  // tiling emits `base_tileN`, so a name is never reused for different
+  // contents, and a tiled node is keyed by its group anyway.
+  std::shared_ptr<ProfileCache> profile_cache =
+      std::make_shared<ProfileCache>();
 
   void profileTask(TaskGraphNode *node, TaskflowTaskOp task,
                    bool skip_mapper = false) {
-    const auto key =
-        std::make_tuple(task.getOperation(), node->shape.rows, node->shape.cols,
-                        (int)node->shape.cgra_positions.size());
-    auto cached = profile_cache.find(key);
-    if (cached != profile_cache.end()) {
+    // The function name is part of the identity because the pass object, and
+    // therefore this cache, outlives one function: two functions in a module
+    // both have a `Task_0`, and they are not the same body.
+    std::string scope;
+    if (auto parent = task->getParentOfType<func::FuncOp>())
+      scope = parent.getName().str();
+    const std::string identity =
+        scope + "/" +
+        (node->tile_group >= 0
+             ? ("tile_group:" + std::to_string(node->tile_group))
+             : ("task:" + task.getTaskName().str()));
+    const auto key = std::make_tuple(identity, node->shape.irAttr(),
+                                     skip_mapper ? 1 : 0);
+    auto cached = profile_cache->find(key);
+    if (cached != profile_cache->end()) {
       node->ii = cached->second.ii;
       node->steps = cached->second.steps;
       node->avg_hop = cached->second.avg_hop;
       node->predicted_cost = cached->second.predicted_cost;
+      node->n_ops = cached->second.n_ops;
+      node->rec_mii = cached->second.rec_mii;
       return;
     }
     profileTaskUncached(node, task, skip_mapper);
-    profile_cache[key] = {node->ii, node->steps, node->avg_hop,
-                          node->predicted_cost};
+    (*profile_cache)[key] = {node->ii,           node->steps,
+                             node->avg_hop,       node->predicted_cost,
+                             node->n_ops,         node->rec_mii};
   }
 
   void profileTaskUncached(TaskGraphNode *node, TaskflowTaskOp task,
@@ -2227,15 +2433,14 @@ public:
     int compiled_ii = 0;
     int cp_depth = 1;
 
-    // Resource facts captured alongside II so the tiling factor can rescale
-    // ResMII analytically (no extra mapper runs).
-    int64_t prof_n_ops = 0, prof_rec_mii = 1, prof_n_tiles = 1;
     double prof_avg_hop = 0.0;
+    // Shape-independent facts about the body; see `TaskGraphNode::n_ops`.
+    int64_t prof_n_ops = 0, prof_rec_mii = 1;
 
     if (succeeded(runNeuraPipelineOnKernel(
             ctx, cloned_kernel, phase2_module, compiled_ii, cp_depth, x_tiles,
-            y_tiles, valid_tiles, skip_mapper, &prof_n_ops, &prof_rec_mii,
-            &prof_n_tiles, &prof_avg_hop))) {
+            y_tiles, valid_tiles, skip_mapper, &prof_avg_hop, &prof_n_ops,
+            &prof_rec_mii))) {
       llvm::errs() << "[profileTask] kernel in " << task.getTaskName()
                    << ": compiled_ii=" << compiled_ii
                    << ", cp_depth=" << cp_depth << "\n";
@@ -2251,14 +2456,11 @@ public:
            "[profileTask] FATAL: compiled_ii is 0 after downstream pipeline.");
     node->ii = compiled_ii;
     node->steps = std::max(cp_depth, 1);
+    node->avg_hop = prof_avg_hop;
     if (prof_n_ops > 0) {
       node->n_ops = prof_n_ops;
       node->rec_mii = prof_rec_mii;
-      node->n_tiles = prof_n_tiles;
     }
-    node->avg_hop = prof_avg_hop;
-    node->predicted_ii =
-        predictedII(node->ii, node->avg_hop, node->steps, hop_coef);
     node->predicted_cost =
         predictedCost(node->ii, node->avg_hop, node->steps, hop_coef);
 
@@ -2285,41 +2487,74 @@ public:
   //   <- our model true      = MapToAcceleratorPass II  (the oracle we are
   //   trying to rank to)
   void probeShapeCoverage(TaskGraphNode *node, TaskflowTaskOp task) {
-    const int save_c = node->cgra_count;
-    const CgraShape save_shape = node->shape;
-    const int64_t save_ii = node->ii, save_steps = node->steps;
-    for (int c = 1; c <= kMaxCgrasPerTask; ++c) {
-      if (!canFitOnGrid(c))
+    const int saved_cgra_count = node->cgra_count;
+    const CgraShape saved_shape = node->shape;
+    const int64_t saved_ii = node->ii, saved_steps = node->steps;
+    for (int cgra_count = 1; cgra_count <= kMaxCgrasPerTask; ++cgra_count) {
+      if (!canFitOnGrid(cgra_count))
         continue;
-      SmallVector<CgraShape> cands = getRectangularShapes(c);
-      for (const auto &s : getNonRectangularShapes(c))
-        cands.push_back(s);
-      if (cands.size() < 2)
+      SmallVector<CgraShape> candidates = getRectangularShapes(cgra_count);
+      for (const auto &shape : getNonRectangularShapes(cgra_count))
+        candidates.push_back(shape);
+      if (candidates.size() < 2)
         continue; // Nothing to rank.
-      node->cgra_count = c;
-      for (const CgraShape &cand : cands) {
-        node->shape = cand;
+      node->cgra_count = cgra_count;
+      for (const CgraShape &candidate : candidates) {
+        node->shape = candidate;
         // Cheap pass: analytical only.
         profileTask(node, task, /*skip_mapper=*/true);
-        const int64_t lb = node->ii;
-        const double hop = node->avg_hop;
-        const double pred = node->predicted_cost;
+        const int64_t analytical_lb = node->ii;
+        const double avg_hop = node->avg_hop;
+        const double predicted = node->predicted_cost;
         const int64_t depth = node->steps;
         // Oracle pass: the real mapper on the same shape.
         profileTask(node, task, /*skip_mapper=*/false);
         llvm::errs() << "[ShapeProbe] task=" << task.getTaskName()
-                     << " cgra_count=" << c << " shape=" << cand.describe(c)
-                     << " lb=" << lb << " hop=" << llvm::format("%.4f", hop)
+                     << " cgra_count=" << cgra_count
+                     << " shape=" << candidate.describe(cgra_count)
+                     << " lb=" << analytical_lb
+                     << " hop=" << llvm::format("%.4f", avg_hop)
                      << " depth=" << depth
-                     << " pred=" << llvm::format("%.4f", pred)
+                     << " pred=" << llvm::format("%.4f", predicted)
                      << " true_ii=" << node->ii << " true_steps=" << node->steps
                      << "\n";
       }
     }
-    node->cgra_count = save_c;
-    node->shape = save_shape;
-    node->ii = save_ii;
-    node->steps = save_steps;
+    node->cgra_count = saved_cgra_count;
+    node->shape = saved_shape;
+    node->ii = saved_ii;
+    node->steps = saved_steps;
+  }
+
+  // Mean hop over the tile array a shape defines, memoised.
+  //
+  // This is the same quantity `profileTask` reports as `avg_hop`, computed
+  // without compiling anything: the architecture is cloned to the shape's tile
+  // dimensions and walked. It depends on the shape and on nothing else, so one
+  // entry per shape serves every task.
+  //
+  // On a fabric whose tiles are uniform it cannot separate two shapes of equal
+  // area: the mean distance over an R x C mesh is symmetric in R and C, so 4x8
+  // and 8x4 score alike. `mem-weighted-hop` exists to break that tie by
+  // weighting toward memory-capable tiles, and on `architecture_4x4.yaml` it
+  // cannot, because `tile_defaults` gives every tile `mem` and `mem_indexed`
+  // and no override takes it away. Measured: both settings yield the same two
+  // distinct values across every shape this benchmark set reaches.
+  mutable std::map<std::pair<int, int>, double> hop_by_shape;
+
+  double hopForShape(const CgraShape &shape) const {
+    const auto key = std::make_pair(shape.rows * per_cgra_rows,
+                                    shape.cols * per_cgra_cols);
+    auto cached = hop_by_shape.find(key);
+    if (cached != hop_by_shape.end())
+      return cached->second;
+    std::unique_ptr<neura::Architecture> array =
+        neura::getArchitecture().cloneWithNewDimensions(key.first, key.second);
+    const double hops =
+        array ? averageHop(*array, mem_weighted_hop)
+              : averageHop(neura::getArchitecture(), mem_weighted_hop);
+    hop_by_shape[key] = hops;
+    return hops;
   }
 
   void profileWithBestShape(TaskGraphNode *node, TaskflowTaskOp task,
@@ -2330,40 +2565,96 @@ public:
       return;
     }
     SmallVector<CgraShape> candidates = getRectangularShapes(node->cgra_count);
-    for (const auto &s : getNonRectangularShapes(node->cgra_count))
-      candidates.push_back(s);
-    if (candidates.empty()) {
-      node->shape = pickBestShape(node->cgra_count);
+    for (const auto &shape : getNonRectangularShapes(node->cgra_count))
+      candidates.push_back(shape);
+    if (candidates.size() <= 1) {
+      node->shape = candidates.empty() ? pickBestShape(node->cgra_count)
+                                       : candidates.front();
       profileTask(node, task, skip_mapper);
       return;
     }
-    CgraShape best_shape = candidates.front();
-    // Ranks on the CONTINUOUS predicted cost. Ranking on the rounded integer
-    // makes every shape tie at LB for the calibrated coef, which silently
-    // turned this search into "take the first candidate".
+
+    // Rank cheaply, verify the top few. Profiling every candidate to find out
+    // which is best is the pattern this work replaces on every other axis, and
+    // it was the most expensive one left: on bicg it ran 1512 profiles.
+    //
+    // One profile gives the facts no shape changes -- the operation count and
+    // the recurrence bound -- and every candidate's lower bound then follows in
+    // closed form, ceil(n_ops / tiles(shape)) against rec_mii. The topology
+    // term comes from the shape's own tile array, which is a graph walk rather
+    // than a compilation.
+    node->shape = pickBestShape(node->cgra_count);
+    profileTask(node, task, skip_mapper);
+    const int64_t body_ops = node->n_ops;
+    const int64_t body_recurrence = node->rec_mii;
+    const int64_t body_depth = node->steps;
+
+    SmallVector<std::pair<double, unsigned>> ranked;
+    for (auto [index, candidate] : llvm::enumerate(candidates)) {
+      const int64_t tiles = (int64_t)candidate.rows * per_cgra_rows *
+                            (int64_t)candidate.cols * per_cgra_cols;
+      const int64_t lower_bound =
+          body_ops > 0
+              ? std::max<int64_t>(
+                    llvm::divideCeil(body_ops, std::max<int64_t>(1, tiles)),
+                    body_recurrence)
+              : node->ii;
+      ranked.push_back({predictedCost(lower_bound, hopForShape(candidate),
+                                      body_depth, hop_coef),
+                        (unsigned)index});
+    }
+    llvm::sort(ranked);
+
+    // Verification is a real profile, and it obeys the caller's `skip_mapper`.
+    // With the mapper skipped it cannot separate two shapes of the same tile
+    // count on a uniform fabric -- their lower bound is equal and the mean hop
+    // over an R x C mesh is symmetric in R and C -- so the ranking's own order
+    // decides. That is a property of this architecture, whose every tile is
+    // memory-capable, not of the search.
+    const unsigned to_verify =
+        verify_top_k <= 0 ? (unsigned)ranked.size()
+                          : std::min<unsigned>(verify_top_k, ranked.size());
+
+    CgraShape best_shape = candidates[ranked.front().second];
     double best_pred = std::numeric_limits<double>::infinity();
-    int64_t best_ii = 0, best_steps = 0;
+    int64_t best_ii = INT64_MAX, best_steps = INT64_MAX;
     double best_hop = 0.0;
-    for (const CgraShape &cand : candidates) {
-      node->shape = cand;
+    for (unsigned position = 0; position < to_verify; ++position) {
+      const CgraShape &candidate = candidates[ranked[position].second];
+      node->shape = candidate;
       profileTask(node, task, skip_mapper);
-      if (node->predicted_cost < best_pred - 1e-9) {
+      // Selection is on what the profile MEASURED, not on the score that
+      // ordered the shortlist. Picking by `predicted_cost` here threw the
+      // verification away: the whole point of mapping k shapes is to learn
+      // their real II, and the winner was then chosen by the same closed form
+      // that had already ranked them -- so the mapper's answer changed nothing
+      // and the shortlist could not be wrong in a way the search would notice.
+      // Ties on II break on depth, then on the ranking score.
+      const bool better =
+          node->ii < best_ii ||
+          (node->ii == best_ii &&
+           (node->steps < best_steps ||
+            (node->steps == best_steps &&
+             node->predicted_cost < best_pred - 1e-9)));
+      if (better) {
         best_pred = node->predicted_cost;
-        best_shape = cand;
+        best_shape = candidate;
         best_ii = node->ii;
         best_steps = node->steps;
         best_hop = node->avg_hop;
       }
     }
     if (candidates.size() > 1) {
-      CgraShape geo = pickBestShape(node->cgra_count);
-      bool differs = geo.rows != best_shape.rows || geo.cols != best_shape.cols;
+      CgraShape geometric = pickBestShape(node->cgra_count);
+      bool differs = geometric.rows != best_shape.rows ||
+                     geometric.cols != best_shape.cols;
       llvm::errs() << "  [ShapeSearch] " << task.getTaskName()
                    << " cgra_count=" << node->cgra_count << " -> "
                    << best_shape.describe(node->cgra_count)
                    << " (predicted=" << llvm::format("%.4f", best_pred)
                    << ", avg_hop=" << llvm::format("%.3f", best_hop)
-                   << ", geometric pick was " << geo.describe(node->cgra_count)
+                   << ", geometric pick was "
+                   << geometric.describe(node->cgra_count)
                    << (differs ? " [DIFFERS]" : " [same]") << ")\n";
     }
     // Re-profiles at the winner so the node carries its numbers.
@@ -2415,8 +2706,8 @@ private:
       MLIRContext *ctx, neura::KernelOp kernel, ModuleOp dst_module,
       int &compiled_ii, int &cp_depth, int x_tiles = 0, int y_tiles = 0,
       const std::string &valid_tiles = "", bool skip_mapper = false,
-      int64_t *out_n_ops = nullptr, int64_t *out_rec_mii = nullptr,
-      int64_t *out_n_tiles = nullptr, double *out_avg_hop = nullptr) {
+      double *out_avg_hop = nullptr, int64_t *out_n_ops = nullptr,
+      int64_t *out_rec_mii = nullptr) {
     Location loc = kernel.getLoc();
     OpBuilder builder(ctx);
     builder.setInsertionPointToStart(dst_module.getBody());
@@ -2514,7 +2805,17 @@ private:
               neura::computeAnalyticalII(region, architecture);
           llvm::errs() << "[cost-model-analytical] task profiling:\n";
           bd.print(llvm::errs());
-          compiled_ii = std::max(compiled_ii, bd.final_ii);
+          // `final_ii` is a sound floor and nothing more. Measured against the
+          // exact CP-SAT mapper it under-predicts wherever routing, not
+          // throughput, is what binds: `plain_gemm` on 4x4 schedules at II=1,
+          // fails to ROUTE there, and the true optimum is 2. Reporting the
+          // floor as if it were the II is what made an interval computed from
+          // it look 3x better than the same program measured any other way.
+          // `predicted_ii` adds the distance-charged routing term on top of the
+          // same floor; it is opt-in so the floor stays available unchanged to
+          // every caller that needs soundness rather than accuracy.
+          compiled_ii = std::max(
+              compiled_ii, use_predicted_ii ? bd.predicted_ii : bd.final_ii);
         } else {
           compiled_ii = std::max({compiled_ii, res_mii, rec_mii});
         }
@@ -2533,29 +2834,23 @@ private:
                      << " rec_mii=" << rec_mii
                      << " tiles=" << architecture.getNumTiles() << "\n";
 
-        // Exports the resource facts so the tiling factor can rescale ResMII:
-        // the legacy ResMII is ceilDiv(n_ops, n_tiles), so a tiling factor T
-        // (T independent iterations packed into one body) gives
-        // ceilDiv(T * n_ops, n_tiles) without re-running anything.
-        if (out_n_tiles)
-          *out_n_tiles = std::max(1, architecture.getNumTiles());
         if (out_avg_hop)
           *out_avg_hop = averageHop(architecture, mem_weighted_hop);
         if (out_rec_mii)
           *out_rec_mii = rec_mii;
         if (out_n_ops) {
-          // Counts materialized ops with exactly the filter neura::
-          // calculateResMii uses, so that ceilDiv(n_ops, n_tiles) == res_mii.
-          int64_t n_ops = 0;
+          // Counted with exactly the filter neura::calculateResMii uses, so
+          // that ceilDiv(n_ops, tiles) reproduces its ResMII.
+          int64_t counted = 0;
           region.walk([&](Operation *op) {
             if (isa<func::FuncOp>(op) ||
                 isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op))
               return;
             if (isa<neura::FusedOp>(op->getParentOp()))
               return;
-            ++n_ops;
+            ++counted;
           });
-          *out_n_ops = n_ops;
+          *out_n_ops = counted;
         }
       });
     }
@@ -2579,7 +2874,13 @@ private:
       return success();
     }
 
-    constexpr int kMapperOpLimit = 150;
+    // Configurable, because at 150 this guard decides the experiment rather
+    // than protecting it. Measured on bicg: the guard fires 85 times, on tasks
+    // of 1050 and 2099 ops, so every request for a real lowering is silently
+    // served from the analytical estimate. On this benchmark set that leaves
+    // "rank cheaply, lower the top k" with nothing to lower, and no shortlist
+    // depth can be shown to matter while it holds. Default unchanged.
+    const int kMapperOpLimit = mapper_op_limit;
     bool all_data_movs_ok = true;
     int total_mapped_ops = 0;
     dst_module.walk([&](func::FuncOp fn) {
@@ -2606,6 +2907,33 @@ private:
     llvm::errs() << "[profileTask] mapper guard: total_ops=" << total_mapped_ops
                  << " all_data_movs=" << all_data_movs_ok
                  << " limit=" << kMapperOpLimit << "\n";
+
+    // The exact mapper is the verifier this design calls for. The heuristic
+    // backtracker it replaces is not a measurement: it OVER-predicts (it puts
+    // `plain_gemm` on 4x4 at II=3 where the true optimum is 2), and on a task
+    // of ~400 ops a single `map()` call does not return -- which is what made
+    // "lower the top k and keep the best" unusable on anything but small
+    // kernels. CP-SAT proves each II infeasible or produces a routed witness,
+    // and it takes a time budget, so a hard case degrades into a stated bound
+    // instead of a hang.
+    if (verifier_is_cpsat && all_data_movs_ok) {
+      int solved_ii = 0;
+      bool proven = false;
+      if (solveWithCpsat(dst_module, ctx, x_tiles, y_tiles, valid_tiles,
+                         solved_ii, proven)) {
+        compiled_ii = solved_ii;
+        llvm::errs() << "[profileTask] cpsat returned II=" << solved_ii
+                     << (proven ? " (proven optimal)" : " (upper bound)")
+                     << "\n";
+        return success();
+      }
+      // No verdict inside the budget. Keeping the analytical estimate is the
+      // same fallback the mapper path uses, but it is announced: a silent
+      // fallback is how a run reports "verified" for a task nothing verified.
+      llvm::errs() << "[profileTask] WARNING: cpsat produced no verdict; "
+                   << "keeping analytical compiled_ii=" << compiled_ii << "\n";
+      return success();
+    }
 
     if (all_data_movs_ok && total_mapped_ops <= kMapperOpLimit) {
       // Runs MapToAcceleratorPass in a fresh pass manager on the
@@ -2653,6 +2981,126 @@ private:
 
     // Fallback already computed via ResMII/RecMII above; nothing more to do.
     return success();
+  }
+
+  // Runs the exact CP-SAT modulo mapper on one lowered kernel and returns the
+  // II it certifies.
+  //
+  // The solver is a separate process (`test/cost-model/exact_mapper_cpsat.py`,
+  // OR-Tools) because that is where it already lives and where PR #340's
+  // `*.exact-mapping.json` witnesses come from; keeping one implementation
+  // means the II verified here and the mapping `--import-mapping` replays are
+  // produced by the same code. The exchange format is the DFG the existing
+  // `--dump-dfg-json` emits, so nothing about the DFG or the architecture is
+  // re-derived on this path.
+  //
+  // `--fallback` is the project's ii+1-on-timeout convention: an II the solver
+  // cannot settle within its budget is skipped rather than aborting the task.
+  // The result is then a routable II found within budget -- an upper bound --
+  // and `out_proven` says so, because a table that cannot tell a proven optimum
+  // from a budget-limited one will eventually report the second as the first.
+  bool solveWithCpsat(ModuleOp dst_module, MLIRContext *ctx, int x_tiles,
+                      int y_tiles, StringRef valid_tiles, int &out_ii,
+                      bool &out_proven) {
+    llvm::SmallString<128> dfg_path;
+    if (llvm::sys::fs::createTemporaryFile("neura-dfg", "json", dfg_path)) {
+      llvm::errs() << "[cpsat] cannot create a temporary file for the DFG\n";
+      return false;
+    }
+    auto remove_dfg = llvm::make_scope_exit(
+        [&] { llvm::sys::fs::remove(dfg_path.str()); });
+
+    {
+      PassManager dump_pm(ctx);
+      dump_pm.enableVerifier(false);
+      neura::DumpDfgJsonOptions dump_options;
+      dump_options.x_tiles = x_tiles;
+      dump_options.y_tiles = y_tiles;
+      dump_options.valid_tiles = valid_tiles.str();
+      dump_options.output_file = dfg_path.str().str();
+      dump_pm.addPass(neura::createDumpDfgJsonPass(dump_options));
+      if (failed(dump_pm.run(dst_module))) {
+        llvm::errs() << "[cpsat] dump-dfg-json failed\n";
+        return false;
+      }
+    }
+
+    llvm::SmallString<128> out_path;
+    if (llvm::sys::fs::createTemporaryFile("neura-cpsat", "txt", out_path)) {
+      llvm::errs() << "[cpsat] cannot create a temporary file for the output\n";
+      return false;
+    }
+    auto remove_out = llvm::make_scope_exit(
+        [&] { llvm::sys::fs::remove(out_path.str()); });
+
+    std::string seconds = std::to_string(std::max(1, cpsat_seconds));
+    SmallVector<StringRef> argv = {cpsat_python, cpsat_script, dfg_path.str(),
+                                   "--seconds",  seconds,      "--fallback",
+                                   "-v"};
+    argv.push_back(cpsat_minimize_routing ? "--minimize-routing"
+                                          : "--no-minimize-routing");
+    // The solver prints its verdict on stdout and its per-II trace on stderr,
+    // and the trace is what distinguishes a proven optimum from a skipped II,
+    // so both are captured into the same file.
+    std::optional<StringRef> redirects[] = {std::nullopt, StringRef(out_path),
+                                            StringRef(out_path)};
+    std::string error_message;
+    // Wall-clock ceiling: the per-II budget times the II range it may walk,
+    // plus interpreter start-up. Without it a solver that ignores its own
+    // budget would reintroduce exactly the hang this path exists to remove.
+    const unsigned wall_seconds =
+        (unsigned)(std::max(1, cpsat_seconds) * 2 * 24 + 60);
+    int rc = llvm::sys::ExecuteAndWait(cpsat_python, argv, /*Env=*/std::nullopt,
+                                       redirects, wall_seconds,
+                                       /*MemoryLimit=*/0, &error_message);
+    if (rc != 0) {
+      llvm::errs() << "[cpsat] solver exited " << rc
+                   << (error_message.empty() ? "" : ": ") << error_message
+                   << "\n";
+      return false;
+    }
+
+    auto buffer = llvm::MemoryBuffer::getFile(out_path.str());
+    if (!buffer) {
+      llvm::errs() << "[cpsat] cannot read the solver output\n";
+      return false;
+    }
+    StringRef text = (*buffer)->getBuffer();
+
+    // `TRUE_MIN_II = N` or `MAPPED_II = N`. The tag does not settle optimality:
+    // `--fallback` prints MAPPED_II unconditionally. Two things in the trace
+    // do. A skipped II ("schedule timeout") decided nothing about that II. A
+    // "routing=FAIL" rejected only the one placement the solver's first stage
+    // returned -- it is a two-stage mapper, place-then-route, so a routing
+    // failure is a statement about that witness and not about the II. Both must
+    // be absent for the answer to be the proven minimum; otherwise it is a
+    // routable II found within budget, i.e. an upper bound.
+    for (StringRef tag : {StringRef("TRUE_MIN_II = "),
+                          StringRef("MAPPED_II = ")}) {
+      size_t at = text.find(tag);
+      if (at == StringRef::npos)
+        continue;
+      StringRef rest = text.substr(at + tag.size());
+      int value = 0;
+      if (rest.take_while(llvm::isDigit).getAsInteger(10, value) || value <= 0)
+        continue;
+      out_ii = value;
+      out_proven = !text.contains("schedule timeout") &&
+                   !text.contains("routing=FAIL");
+      return true;
+    }
+    // `... > N` is the solver's other outcome: no II up to the architecture's
+    // `ctrl_mem_items` ceiling admits a mapping, i.e. this body does not fit
+    // this shape at all. It is a real answer and must not be reported as "the
+    // solver said nothing" -- that reads as a tooling failure when it is a
+    // statement about the candidate. The caller keeps the analytical estimate,
+    // which is already clamped to the same ceiling.
+    if (text.contains("TRUE_MIN_II > ") || text.contains("MAPPED_II > ")) {
+      llvm::errs() << "[cpsat] not mappable at this shape within the II "
+                   << "ceiling; the body needs more tiles or more fission\n";
+      return false;
+    }
+    return false;
   }
 
   // Extracts ResMII/RecMII from partially-lowered IR when the full pipeline
@@ -2862,6 +3310,16 @@ private:
 class PipelineBalancer {
 public:
   using ProfileFn = std::function<void(TaskGraphNode *, TaskflowTaskOp)>;
+  // Measures the CURRENT configuration through the real downstream pipeline
+  // (orchestrate + the interval analysis). Injected rather than called
+  // directly, because it lives on the pass and this is a separate class; the
+  // balancer must not grow a dependency on the pass to reach it.
+  using RealIntervalFn = std::function<int64_t()>;
+  RealIntervalFn real_interval_fn;
+  // Publishes the current configuration onto the IR so `real_interval_fn` sees
+  // it. Same reason for the indirection.
+  using PublishFn = std::function<void(TaskDependencyGraph &)>;
+  PublishFn publish_fn;
 
   // Enables the two data-level-parallelism moves on top of the classic
   // add-a-CGRA move. Both are gated on the task's `dlp_replicable` tag.
@@ -2871,6 +3329,9 @@ public:
   // When set, the allocation may exceed the grid; the extra area is paid for
   // with context waves inside the objective instead of being forbidden.
   bool allow_temporal = false;
+  // Shortlist depth for the per-move ranking; see the pass option of the same
+  // name, which governs every shortlist in this pass.
+  int verify_top_k = 4;
 
   // Runs pipeline balance on the graph.
   //
@@ -2912,8 +3373,17 @@ public:
   // Default false so the shipped path is bit-identical; the pass options that
   // opt into the joint search turn it on.
   bool joint_criterion = false;
+  // Rounds of the joint search. Each round re-centres the per-axis option lists
+  // on the winner, which is what stops "options built with the other axes held
+  // at their current values" from being a one-shot approximation.
+  int joint_rounds = 0;
+  // Depth of the joint shortlist. Separate from `verify_top_k`, which caps the
+  // balancer's per-step MOVE list: reusing that one silently made the joint
+  // search verify the whole pool, because its default is 0 meaning "all".
+  int joint_top_k = 4;
 
-  bool balance(TaskDependencyGraph &graph, ProfileFn profile_fn) {
+
+  bool balance(TaskDependencyGraph &graph, const ProfileFn &profile_fn) {
     // Warm-start the joint climb from the shipped allocation.
     //
     // Both rules are hill-climbs, and they climb different surfaces, so the
@@ -2948,10 +3418,271 @@ public:
         }
       }
     }
+    // The joint search replaces the one-axis climb rather than following it:
+    // running both would let the greedy rule commit a move the joint pool was
+    // meant to weigh against its alternatives.
+    if (joint_rounds > 0)
+      return jointBalanceImpl(graph, profile_fn);
     return balanceImpl(graph, profile_fn);
   }
 
-  bool balanceImpl(TaskDependencyGraph &graph, ProfileFn profile_fn) {
+  //===--------------------------------------------------------------------===//
+  // Joint search: one score over the whole configuration, global top-k.
+  //===--------------------------------------------------------------------===//
+  //
+  // `balanceImpl` below is a hill-climb. It picks a bottleneck and moves ONE
+  // axis -- `cgra_count`, or `replicas`, or `tiling` -- keeping whichever move
+  // scored best. Shape is chosen separately inside `profileWithBestShape`, and
+  // fusion separately again in `speculate`. Three shortlists on three surfaces,
+  // advanced one at a time.
+  //
+  // That cannot reach a configuration whose axes must move TOGETHER. If
+  // widening the array is a loss at the current tiling, and doubling the tiling
+  // is a loss at the current width, a one-axis climb rejects both and never
+  // tries the pair -- even when the pair is the best point in the space.
+  //
+  // So the candidate here is a whole configuration, the pool is the cross
+  // product of the per-axis options, and every member is scored by the SAME
+  // closed form the objective already defines:
+  //
+  //   score = max(task_floor, resource_floor, pipelineCycle(), commFloor())
+  //
+  // Ranking is free -- no candidate is compiled to be scored. Only the top k
+  // are lowered for real, and the real result picks the winner. Rounds repeat
+  // with the winner as the new centre, which is what makes the per-axis option
+  // lists (built with the other axes held at their current values) progressively
+  // less of an approximation.
+  //
+  // What "for real" covers, precisely: the top-k are re-measured through
+  // `realPipelineIntervalOf`, which clones the module and runs the actual
+  // `orchestrate-tasks-on-accelerators` and `analyze-task-pipeline-interval`.
+  // So placement, temporal context assignment and the reported interval are the
+  // real ones. Tiling is the exception -- materialising it erases task ops, so
+  // it cannot be applied and rolled back per candidate, and on that one axis
+  // the verification still reads the attribute rather than the rewritten loop.
+  struct JointConfig {
+    SmallVector<int> cgra_count, replicas, tiling;
+    SmallVector<CgraShape> shape;
+    SmallVector<int64_t> ii, steps;
+  };
+
+  JointConfig captureConfig(const TaskDependencyGraph &graph) const {
+    JointConfig config;
+    for (auto &n : graph.nodes) {
+      config.cgra_count.push_back(n->cgra_count);
+      config.replicas.push_back(n->replicas);
+      config.tiling.push_back(n->tiling);
+      config.shape.push_back(n->shape);
+      config.ii.push_back(n->ii);
+      config.steps.push_back(n->steps);
+    }
+    return config;
+  }
+
+  void restoreConfig(TaskDependencyGraph &graph, const JointConfig &config) {
+    for (auto [i, n] : llvm::enumerate(graph.nodes)) {
+      n->cgra_count = config.cgra_count[i];
+      n->replicas = config.replicas[i];
+      n->tiling = config.tiling[i];
+      n->shape = config.shape[i];
+      n->ii = config.ii[i];
+      n->steps = config.steps[i];
+    }
+  }
+
+  // The options this node may take on each axis, including its current value so
+  // "leave it alone" is always in the product.
+  struct AxisOptions {
+    SmallVector<int> cgra_count, replicas, tiling;
+  };
+
+  AxisOptions axisOptionsFor(TaskGraphNode *node, int budget_left) const {
+    AxisOptions options;
+    options.cgra_count.push_back(node->cgra_count);
+    for (int next : {node->cgra_count + 1, node->cgra_count * 2}) {
+      if (next != node->cgra_count && canFitOnGrid(next) &&
+          next <= node->trip_count &&
+          next * std::max(1, node->replicas) * std::max(1, node->tiling) <=
+              node->cgra_count + budget_left)
+        options.cgra_count.push_back(next);
+    }
+    options.replicas.push_back(node->replicas);
+    if (node->dlp_replicable &&
+        (int64_t)(node->replicas + 1) * std::max(1, node->tiling) <=
+            node->root_trip &&
+        TaskTiler::canReplicate(node->op, node->replicas + 1))
+      options.replicas.push_back(node->replicas + 1);
+    options.tiling.push_back(node->tiling);
+    if (node->tile_group < 0 && node->tiling * 2 <= max_tiling &&
+        (int64_t)std::max(1, node->replicas) * (node->tiling * 2) <=
+            node->split_space &&
+        TaskTiler::canTile(node->op, node->tiling * 2))
+      options.tiling.push_back(node->tiling * 2);
+    return options;
+  }
+
+  bool jointBalanceImpl(TaskDependencyGraph &graph,
+                        const ProfileFn &profile_fn) {
+    bool changed = false;
+    const int grid_budget =
+        allow_temporal ? kTotalCGRAs * kMaxTemporalWaves : kTotalCGRAs;
+
+    if (!real_interval_fn || !publish_fn) {
+      // A `[Joint]` prefix here reads as "the joint search ran", which is the
+      // opposite of what happened. This is the speculative path, where a
+      // downstream run per candidate would cost more than the lookahead it
+      // informs, so it deliberately uses the cheap climb.
+      llvm::errs() << "[Balance] speculative call: one-axis climb (the joint "
+                   << "search needs the real-measurement callback)\n";
+      return balanceImpl(graph, profile_fn);
+    }
+    for (int round = 0; round < joint_rounds; ++round) {
+      DenseSet<TaskGraphNode *> none;
+      TaskGraphNode *bottleneck = findBottleneck(graph, none);
+      if (!bottleneck)
+        break;
+      const JointConfig centre = captureConfig(graph);
+      const int64_t centre_score = graph.objective();
+      const int budget_left = grid_budget - graph.getTotalAllocatedCGRAs() +
+                              bottleneck->footprintCgras();
+      AxisOptions axes = axisOptionsFor(bottleneck, budget_left);
+
+      // The pool. Every member differs from the centre on any subset of the
+      // axes, which is the whole point -- a one-axis climb only ever sees the
+      // members that differ on exactly one.
+      struct Scored {
+        int cgra_count, replicas, tiling;
+        CgraShape shape;
+        int64_t score;
+      };
+      // NOTHING in this loop compiles anything. That is the claim the design
+      // rests on: the pool is ranked in closed form, and a lowering is spent
+      // only on the k that survive.
+      //
+      // One profile of the centre supplies the two facts no candidate changes
+      // -- the body's op count and its recurrence bound -- and every member's
+      // II then follows from the tile count of its own shape:
+      //
+      //   ii(shape) = max( ceil(n_ops / tiles(shape)), rec_mii )
+      //
+      // An earlier version of this loop called `profile_fn` whenever the tile
+      // array moved, which ran InsertDataMov and the mapper per candidate. That
+      // is the cost the ranking exists to avoid; scoring the pool that way
+      // makes the shortlist pointless.
+      const int64_t body_ops = bottleneck->n_ops;
+      const int64_t body_recurrence = bottleneck->rec_mii;
+      const int64_t body_steps = bottleneck->steps;
+      SmallVector<Scored> pool;
+      for (int cgras : axes.cgra_count) {
+        SmallVector<CgraShape> shapes = getRectangularShapes(cgras);
+        for (const auto &s : getNonRectangularShapes(cgras))
+          shapes.push_back(s);
+        if (shapes.empty())
+          shapes.push_back(pickBestShape(cgras));
+        SmallVector<CgraShape> unique;
+        for (const CgraShape &shape : shapes) {
+          bool seen = false;
+          for (const CgraShape &kept : unique)
+            seen |= kept.irAttr() == shape.irAttr();
+          if (!seen)
+            unique.push_back(shape);
+        }
+        for (const CgraShape &shape : unique) {
+          const int64_t tiles = (int64_t)shape.rows * graph.per_cgra_rows *
+                                (int64_t)shape.cols * graph.per_cgra_cols;
+          const int64_t closed_form_ii =
+              body_ops > 0
+                  ? std::max<int64_t>(
+                        llvm::divideCeil(body_ops, std::max<int64_t>(1, tiles)),
+                        body_recurrence)
+                  : centre.ii[bottleneck->id];
+          for (int replicas : axes.replicas) {
+            for (int tiling : axes.tiling) {
+              if (cgras * std::max(1, replicas) * std::max(1, tiling) >
+                  bottleneck->cgra_count + budget_left)
+                continue;
+              bottleneck->cgra_count = cgras;
+              bottleneck->shape = shape;
+              bottleneck->replicas = replicas;
+              bottleneck->tiling = tiling;
+              bottleneck->ii = closed_form_ii;
+              bottleneck->steps = body_steps;
+              pool.push_back({cgras, replicas, tiling, shape,
+                              graph.objective()});
+              restoreConfig(graph, centre);
+            }
+          }
+        }
+      }
+      if (pool.empty())
+        break;
+
+      llvm::sort(pool, [](const Scored &a, const Scored &b) {
+        return a.score < b.score;
+      });
+      const unsigned keep = std::min<unsigned>(
+          pool.size(), joint_top_k > 0 ? joint_top_k : pool.size());
+
+      llvm::errs() << "[Joint] round " << round << ": task="
+                   << bottleneck->op.getTaskName() << " pool=" << pool.size()
+                   << " centre=" << centre_score << " best_scored="
+                   << pool.front().score << " verifying top " << keep << "\n";
+
+      // Cash the shortlist in: lower each of the k and let the measurement,
+      // not the score that produced the ranking, choose. Selecting on the score
+      // here would make the verification unable to change any outcome.
+      int64_t best_measured = INT64_MAX;
+      const Scored *winner = nullptr;
+      for (unsigned i = 0; i < keep; ++i) {
+        const Scored &candidate = pool[i];
+        bottleneck->cgra_count = candidate.cgra_count;
+        bottleneck->shape = candidate.shape;
+        bottleneck->replicas = candidate.replicas;
+        bottleneck->tiling = candidate.tiling;
+        profile_fn(bottleneck, bottleneck->op);
+        publish_fn(graph);
+        const int64_t measured = real_interval_fn();
+        llvm::errs() << "[Joint]   cand " << i << " cgras="
+                     << candidate.cgra_count << " shape="
+                     << candidate.shape.describe(candidate.cgra_count)
+                     << " replicas=" << candidate.replicas << " tiling="
+                     << candidate.tiling << " scored=" << candidate.score
+                     << " measured=" << measured << "\n";
+        if (measured > 0 && measured < best_measured) {
+          best_measured = measured;
+          winner = &candidate;
+        }
+        restoreConfig(graph, centre);
+      }
+
+      if (!winner) {
+        llvm::errs() << "[Joint]   no candidate measured; stopping\n";
+        break;
+      }
+      // Adopt only on a real improvement, so a round that finds nothing leaves
+      // the allocation exactly as it was.
+      restoreConfig(graph, centre);
+      publish_fn(graph);
+      const int64_t centre_measured = real_interval_fn();
+      if (centre_measured > 0 && best_measured >= centre_measured) {
+        llvm::errs() << "[Joint]   centre measured " << centre_measured
+                     << " <= best candidate " << best_measured
+                     << "; converged\n";
+        break;
+      }
+      bottleneck->cgra_count = winner->cgra_count;
+      bottleneck->shape = winner->shape;
+      bottleneck->replicas = winner->replicas;
+      bottleneck->tiling = winner->tiling;
+      profile_fn(bottleneck, bottleneck->op);
+      changed = true;
+      llvm::errs() << "[Joint]   adopted, measured " << best_measured
+                   << " (was " << centre_measured << ")\n";
+    }
+    return changed;
+  }
+
+  bool balanceImpl(TaskDependencyGraph &graph, const ProfileFn &profile_fn) {
     bool changed = false;
     // Tracks nodes for which adding one more CGRA did not reduce latency.
     // These are skipped in subsequent iterations.
@@ -3001,9 +3732,6 @@ public:
       const int old_replicas = bottleneck->replicas;
       const int old_tiling = bottleneck->tiling;
       const int64_t old_latency = score();
-      const int64_t old_ii = bottleneck->ii;
-      const int64_t old_steps = bottleneck->steps;
-      const CgraShape old_shape = bottleneck->shape;
       const int grid_budget =
           allow_temporal ? kTotalCGRAs * kMaxTemporalWaves : kTotalCGRAs;
       const int budget_left =
@@ -3071,53 +3799,62 @@ public:
       const Move *best_move = nullptr;
       // Snapshot the peers so a candidate can be applied to all of them.
       struct PeerState {
-        TaskGraphNode *n;
-        int c, k, t;
+        TaskGraphNode *node;
+        int cgra_count, replicas, tiling;
         int64_t ii, steps;
         CgraShape shape;
       };
       SmallVector<PeerState, 8> peer_state;
-      for (TaskGraphNode *pn : peers)
-        peer_state.push_back({pn, pn->cgra_count, pn->replicas, pn->tiling,
-                              pn->ii, pn->steps, pn->shape});
+      for (TaskGraphNode *peer : peers)
+        peer_state.push_back({peer, peer->cgra_count, peer->replicas,
+                              peer->tiling, peer->ii, peer->steps,
+                              peer->shape});
       auto restorePeers = [&]() {
-        for (PeerState &ps : peer_state) {
-          ps.n->cgra_count = ps.c;
-          ps.n->replicas = ps.k;
-          ps.n->tiling = ps.t;
-          ps.n->ii = ps.ii;
-          ps.n->steps = ps.steps;
-          ps.n->shape = ps.shape;
+        for (PeerState &saved : peer_state) {
+          saved.node->cgra_count = saved.cgra_count;
+          saved.node->replicas = saved.replicas;
+          saved.node->tiling = saved.tiling;
+          saved.node->ii = saved.ii;
+          saved.node->steps = saved.steps;
+          saved.node->shape = saved.shape;
         }
       };
       // Applies move `m` (expressed as a delta on the bottleneck) to every peer
       // whose own limits allow it. Returns the CGRAs the set would then hold.
-      auto applyToPeers = [&](const Move &m, bool group) {
-        for (PeerState &ps : peer_state) {
-          TaskGraphNode *pn = ps.n;
+      auto applyToPeers = [&](const Move &move, bool group) {
+        for (PeerState &saved : peer_state) {
+          TaskGraphNode *peer = saved.node;
           // Single-task step unless the group step is being tried.
-          if (!group && pn != bottleneck)
+          if (!group && peer != bottleneck)
             continue;
-          switch (m.kind) {
+          switch (move.kind) {
           case kLargerTileArray:
-            if (!canFitOnGrid(ps.c + 1))
+            // `findBottleneck` never returns a task already holding as many
+            // CGRAs as it has iterations, because the extra tiles cannot be
+            // filled. The bottleneck therefore satisfies this by construction,
+            // but a peer tied with it need not, and without the guard the group
+            // step spends budget on tiles that task cannot use.
+            if (!canFitOnGrid(saved.cgra_count + 1) ||
+                saved.cgra_count + 1 > peer->trip_count)
               continue;
-            pn->cgra_count = ps.c + 1;
-            profile_fn(pn, pn->op);
+            peer->cgra_count = saved.cgra_count + 1;
+            profile_fn(peer, peer->op);
             break;
           case kMoreReplicas:
-            if (!pn->dlp_replicable ||
-                (int64_t)(ps.k + 1) * ps.t > pn->root_trip ||
-                !TaskTiler::canReplicate(pn->op, ps.k + 1))
+            if (!peer->dlp_replicable ||
+                (int64_t)(saved.replicas + 1) * saved.tiling >
+                    peer->root_trip ||
+                !TaskTiler::canReplicate(peer->op, saved.replicas + 1))
               continue;
-            pn->replicas = ps.k + 1;
+            peer->replicas = saved.replicas + 1;
             break;
           case kTiling:
-            if (pn->tile_group >= 0 || ps.t * 2 > max_tiling ||
-                (int64_t)ps.k * (ps.t * 2) > pn->split_space ||
-                !TaskTiler::canTile(pn->op, ps.t * 2))
+            if (peer->tile_group >= 0 || saved.tiling * 2 > max_tiling ||
+                (int64_t)saved.replicas * (saved.tiling * 2) >
+                    peer->split_space ||
+                !TaskTiler::canTile(peer->op, saved.tiling * 2))
               continue;
-            pn->tiling = ps.t * 2;
+            peer->tiling = saved.tiling * 2;
             break;
           }
         }
@@ -3136,31 +3873,80 @@ public:
       // than the one-at-a-time walk. Trying both and keeping the better one
       // dominates either rule alone.
       bool best_group = false;
-      for (const Move &m : candidates) {
+
+      // Rank the legal moves cheaply, then score the top few for real.
+      //
+      // `score()` is `graph.objective()`, which in pipeline mode list-schedules
+      // the whole program onto the grid and walks each cell's longest path.
+      // The balancer called it once per legal move per iteration -- 477 times
+      // on bicg -- and the ranking below replaces most of those with two O(V)
+      // sums. The candidate set here is small (three moves, each on the
+      // bottleneck alone or on its whole tied set), so this saves a fraction
+      // rather than an order of magnitude; it is the same discipline the
+      // fusion, allocation and shape shortlists use, applied where it also
+      // happens to be the largest remaining cost.
+      auto cheapMoveScore = [&]() -> int64_t {
+        int64_t task_floor = 0, area_time = 0;
+        for (auto &node : graph.nodes) {
+          const int64_t latency = node->estimatedLatency();
+          task_floor = std::max(task_floor, latency);
+          area_time += latency * node->footprintCgras();
+        }
+        return std::max<int64_t>(
+            task_floor, llvm::divideCeil(area_time, (int64_t)kTotalCGRAs));
+      };
+
+      struct RankedMove {
+        int64_t cheap_score;
+        const Move *move;
+        bool group;
+      };
+      SmallVector<RankedMove, 6> ranked_moves;
+      for (const Move &move : candidates) {
         for (int group = 0; group < (peers.size() > 1 ? 2 : 1); ++group) {
           restorePeers();
-          int demand = applyToPeers(m, group == 1);
-          if (demand > grid_budget) {
-            restorePeers();
-            continue;
-          }
-          int64_t cand_latency = score();
-          llvm::errs() << "  Balance: trying Task " << bottleneck->id << " ("
-                       << bottleneck->op.getTaskName().str() << ") " << m.name
-                       << (group ? " [group]" : " [single]")
-                       << " -> cgra_count=" << m.cgra_count
-                       << ", replicas=" << m.replicas << ", tiling=" << m.tiling
-                       << ", ii=" << bottleneck->effectiveII()
-                       << ", trip=" << bottleneck->effectiveTripCount()
-                       << ", lat=" << old_latency << "->" << cand_latency
-                       << "\n";
-          if (cand_latency < best_latency) {
-            best_latency = cand_latency;
-            best_move = &m;
-            best_group = (group == 1);
-          }
+          int demand = applyToPeers(move, group == 1);
+          if (demand <= grid_budget)
+            ranked_moves.push_back({cheapMoveScore(), &move, group == 1});
           restorePeers();
         }
+      }
+      // Stable, so equal scores keep the enumeration order. The acceptance
+      // test below is strict, which means ties go to whichever move is seen
+      // first, and an unstable sort silently re-picks among them: on plain_gemm
+      // that alone moved the result from 262147 to 393218, with every move
+      // still verified. A shortlist may drop candidates; it must not reorder
+      // the ones it keeps.
+      llvm::stable_sort(ranked_moves,
+                        [](const RankedMove &lhs, const RankedMove &rhs) {
+                          return lhs.cheap_score < rhs.cheap_score;
+                        });
+      const size_t moves_to_verify =
+          verify_top_k <= 0
+              ? ranked_moves.size()
+              : std::min<size_t>(verify_top_k, ranked_moves.size());
+
+      for (size_t position = 0; position < moves_to_verify; ++position) {
+        const RankedMove &candidate = ranked_moves[position];
+        restorePeers();
+        applyToPeers(*candidate.move, candidate.group);
+        int64_t cand_latency = score();
+        llvm::errs() << "  Balance: trying Task " << bottleneck->id << " ("
+                     << bottleneck->op.getTaskName().str() << ") "
+                     << candidate.move->name
+                     << (candidate.group ? " [group]" : " [single]")
+                     << " -> cgra_count=" << candidate.move->cgra_count
+                     << ", replicas=" << candidate.move->replicas
+                     << ", tiling=" << candidate.move->tiling
+                     << ", ii=" << bottleneck->effectiveII()
+                     << ", trip=" << bottleneck->effectiveTripCount()
+                     << ", lat=" << old_latency << "->" << cand_latency << "\n";
+        if (cand_latency < best_latency) {
+          best_latency = cand_latency;
+          best_move = candidate.move;
+          best_group = candidate.group;
+        }
+        restorePeers();
       }
 
       if (best_move) {
@@ -3311,7 +4097,7 @@ public:
   // Only performs ONE fusion per call — the caller should rebuild the graph
   // and call again if more fusions are desired.
   bool fuse(func::FuncOp func, TaskDependencyGraph &graph,
-            ProfileFn profile_fn) {
+            const ProfileFn &profile_fn) {
     auto pair = findBestFusionCandidate(graph);
     if (!pair) {
       return false;
@@ -3340,7 +4126,7 @@ public:
   // Public: fuse two SPECIFIC nodes (bypasses the trip-diff selection). Used by
   // the global fusion search to commit / speculate a chosen pair.
   bool fuseNodes(func::FuncOp func, TaskGraphNode *a, TaskGraphNode *b,
-                 TaskDependencyGraph &graph, ProfileFn profile_fn) {
+                 TaskDependencyGraph &graph, const ProfileFn &profile_fn) {
     return performFusion(func, a, b, graph, profile_fn);
   }
 
@@ -3445,20 +4231,20 @@ private:
     // which remain visible even when the graph edge is missing.
     Operation *latest_def = task_a; // task_a is the earlier op (ensured above).
     auto updateLatest = [&](ValueRange operands) {
-      for (Value v : operands)
-        if (Operation *d = v.getDefiningOp())
-          if (d->getBlock() == task_a->getBlock() &&
-              latest_def->isBeforeInBlock(d))
-            latest_def = d;
+      for (Value operand : operands)
+        if (Operation *def_op = operand.getDefiningOp())
+          if (def_op->getBlock() == task_a->getBlock() &&
+              latest_def->isBeforeInBlock(def_op))
+            latest_def = def_op;
     };
-    auto ta = cast<TaskflowTaskOp>(task_a);
-    auto tb = cast<TaskflowTaskOp>(task_b);
-    updateLatest(ta.getWillReads());
-    updateLatest(ta.getWillWrites());
-    updateLatest(ta.getValueInputs());
-    updateLatest(tb.getWillReads());
-    updateLatest(tb.getWillWrites());
-    updateLatest(tb.getValueInputs());
+    auto task_a_op = cast<TaskflowTaskOp>(task_a);
+    auto task_b_op = cast<TaskflowTaskOp>(task_b);
+    updateLatest(task_a_op.getWillReads());
+    updateLatest(task_a_op.getWillWrites());
+    updateLatest(task_a_op.getValueInputs());
+    updateLatest(task_b_op.getWillReads());
+    updateLatest(task_b_op.getWillWrites());
+    updateLatest(task_b_op.getValueInputs());
 
     Block *task_block = task_a->getBlock();
     auto allUsesAfterInsertion = [&](Operation *task) -> bool {
@@ -3493,7 +4279,7 @@ private:
   //   profiled through InsertDataMov + mapper to get accurate compiled_ii.
   bool performFusion(func::FuncOp func, TaskGraphNode *node_a,
                      TaskGraphNode *node_b, TaskDependencyGraph &graph,
-                     ProfileFn profile_fn) {
+                     const ProfileFn &profile_fn) {
     auto task_a = node_a->op;
     auto task_b = node_b->op;
 
@@ -3858,9 +4644,9 @@ private:
           existing_yield.erase();
         }
       }
-      OpBuilder tb = OpBuilder::atBlockEnd(entry_block);
-      tb.create<TaskflowYieldOp>(fused_task.getLoc(), yield_reads, yield_writes,
-                                 yield_values);
+      OpBuilder yield_builder = OpBuilder::atBlockEnd(entry_block);
+      yield_builder.create<TaskflowYieldOp>(fused_task.getLoc(), yield_reads,
+                                            yield_writes, yield_values);
     }
 
     // Step 6: Sets fused trip_count (max of both independent tasks).
@@ -4007,6 +4793,74 @@ struct ResourceAwareTaskOptimizationPass
           "only ResMII/RecMII. The latter two never invoke the mapper."),
       llvm::cl::init("compiled")};
 
+  // Whether `cost-model-analytical` serves its shape-aware prediction or its
+  // sound floor. The floor is a lower bound by construction, so it can only
+  // under-predict; the exact CP-SAT mapper puts `plain_gemm` on 4x4 at II=2
+  // where the floor says 1 (II=1 schedules but does not route). Opt-in, so a
+  // run that needs a bound rather than an estimate still gets one.
+  // Which mapper cashes the shortlist in. `heuristic` is the shipped
+  // backtracker and stays the default so nothing in tree changes; `cpsat` runs
+  // the exact modulo mapper from PR #340, which is the one that certifies an
+  // II rather than reporting whatever its search happened to reach.
+  Option<std::string> verifier{
+      *this, "verifier",
+      llvm::cl::desc("Mapper used to verify the shortlist: 'heuristic' "
+                     "(default, the shipped backtracker) or 'cpsat' (the exact "
+                     "modulo mapper; needs cpsat-python and cpsat-script)."),
+      llvm::cl::init("heuristic")};
+  Option<std::string> cpsatPython{
+      *this, "cpsat-python",
+      llvm::cl::desc("Interpreter that has OR-Tools installed, for "
+                     "verifier=cpsat."),
+      llvm::cl::init("python3")};
+  Option<std::string> cpsatScript{
+      *this, "cpsat-script",
+      llvm::cl::desc("Path to test/cost-model/exact_mapper_cpsat.py."),
+      llvm::cl::init("")};
+  // `mr` in the solver: bias stage 1 toward a placement stage 2 can route.
+  //
+  // Without it the two stages disagree, and the disagreement is visible: on the
+  // graph-isomorphic shapes 8x2 and 2x8 -- same tile count, same link count,
+  // same mean hop, homogeneous FUs -- the solver returns 3 and 2, reproducibly
+  // and with no timeouts, purely because row-major tile ids lead stage 1 to
+  // different placements. With the bias on, both return 3.
+  //
+  // It buys consistency, not tightness: that same 2x8 goes from 2 to 3, because
+  // stage 1 now spends its budget optimising a routing proxy instead of
+  // searching for a routable witness. Both numbers are upper bounds either way
+  // -- an II rejected by a routing failure was never proven infeasible. Turn it
+  // off to trade that consistency back for speed.
+  // Measurement-only: after the decisions are materialised, re-read every
+  // emitted task's II with the exact solver. Changes nothing the search did,
+  // and exists so two arms that SEARCH differently can still be READ with one
+  // instrument. Set it on the baseline to compare like with like.
+  Option<std::string> rescoreWith{
+      *this, "rescore-with",
+      llvm::cl::desc("Re-measure the materialised tasks with 'cpsat' after all "
+                     "decisions are made (measurement only, no decision "
+                     "changes). Empty (default) leaves the arm's own estimate."),
+      llvm::cl::init("")};
+  Option<bool> cpsatMinimizeRouting{
+      *this, "cpsat-minimize-routing",
+      llvm::cl::desc("Bias the solver's placement stage toward routable "
+                     "placements (default true). False is faster and lets two "
+                     "isomorphic shapes disagree."),
+      llvm::cl::init(true)};
+  Option<int> cpsatSeconds{
+      *this, "cpsat-seconds",
+      llvm::cl::desc("CP-SAT budget per II attempt (default 30). An II the "
+                     "solver cannot settle in this time is skipped and the "
+                     "search continues at II+1."),
+      llvm::cl::init(30)};
+
+  Option<bool> usePredictedII{
+      *this, "use-predicted-ii",
+      llvm::cl::desc(
+          "With estimation-mode=cost-model-analytical, use the cost model's "
+          "shape-aware predicted_ii (floor + distance-charged routing term) "
+          "instead of the sound lower bound final_ii (default: false)."),
+      llvm::cl::init(false)};
+
   // Controls whether the balance phase skips the mapper during speculative
   // profiling.  Default is true (analytical-only) for speed — the mapper can
   // backtrack indefinitely on larger tile arrays.  Set to false to run the
@@ -4050,10 +4904,117 @@ struct ResourceAwareTaskOptimizationPass
   // ordering with a global ranking of fusion candidates each step.
   Option<bool> globalFusion{
       *this, "global-fusion",
-      llvm::cl::desc("Best-first fusion: rank all candidate pairs by the "
-                     "resulting balanced interval, commit the best (default "
+      llvm::cl::desc("Best-first fusion: rank all candidate pairs with the "
+                     "cost model, verify the top `fusion-candidates` by "
+                     "actually fusing and balancing, and commit the best only "
+                     "if it beats not fusing (default false)."),
+      llvm::cl::init(false)};
+
+  // One shortlist depth for every place this pass ranks cheaply and verifies
+  // for real: fusion pairs and complete allocations. Both enumerate a space too
+  // large to evaluate exactly -- O(V^2) pairs, and one allocation per (rule,
+  // latency target) -- and both have a closed-form score that orders it.
+  Option<int> verifyTopK{
+      *this, "verify-top-k",
+      llvm::cl::desc("How many of the cheaply-ranked candidates to verify with "
+                     "the real objective, for both the fusion-pair and the "
+                     "allocation shortlists. 0 verifies every candidate "
+                     "(default 4)."),
+      llvm::cl::init(4)};
+
+  // Shortlist depth for the two axes that are NOT the fusion/allocation
+  // shortlist, kept separate so that `verify-top-k` cannot reach the evaluator.
+  //
+  // It used to. `configureGraph` and `configureBalancer` both read
+  // `verify-top-k`, and both are called from `speculate`, so raising k made
+  // fusion's own yardstick longer at the same time as its candidate list.
+  // Measured on gpt2_prefill_s128: on one identical graph with the same 15
+  // legal pairs, the no-fusion baseline was 354,189,345 at k=1 and 266,797,098
+  // at k=8. Top-8 contains top-1, but it was being compared against a 25%
+  // stronger baseline, so k=8 rejected the pair k=1 accepted and the two runs
+  // diverged from the first iteration. A shortlist can only be sound if the
+  // thing that scores it holds still.
+  // This is the shortlist the whole approach rests on. The speculative probes
+  // call `profileWithBestShape` analytically, where the depth is nearly free,
+  // but the converged allocation calls it with the real mapper -- so `k` is
+  // literally how many shapes per task get lowered, against the enumeration
+  // over every legal shape that the incremental search it replaces would run.
+  // Turn the staged one-axis climb into a joint search: build the cross
+  // product of the per-axis options, score every member with the SAME
+  // objective, and lower only the top `verify-top-k`. 0 rounds keeps the
+  // shipped hill-climb, so this is opt-in and the default path is unchanged.
+  Option<int> jointRounds{
+      *this, "joint-rounds",
+      llvm::cl::desc("Rounds of joint candidate search (0 = off, the shipped "
+                     "one-axis hill-climb). Each round scores the cross "
+                     "product of the axis options and lowers the top k."),
+      llvm::cl::init(0)};
+
+  Option<int> shapeTopK{
+      *this, "shape-top-k",
+      llvm::cl::desc("How many of the ranked shapes to lower for real when "
+                     "picking a task's shape. 0 lowers every shape (default "
+                     "4)."),
+      llvm::cl::init(4)};
+
+  // Score a shortlisted fusion candidate on the graph its decisions produce, by
+  // materialising them on the speculative clone before measuring.
+  //
+  // Off by default, on measurement. It does what it claims -- on
+  // transformer_static_affine the objective's error against the analyzer falls
+  // from 23.3% to 0.0% -- and the measured interval still got 43.3% worse,
+  // because fusion is one of four axes and the other three keep scoring the
+  // collapsed graph. Fusion then optimises a different quantity from the
+  // balancer that runs after it, and the search walks somewhere the objective
+  // correctly reports as worse. Converting one axis at a time makes the
+  // objective inconsistent with itself; the fix belongs at the end of the
+  // search, where one evaluator can judge whole configurations.
+  Option<bool> verifyOnMaterialised{
+      *this, "verify-on-materialised",
+      llvm::cl::desc("Materialise a shortlisted fusion candidate's tiling and "
+                     "replication before scoring it (default false -- see the "
+                     "comment; this is inconsistent with the other axes)."),
+      llvm::cl::init(false)};
+
+  // What the downstream orchestration will be run with. The allocator cannot
+  // read the orchestrator's own command line, so verifying against the real
+  // pipeline requires being told which pipeline that is; a mismatch here would
+  // verify against a program nobody runs.
+  Option<std::string> verifyPipelineOptions{
+      *this, "verify-pipeline-options",
+      llvm::cl::desc("Options passed to orchestrate-tasks-on-accelerators when "
+                     "a candidate is verified against the real pipeline."),
+      llvm::cl::init("scheduling-mode=spatial-temporal")};
+
+  // Diagnostic: after the decisions are applied, run the real pipeline on a
+  // clone and report it next to the model. Validates that the in-pass pipeline
+  // reproduces what the command line produces before anything is scored by it.
+  Option<bool> reportRealInterval{
+      *this, "report-real-interval",
+      llvm::cl::desc("Run the downstream pipeline on a clone after applying "
+                     "decisions and report the analyzer's interval (default "
                      "false)."),
       llvm::cl::init(false)};
+
+  // The guard that decides whether a "real lowering" is real. At the shipped
+  // 150 it fires on every task of every large program here, so a request for
+  // the mapper is served analytically and the shortlist has nothing to cash in.
+  // Raise it to measure what the mapper would have said.
+  Option<int> mapperOpLimit{
+      *this, "mapper-op-limit",
+      llvm::cl::desc("Kernels larger than this many ops are profiled "
+                     "analytically instead of through the mapper (default "
+                     "150, the shipped value)."),
+      llvm::cl::init(150)};
+
+  Option<int> balanceTopK{
+      *this, "balance-top-k",
+      llvm::cl::desc("How many of the ranked balancer moves to evaluate per "
+                     "step. 0 evaluates every move (default 0). The candidate "
+                     "set is at most six, and an A/B over 11 programs found "
+                     "ranking changed neither the result nor the runtime, so "
+                     "exhaustive is the honest default."),
+      llvm::cl::init(0)};
 
   // Force a SPECIFIC fusion partition, e.g. "0,1;2,3,4;5" fuses original tasks
   // {0,1}, {2,3,4}, leaves 5 a singleton. Used by the offline exhaustive search
@@ -4163,8 +5124,13 @@ struct ResourceAwareTaskOptimizationPass
 
   Option<bool> optimalFission{
       *this, "optimal-fission",
-      llvm::cl::desc("Exact min-max replica allocation instead of greedy "
-                     "bottleneck balancing (default false)."),
+      llvm::cl::desc("Sweep the per-task min-max frontier -- every distinct "
+                     "latency target, two per-task rules -- and keep the "
+                     "allocation the joint objective scores best, instead of "
+                     "greedy bottleneck balancing. Exact for the two floors; "
+                     "not exact once the objective contains the pipeline "
+                     "cycle, which depends on how the whole allocation packs "
+                     "(default false)."),
       llvm::cl::init(false)};
 
   // The two halves of "what does the best allocation in this space actually
@@ -4224,17 +5190,192 @@ struct ResourceAwareTaskOptimizationPass
   // Single place where the pass options reach the cost model, so the
   // speculative clones used for fusion scoring cannot drift from the real
   // graph — a knob that is off in the speculation makes fusion look free.
-  void configureGraph(TaskDependencyGraph &g) {
+  // Runs the real downstream pipeline on a module and returns the interval the
+  // analysis reports, or -1 if it could not be produced.
+  //
+  // This is the number the paper quotes, so a candidate scored with it is
+  // scored against the ground truth rather than against a model of it. The two
+  // passes cost 0.00-0.07s per program against runs of 4.5-37s -- 0.2% -- which
+  // is why the modelled second layer is worth replacing at the points where a
+  // shortlist has already narrowed the field.
+  //
+  // Clones the whole enclosing module and returns the interval the real
+  // downstream pipeline reports for `name`, or -1.
+  //
+  // The whole module, not just the function: a func that reads a weight through
+  // `memref.get_global` refers to a symbol declared at module scope, and
+  // cloning the function alone leaves that behind. The clone then fails to
+  // verify with "'__constant_64x256xf32' does not reference a valid global
+  // memref" -- which is exactly the five programs that carry constants, and
+  // exactly the five this returned -1 for.
+  int64_t realPipelineIntervalOf(func::FuncOp func) {
+    auto parent = func->getParentOfType<ModuleOp>();
+    if (!parent)
+      return -1;
+    OwningOpRef<ModuleOp> clone(parent.clone());
+    StringRef name = func.getName();
+    int64_t interval = -1;
+    clone->walk([&](func::FuncOp candidate) {
+      if (candidate.getName() == name)
+        interval = 0; // found; the pipeline decides the value below
+    });
+    if (interval != 0)
+      return -1;
+    return realPipelineInterval(*clone, name);
+  }
+
+  // `mod` must be a standalone clone: a pass manager may not run on anything
+  // nested inside the operation the current pass is processing.
+  int64_t realPipelineInterval(ModuleOp mod, StringRef only = StringRef()) {
+    PassManager pm(mod.getContext());
+    // Commas stand in for the spaces that separate options inside `{}`: this
+    // string arrives as the value of one of THIS pass's options, and a space
+    // there would be read as the end of it.
+    std::string downstream = verifyPipelineOptions.getValue();
+    std::replace(downstream.begin(), downstream.end(), ',', ' ');
+    // No `builtin.module(...)` wrapper: the manager is already anchored there,
+    // so wrapping again asks it to find a module nested inside this one. There
+    // is none, nothing runs, and `run` reports success -- which is how this
+    // first returned -1 with no diagnostic at all.
+    std::string pipeline = "func.func(orchestrate-tasks-on-accelerators{" +
+                           downstream + "},analyze-task-pipeline-interval)";
+    if (failed(parsePassPipeline(pipeline, pm, llvm::errs()))) {
+      llvm::errs() << "[RealPipeline] could not parse: " << pipeline << "\n";
+      return -1;
+    }
+    if (failed(pm.run(mod))) {
+      llvm::errs() << "[RealPipeline] pipeline failed on the clone\n";
+      return -1;
+    }
+
+    int64_t best = -1;
+    int seen_funcs = 0, seen_info = 0;
+    mod.walk([&](func::FuncOp f) {
+      if (!only.empty() && f.getName() != only)
+        return;
+      ++seen_funcs;
+      auto info = f->getAttrOfType<DictionaryAttr>("task_pipeline_interval_info");
+      if (!info)
+        return;
+      ++seen_info;
+      // The exact value is published separately whenever it does not fit the
+      // i32 the in-tree expectations pin; prefer it when it is there.
+      if (auto exact = info.getAs<IntegerAttr>("pipeline_interval_cycles"))
+        best = std::max(best, exact.getInt());
+      else if (auto narrow = info.getAs<IntegerAttr>("pipeline_interval"))
+        best = std::max(best, narrow.getInt());
+    });
+    if (best < 0)
+      llvm::errs() << "[RealPipeline] ran, but no interval: " << seen_funcs
+                   << " funcs, " << seen_info << " carried the attribute\n";
+    return best;
+  }
+
+  struct MaterialiseCounts {
+    int tiled = 0, replicated = 0, refused = 0;
+  };
+
+  // Rewrites the IR so the search's two DLP decisions are real: tiling cuts the
+  // loop into separate tasks, replication emits the partition table. Up to here
+  // `replicas` and `tiling` are only annotations, and a decision that never
+  // reaches the IR is not a decision.
+  //
+  // Shared with speculation, which is the point. Scoring a candidate on the
+  // collapsed graph -- one node carrying `tiling = t` -- and emitting the
+  // expanded one is how the objective came to be 30-43% optimistic on every
+  // program that tiles: the same graph reports 274,346,824 collapsed and
+  // 387,789,643 once its 8 groups are cut, against an analyzer reading of
+  // 388,379,469. The expanded number is right to 0.15%, so the fix is to score
+  // what gets emitted rather than to keep adjusting the collapsed model.
+  MaterialiseCounts materialiseDecisions(TaskDependencyGraph &graph,
+                                         int &group_id, bool quiet) {
+    MaterialiseCounts counts;
+    // Snapshot first: tile() erases task ops, invalidating graph nodes.
+    struct Decision {
+      TaskflowTaskOp op;
+      int tiling, replicas, cgra_count;
+      int64_t ii, steps;
+    };
+    SmallVector<Decision> decisions;
+    for (auto &node : graph.nodes)
+      decisions.push_back({node->op, node->tiling, node->replicas,
+                           node->cgra_count, node->ii, node->steps});
+    for (Decision &d : decisions) {
+      // Tiling FIRST: it cuts the root range, and the replica partition table
+      // must be computed over each tile's own (cut) range, not over the
+      // original one — otherwise every tile ships the same table covering the
+      // whole loop and the two moves overlap.
+      SmallVector<TaskflowTaskOp> targets;
+      if (d.tiling > 1) {
+        auto tiles = TaskTiler::tile(d.op, d.tiling, group_id, d.ii, d.steps,
+                                     d.cgra_count, d.replicas);
+        if (tiles.empty()) {
+          ++counts.refused;
+          if (!quiet)
+            llvm::errs() << "  [Apply] REFUSED tiling=" << d.tiling << " on "
+                         << d.op.getTaskName() << "\n";
+          OpBuilder refuse_builder(d.op);
+          d.op->setAttr("tiling", refuse_builder.getI32IntegerAttr(1));
+          targets.push_back(d.op);
+        } else {
+          if (!quiet)
+            llvm::errs() << "  [Apply] tiling=" << d.tiling << " -> "
+                         << tiles.size() << " tasks, group " << group_id
+                         << "\n";
+          ++counts.tiled;
+          ++group_id;
+          targets.assign(tiles.begin(), tiles.end());
+        }
+      } else {
+        targets.push_back(d.op);
+      }
+
+      if (d.replicas > 1) {
+        for (TaskflowTaskOp t : targets) {
+          if (TaskTiler::emitPartitionConfig(t, d.replicas)) {
+            ++counts.replicated;
+          } else {
+            ++counts.refused;
+            if (!quiet)
+              llvm::errs() << "  [Apply] REFUSED replicas=" << d.replicas
+                           << " on " << t.getTaskName()
+                           << " (no partitionable root counter)\n";
+            OpBuilder refuse_builder(t);
+            t->setAttr("replicas", refuse_builder.getI32IntegerAttr(1));
+          }
+        }
+      }
+    }
+    return counts;
+  }
+
+  // `top_k_override` is how a speculative clone pins its own evaluator depth.
+  // Passing 0 from `speculate`/`speculatePair` is what keeps the yardstick the
+  // same length for every candidate and for every value of `verify-top-k`.
+  void configureGraph(TaskDependencyGraph &g, int top_k_override = -1) {
+    // Every graph in this pass -- the real one, the speculative clones fusion
+    // scoring builds, the final rebuild -- profiles the same task bodies on the
+    // same tile arrays, so they share one cache. Without this the O(V^2) fusion
+    // sweep re-profiles the whole program per candidate pair.
+    g.profile_cache = shared_profile_cache;
     g.use_full_cost_model =
         (estimationMode.getValue() == "cost-model-analytical");
+    g.use_predicted_ii = usePredictedII.getValue();
+    g.verifier_is_cpsat = (verifier.getValue() == "cpsat");
+    g.cpsat_python = cpsatPython.getValue();
+    g.cpsat_script = cpsatScript.getValue();
+    g.cpsat_seconds = cpsatSeconds.getValue();
+    g.cpsat_minimize_routing = cpsatMinimizeRouting.getValue();
     g.search_shape = searchShape.getValue();
     g.hop_coef = hopCoef.getValue();
     g.mem_weighted_hop = memWeightedHop.getValue();
+    g.verify_top_k =
+        top_k_override >= 0 ? top_k_override : shapeTopK.getValue();
+    g.mapper_op_limit = mapperOpLimit.getValue();
     g.comm_weight = commWeight.getValue();
     g.allow_temporal = allowTemporal.getValue();
     g.use_makespan = (objectiveMode.getValue() == "makespan");
     g.use_pipeline = (objectiveMode.getValue() == "pipeline");
-    g.max_tiling = std::max(1, maxTiling.getValue());
     // Negative means "derive it from the architecture" (the default): a
     // message costs at least mean_hops * link_latency. A hand-set value stays
     // authoritative so the term can still be swept.
@@ -4255,22 +5396,78 @@ struct ResourceAwareTaskOptimizationPass
   // attributes are published only then: the in-tree RESOPT expectations pin the
   // exact attribute dictionary, so emitting extras unconditionally would change
   // the shipped output.
-  bool emitsNewAttrs() {
+  bool emitsNewAttrs() const {
+    // `optimalFission` belongs here as well as in `jointSearchEnabled`. On its
+    // own it turns on the exact allocator but published no `est_latency`, and
+    // the analyzer then falls back to `profile_info.duration` -- the DFG depth,
+    // a different unit -- so that arm alone was measured on a different scale
+    // from every other arm.
     return enableReplicas.getValue() || enableTiling.getValue() ||
-           applyDecisions.getValue() || objectiveMode.getValue() != "interval";
+           applyDecisions.getValue() || optimalFission.getValue() ||
+           objectiveMode.getValue() != "interval";
   }
 
   // True when the caller opted into searching the joint space. Gates both the
   // acceptance rule and the shortlist; the shipped invocation must see neither.
+  // One profile cache for the whole pass. See `TaskDependencyGraph`.
+  std::shared_ptr<TaskDependencyGraph::ProfileCache> shared_profile_cache =
+      std::make_shared<TaskDependencyGraph::ProfileCache>();
+
+  // Cells one task may hold. `allow-temporal` lets the allocation exceed the
+  // grid and pay for the surplus in context waves, and both allocators size the
+  // SUM against that budget, so a per-task cap must use it too.
+  int perTaskCellBudget() const {
+    return allowTemporal.getValue() ? kTotalCGRAs * kMaxTemporalWaves
+                                    : kTotalCGRAs;
+  }
+
   bool jointSearchEnabled() const {
     return enableReplicas.getValue() || enableTiling.getValue() ||
            optimalFission.getValue() || objectiveMode.getValue() != "interval";
   }
 
-  void configureBalancer(PipelineBalancer &b) {
+  // Publishes the current configuration onto the IR so a downstream run reads
+  // it. Only the attributes the orchestrator and the interval analysis consume;
+  // no rewriting, so the caller can restore and re-publish freely.
+  // The function this run is processing, so an injected callback can reach
+  // the real downstream pipeline without threading it through every layer.
+  func::FuncOp current_func;
+
+  void writeDecisionAttributes(TaskDependencyGraph &graph) {
+    for (auto &node : graph.nodes) {
+      OpBuilder builder(node->op);
+      node->op->setAttr("cgra_count",
+                        builder.getI32IntegerAttr(node->cgra_count));
+      node->op->setAttr("replicas", builder.getI32IntegerAttr(node->replicas));
+      node->op->setAttr("trip_count",
+                        builder.getI32IntegerAttr(node->trip_count));
+      node->op->setAttr("est_latency",
+                        builder.getI64IntegerAttr(node->estimatedLatency()));
+      node->op->setAttr("cgra_shape",
+                        builder.getStringAttr(node->shape.irAttr()));
+    }
+  }
+
+  void configureBalancer(PipelineBalancer &b, int top_k_override = -1) {
     b.enable_replicas = enableReplicas.getValue();
     b.enable_tiling = enableTiling.getValue();
     b.max_tiling = std::max(1, maxTiling.getValue());
+    b.joint_rounds = jointRounds.getValue();
+    b.joint_top_k = verifyTopK.getValue();
+    b.publish_fn = [this](TaskDependencyGraph &g) {
+      writeDecisionAttributes(g);
+    };
+    // Only the outer, committing balance gets the real measurement. The two
+    // speculative call sites pass `top_k_override=0`, and letting a lookahead
+    // clone run the whole downstream pipeline per candidate would cost far more
+    // than the decision it is informing.
+    if (top_k_override < 0) {
+      b.real_interval_fn = [this]() -> int64_t {
+        return current_func ? realPipelineIntervalOf(current_func) : -1;
+      };
+    }
+    b.verify_top_k =
+        top_k_override >= 0 ? top_k_override : balanceTopK.getValue();
     b.allow_temporal = allowTemporal.getValue();
     // Gated on actually SEARCHING the joint space, not on `emitsNewAttrs()`.
     //
@@ -4291,7 +5488,7 @@ struct ResourceAwareTaskOptimizationPass
   // re-implementing the pass: per task its legal configs with (latency, area),
   // the successor edges, and the constants the floors use. Hand-rolled JSON
   // because MLIR has no JSON writer and the schema is four fields deep.
-  void writeConfigSpace(TaskDependencyGraph &g,
+  void writeConfigSpace(TaskDependencyGraph &graph,
                         const std::vector<std::vector<TaskConfig>> &configs,
                         StringRef path) {
     std::error_code ec;
@@ -4302,16 +5499,16 @@ struct ResourceAwareTaskOptimizationPass
       return;
     }
     llvm::DenseMap<const TaskGraphNode *, int> index;
-    for (int i = 0; i < (int)g.nodes.size(); ++i)
-      index[g.nodes[i].get()] = i;
+    for (int i = 0; i < (int)graph.nodes.size(); ++i)
+      index[graph.nodes[i].get()] = i;
 
     os << "{\n  \"total_cgras\": " << kTotalCGRAs
        << ",\n  \"max_waves\": " << kMaxTemporalWaves
        << ",\n  \"allow_temporal\": "
        << (allowTemporal.getValue() ? "true" : "false")
        << ",\n  \"tasks\": [\n";
-    for (int i = 0; i < (int)g.nodes.size(); ++i) {
-      TaskGraphNode *nd = g.nodes[i].get();
+    for (int i = 0; i < (int)graph.nodes.size(); ++i) {
+      TaskGraphNode *nd = graph.nodes[i].get();
       os << "    {\"index\": " << i << ", \"name\": \"" << nd->op.getTaskName()
          << "\", \"trip_count\": " << nd->trip_count << ", \"succ\": [";
       bool first = true;
@@ -4325,19 +5522,19 @@ struct ResourceAwareTaskOptimizationPass
       os << "], \"configs\": [";
       for (size_t j = 0; j < configs[i].size(); ++j) {
         const TaskConfig &cf = configs[i][j];
-        os << (j ? ", " : "") << "{\"c\": " << cf.c << ", \"k\": " << cf.k
-           << ", \"t\": " << cf.t << ", \"area\": " << cf.cost
-           << ", \"lat\": " << cf.lat << "}";
+        os << (j ? ", " : "") << "{\"c\": " << cf.cgra_count << ", \"k\": " << cf.replicas
+           << ", \"t\": " << cf.tiling << ", \"area\": " << cf.cells
+           << ", \"lat\": " << cf.latency << "}";
       }
-      os << "]}" << (i + 1 < (int)g.nodes.size() ? "," : "") << "\n";
+      os << "]}" << (i + 1 < (int)graph.nodes.size() ? "," : "") << "\n";
     }
     os << "  ]\n}\n";
-    llvm::errs() << "[ConfigSpace] wrote " << g.nodes.size() << " tasks to "
+    llvm::errs() << "[ConfigSpace] wrote " << graph.nodes.size() << " tasks to "
                  << path << "\n";
   }
 
   // The inverse of applyImportedAllocation: what this run decided.
-  void writeAllocation(TaskDependencyGraph &g, StringRef path) {
+  void writeAllocation(TaskDependencyGraph &graph, StringRef path) {
     std::error_code ec;
     llvm::raw_fd_ostream os(path, ec);
     if (ec) {
@@ -4346,12 +5543,12 @@ struct ResourceAwareTaskOptimizationPass
       return;
     }
     os << "{\n  \"alloc\": {\n";
-    for (size_t i = 0; i < g.nodes.size(); ++i) {
-      TaskGraphNode *nd = g.nodes[i].get();
+    for (size_t i = 0; i < graph.nodes.size(); ++i) {
+      TaskGraphNode *nd = graph.nodes[i].get();
       os << "    \"" << nd->op.getTaskName() << "\": {\"c\": " << nd->cgra_count
          << ", \"k\": " << std::max(1, nd->replicas)
          << ", \"t\": " << std::max(1, nd->tiling) << "}"
-         << (i + 1 < g.nodes.size() ? "," : "") << "\n";
+         << (i + 1 < graph.nodes.size() ? "," : "") << "\n";
     }
     os << "  }\n}\n";
   }
@@ -4359,7 +5556,7 @@ struct ResourceAwareTaskOptimizationPass
   // Reads back a `{"alloc": {"Task_3": {"c": 2, "k": 1, "t": 4}, ...}}`
   // allocation and installs it. Tasks the file does not mention keep what they
   // have, so a partial allocation is a legal input.
-  bool applyImportedAllocation(TaskDependencyGraph &g, StringRef path) {
+  bool applyImportedAllocation(TaskDependencyGraph &graph, StringRef path) {
     auto buffer = llvm::MemoryBuffer::getFile(path);
     if (!buffer) {
       llvm::errs() << "[ImportAlloc] cannot read " << path << "\n";
@@ -4379,31 +5576,49 @@ struct ResourceAwareTaskOptimizationPass
       return false;
     }
     bool changed = false;
-    for (auto &node : g.nodes) {
+    int matched = 0, unmatched = 0;
+    for (auto &node : graph.nodes) {
       llvm::json::Object *entry = alloc->getObject(node->op.getTaskName());
-      if (!entry)
+      if (!entry) {
+        // Silently keeping the searched value here would make the run a hybrid
+        // of the imported allocation and this run's own search, reported as if
+        // it were the imported one. Names diverge when the two runs fuse
+        // differently, which they can: fusion is scored on the allocation, and
+        // the imported allocation is not the one the dumping run searched.
+        ++unmatched;
+        llvm::errs() << "  [ImportAlloc] NO ENTRY for "
+                     << node->op.getTaskName() << ", keeping searched value\n";
         continue;
-      const int c = (int)entry->getInteger("c").value_or(node->cgra_count);
-      const int k = (int)entry->getInteger("k").value_or(node->replicas);
-      const int t = (int)entry->getInteger("t").value_or(node->tiling);
-      if (node->cgra_count != c || node->replicas != k || node->tiling != t)
+      }
+      ++matched;
+      const int cgra_count =
+          (int)entry->getInteger("c").value_or(node->cgra_count);
+      const int replicas =
+          (int)entry->getInteger("k").value_or(node->replicas);
+      const int tiling = (int)entry->getInteger("t").value_or(node->tiling);
+      if (node->cgra_count != cgra_count || node->replicas != replicas ||
+          node->tiling != tiling)
         changed = true;
-      node->cgra_count = c;
-      node->replicas = k;
-      node->tiling = t;
+      node->cgra_count = cgra_count;
+      node->replicas = replicas;
+      node->tiling = tiling;
       // Re-profile so the shape and II match the imported tile array; without
       // this the objective would be scored on the previous array's II.
-      g.profileWithBestShape(node.get(), node->op, /*skip_mapper=*/true);
+      graph.profileWithBestShape(node.get(), node->op, /*skip_mapper=*/true);
       llvm::errs() << "  [ImportAlloc] " << node->op.getTaskName()
-                   << " -> cgra_count=" << c << ", replicas=" << k
-                   << ", tiling=" << t
+                   << " -> cgra_count=" << cgra_count
+                   << ", replicas=" << replicas << ", tiling=" << tiling
                    << ", est_latency=" << node->estimatedLatency() << "\n";
     }
+    llvm::errs() << "[ImportAlloc] matched=" << matched
+                 << " unmatched=" << unmatched << " of " << graph.nodes.size()
+                 << " tasks\n";
     return changed;
   }
 
   void runOnOperation() override {
     func::FuncOp func = getOperation();
+    current_func = func;
 
     // cost-model-analytical: full parametric model (all bounds), no mapper.
     // analytical: legacy ResMII/RecMII-only, no mapper.
@@ -4412,6 +5627,39 @@ struct ResourceAwareTaskOptimizationPass
         (estimationMode.getValue() == "cost-model-analytical");
     bool use_analytical =
         (estimationMode.getValue() == "analytical") || use_full_cost_model;
+
+    // Both gating predicates test `objectiveMode != "interval"`, so an
+    // unrecognised value turns the joint acceptance rule and the new attribute
+    // set on while leaving the objective at the shipped `interval` -- a typo
+    // silently produces a fourth configuration that was never intended.
+    const StringRef objective_mode = objectiveMode.getValue();
+    if (objective_mode != "interval" && objective_mode != "makespan" &&
+        objective_mode != "pipeline") {
+      func.emitError() << "unknown objective-mode '" << objective_mode
+                       << "'; expected interval, makespan or pipeline";
+      return signalPassFailure();
+    }
+    const StringRef estimation_mode = estimationMode.getValue();
+    if (estimation_mode != "compiled" && estimation_mode != "analytical" &&
+        estimation_mode != "cost-model-analytical") {
+      func.emitError() << "unknown estimation-mode '" << estimation_mode
+                       << "'; expected compiled, analytical or "
+                          "cost-model-analytical";
+      return signalPassFailure();
+    }
+
+    if (commMsgCost.getValue() >= 0.0 && commWeight.getValue() <= 0.0)
+      func.emitWarning()
+          << "comm-msg-cost is set but comm-weight is 0, so the communication "
+             "term is switched off and the message cost has no effect";
+    // The four fusion options are a precedence chain, not a set: force-partition
+    // beats disable-fusion, which beats global-fusion, which beats
+    // cost-guided-fusion. Combining them silently kept only the first.
+    if (!forcePartition.getValue().empty() && disableFusion.getValue())
+      func.emitWarning() << "force-partition overrides disable-fusion; tasks "
+                            "in the given groups will still be fused";
+    if (globalFusion.getValue() && costGuidedFusion.getValue())
+      func.emitWarning() << "global-fusion overrides cost-guided-fusion";
 
     llvm::errs() << "=== ResourceAwareTaskOptimization on " << func.getName()
                  << " (estimation-mode=" << estimationMode.getValue()
@@ -4540,187 +5788,294 @@ struct ResourceAwareTaskOptimizationPass
       auto graphInterval = [](TaskDependencyGraph &g) -> int64_t {
         return g.objective();
       };
+      // Scores a speculative clone the way the emitted program will read: cut
+      // the tiles, emit the partition tables, rebuild, and measure that. The
+      // clone is discarded either way, so materialising it costs one rebuild
+      // and buys the difference between a collapsed graph and a real one.
+      auto scoreClone = [&](TaskDependencyGraph &g,
+                            func::FuncOp clone_func) -> int64_t {
+        if (!verifyOnMaterialised.getValue())
+          return graphInterval(g);
+        int speculative_group_id = 0;
+        materialiseDecisions(g, speculative_group_id, /*quiet=*/true);
+        TaskDependencyGraph emitted;
+        configureGraph(emitted, /*top_k_override=*/0);
+        emitted.build(clone_func, use_analytical);
+        return graphInterval(emitted);
+      };
       // Speculatively runs (optional) one fusion + one balance pass on a clone
       // of the current function and returns the resulting pipeline interval.
       auto speculate = [&](bool do_fuse) -> int64_t {
         auto tmp_mod = ModuleOp::create(func.getLoc());
-        OpBuilder tb(tmp_mod.getBodyRegion());
-        auto tmp_func = cast<func::FuncOp>(tb.clone(*func.getOperation()));
-        TaskDependencyGraph g;
-        configureGraph(g);
-        g.build(tmp_func, use_analytical);
+        OpBuilder tmp_builder(tmp_mod.getBodyRegion());
+        auto tmp_func = cast<func::FuncOp>(tmp_builder.clone(*func.getOperation()));
+        TaskDependencyGraph speculative_graph;
+        configureGraph(speculative_graph, /*top_k_override=*/0);
+        speculative_graph.build(tmp_func, use_analytical);
         if (do_fuse) {
-          auto pf = [&g, use_analytical](TaskGraphNode *n, TaskflowTaskOp t) {
-            g.profileTask(n, t, /*skip_mapper=*/use_analytical);
+          auto fusion_profile_fn = [&speculative_graph, use_analytical](TaskGraphNode *node, TaskflowTaskOp task) {
+            speculative_graph.profileTask(node, task, /*skip_mapper=*/use_analytical);
           };
-          UtilizationFuser f;
-          if (f.fuse(tmp_func, g, pf)) {
-            g = TaskDependencyGraph();
-            configureGraph(g);
-            g.build(tmp_func, use_analytical);
+          UtilizationFuser fuser;
+          if (fuser.fuse(tmp_func, speculative_graph, fusion_profile_fn)) {
+            speculative_graph = TaskDependencyGraph();
+            configureGraph(speculative_graph, /*top_k_override=*/0);
+            speculative_graph.build(tmp_func, use_analytical);
           } else {
             tmp_mod.erase();
             return -1; // no fusion possible
           }
         }
-        auto bpf = [&g](TaskGraphNode *n, TaskflowTaskOp t) {
-          g.profileTask(n, t, /*skip_mapper=*/true);
+        // `profileWithBestShape`, not `profileTask`: the latter profiles at
+        // whatever `shape` the node already carries, which `build` leaves at
+        // 1x1. A speculative LargerTileArray move would then set
+        // cgra_count = c+1, re-profile on a 1x1 array, hit the same cache
+        // entry, and see no improvement -- so every such move was rejected and
+        // fusion was scored against a balancer that could not balance. The
+        // real path (`balance_profile_fn`) has always used the shape-deriving
+        // one.
+        auto speculative_profile_fn = [&speculative_graph](TaskGraphNode *node,
+                                           TaskflowTaskOp task) {
+          speculative_graph.profileWithBestShape(node, task, /*skip_mapper=*/true);
         };
         // The fusion decision must be SCORED in the same decision space the
         // real balancer will use, otherwise fusion looks free when it actually
         // costs the `dlp_replicable` tag that replicas/tiling are gated on.
-        PipelineBalancer b;
-        configureBalancer(b);
-        b.balance(g, bpf);
-        int64_t itv = graphInterval(g);
+        PipelineBalancer balancer;
+        configureBalancer(balancer, /*top_k_override=*/0);
+        balancer.balance(speculative_graph, speculative_profile_fn);
+        int64_t interval = scoreClone(speculative_graph, tmp_func);
         tmp_mod.erase();
-        return itv;
+        return interval;
       };
       // Speculatively fuses the SPECIFIC pair (i,j) of the current graph on a
       // clone, balances, and returns the resulting interval (-1 if illegal).
-      // Node order is deterministic across graph.build, so (i,j) identifies the
-      // same pair in the clone as in the real graph.
-      auto speculatePair = [&](int i, int j) -> int64_t {
+      // Node order is deterministic across graph.build, so the index pair
+      // identifies the same tasks in the clone as in the real graph.
+      auto speculatePair = [&](int first_task_idx,
+                               int second_task_idx) -> int64_t {
         auto tmp_mod = ModuleOp::create(func.getLoc());
-        OpBuilder tb(tmp_mod.getBodyRegion());
-        auto tmp_func = cast<func::FuncOp>(tb.clone(*func.getOperation()));
-        TaskDependencyGraph g;
-        configureGraph(g);
-        g.build(tmp_func, use_analytical);
-        if (i >= (int)g.nodes.size() || j >= (int)g.nodes.size()) {
+        OpBuilder tmp_builder(tmp_mod.getBodyRegion());
+        auto tmp_func =
+            cast<func::FuncOp>(tmp_builder.clone(*func.getOperation()));
+        TaskDependencyGraph speculative_graph;
+        configureGraph(speculative_graph, /*top_k_override=*/0);
+        speculative_graph.build(tmp_func, use_analytical);
+        const int node_count = (int)speculative_graph.nodes.size();
+        if (first_task_idx >= node_count || second_task_idx >= node_count) {
           tmp_mod.erase();
           return -1;
         }
-        TaskGraphNode *na = g.nodes[i].get(), *nb = g.nodes[j].get();
-        UtilizationFuser f;
-        if (!f.canFuse(na, nb, g)) {
+        TaskGraphNode *first_node =
+            speculative_graph.nodes[first_task_idx].get();
+        TaskGraphNode *second_node =
+            speculative_graph.nodes[second_task_idx].get();
+        UtilizationFuser fuser;
+        if (!fuser.canFuse(first_node, second_node, speculative_graph)) {
           tmp_mod.erase();
           return -1;
         }
-        auto pf = [&g, use_analytical](TaskGraphNode *n, TaskflowTaskOp t) {
-          g.profileTask(n, t, /*skip_mapper=*/use_analytical);
+        auto fusion_profile_fn = [&speculative_graph, use_analytical](
+                                     TaskGraphNode *node, TaskflowTaskOp task) {
+          speculative_graph.profileTask(node, task,
+                                        /*skip_mapper=*/use_analytical);
         };
-        f.fuseNodes(tmp_func, na, nb, g, pf);
-        g = TaskDependencyGraph();
-        configureGraph(g);
-        g.build(tmp_func, use_analytical);
-        auto bpf = [&g](TaskGraphNode *n, TaskflowTaskOp t) {
-          g.profileTask(n, t, /*skip_mapper=*/true);
+        fuser.fuseNodes(tmp_func, first_node, second_node, speculative_graph,
+                        fusion_profile_fn);
+        speculative_graph = TaskDependencyGraph();
+        configureGraph(speculative_graph, /*top_k_override=*/0);
+        speculative_graph.build(tmp_func, use_analytical);
+        // `profileWithBestShape` for the same reason as in `speculate` above.
+        auto speculative_profile_fn = [&speculative_graph](
+                                          TaskGraphNode *node,
+                                          TaskflowTaskOp task) {
+          speculative_graph.profileWithBestShape(node, task,
+                                                 /*skip_mapper=*/true);
         };
-        // The fusion decision must be SCORED in the same decision space the
-        // real balancer will use, otherwise fusion looks free when it actually
-        // costs the `dlp_replicable` tag that replicas/tiling are gated on.
-        PipelineBalancer b;
-        configureBalancer(b);
-        b.balance(g, bpf);
-        int64_t itv = graphInterval(g);
+        PipelineBalancer balancer;
+        configureBalancer(balancer, /*top_k_override=*/0);
+        balancer.balance(speculative_graph, speculative_profile_fn);
+        int64_t interval = scoreClone(speculative_graph, tmp_func);
         tmp_mod.erase();
-        return itv;
+        return interval;
       };
       // --force-partition parsing: original task index -> target group id.
       llvm::DenseMap<int, int> forceGroup;
       if (!forcePartition.getValue().empty()) {
         llvm::SmallVector<llvm::StringRef> groups;
         llvm::StringRef(forcePartition.getValue()).split(groups, ';');
-        for (int gi = 0; gi < (int)groups.size(); ++gi) {
+        for (int group_idx = 0; group_idx < (int)groups.size();
+             ++group_idx) {
           llvm::SmallVector<llvm::StringRef> ids;
-          groups[gi].split(ids, ',');
+          groups[group_idx].split(ids, ',');
           for (auto id : ids) {
-            int v;
-            if (!id.trim().getAsInteger(10, v))
-              forceGroup[v] = gi;
+            int task_index;
+            if (!id.trim().getAsInteger(10, task_index))
+              forceGroup[task_index] = group_idx;
           }
         }
       }
       // Extracts original task indices from a (possibly fused) task name like
       // "Task_3_Task_5_utilfused" -> {3,5}.
-      auto origIds = [](llvm::StringRef name) {
-        llvm::SmallVector<int> out;
-        size_t p = 0;
-        while ((p = name.find("Task_", p)) != llvm::StringRef::npos) {
-          p += 5;
-          size_t q = p;
-          while (q < name.size() && name[q] >= '0' && name[q] <= '9')
-            ++q;
-          int v;
-          if (q > p && !name.substr(p, q - p).getAsInteger(10, v))
-            out.push_back(v);
-          p = q;
+      auto originalTaskIndices = [](llvm::StringRef name) {
+        llvm::SmallVector<int> task_indices;
+        size_t scan_pos = 0;
+        while ((scan_pos = name.find("Task_", scan_pos)) !=
+               llvm::StringRef::npos) {
+          scan_pos += 5;
+          size_t digits_end = scan_pos;
+          while (digits_end < name.size() && name[digits_end] >= '0' &&
+                 name[digits_end] <= '9')
+            ++digits_end;
+          int task_index;
+          if (digits_end > scan_pos &&
+              !name.substr(scan_pos, digits_end - scan_pos)
+                   .getAsInteger(10, task_index))
+            task_indices.push_back(task_index);
+          scan_pos = digits_end;
         }
-        return out;
+        return task_indices;
       };
       bool fuse_changed = false;
       if (!forcePartition.getValue().empty()) {
         // Fuse one within-group pair per iteration until each target group is a
         // single task (offline exhaustive-partition evaluation).
-        TaskGraphNode *fa = nullptr, *fb = nullptr;
-        for (int i = 0; i < (int)graph.nodes.size() && !fa; ++i)
-          for (int j = i + 1; j < (int)graph.nodes.size(); ++j) {
-            std::string na = graph.nodes[i]->op.getTaskName().str();
-            std::string nb = graph.nodes[j]->op.getTaskName().str();
-            auto ia = origIds(na), ib = origIds(nb);
-            if (ia.empty() || ib.empty())
+        TaskGraphNode *first_node = nullptr, *second_node = nullptr;
+        const int node_count = (int)graph.nodes.size();
+        for (int first = 0; first < node_count && !first_node; ++first)
+          for (int second = first + 1; second < node_count; ++second) {
+            auto first_indices = originalTaskIndices(
+                graph.nodes[first]->op.getTaskName());
+            auto second_indices = originalTaskIndices(
+                graph.nodes[second]->op.getTaskName());
+            if (first_indices.empty() || second_indices.empty())
               continue;
-            int gid = forceGroup.count(ia[0]) ? forceGroup[ia[0]] : -1;
-            bool same = (gid >= 0);
-            for (int v : ia)
-              same = same && forceGroup.count(v) && forceGroup[v] == gid;
-            for (int v : ib)
-              same = same && forceGroup.count(v) && forceGroup[v] == gid;
-            if (same && fuser.canFuse(graph.nodes[i].get(),
-                                      graph.nodes[j].get(), graph)) {
-              fa = graph.nodes[i].get();
-              fb = graph.nodes[j].get();
+            const int group_id = forceGroup.count(first_indices[0])
+                                     ? forceGroup[first_indices[0]]
+                                     : -1;
+            bool same_group = (group_id >= 0);
+            for (int task_index : first_indices)
+              same_group = same_group && forceGroup.count(task_index) &&
+                           forceGroup[task_index] == group_id;
+            for (int task_index : second_indices)
+              same_group = same_group && forceGroup.count(task_index) &&
+                           forceGroup[task_index] == group_id;
+            if (same_group && fuser.canFuse(graph.nodes[first].get(),
+                                            graph.nodes[second].get(), graph)) {
+              first_node = graph.nodes[first].get();
+              second_node = graph.nodes[second].get();
               break;
             }
           }
-        if (fa)
-          fuse_changed = fuser.fuseNodes(func, fa, fb, graph, profile_fn);
+        if (first_node)
+          fuse_changed = fuser.fuseNodes(func, first_node, second_node, graph,
+                                         profile_fn);
       } else if (disableFusion.getValue()) {
         // balance-only ablation: never fuse.
       } else if (globalFusion.getValue()) {
-        // Best-first: rank ALL candidate pairs by resulting balanced interval,
-        // commit the globally-best one, only if it beats not fusing.
-        int64_t i_nofuse = speculate(/*do_fuse=*/false);
-        int64_t best = i_nofuse;
-        int bi = -1, bj = -1;
-        int n = (int)graph.nodes.size();
-        for (int i = 0; i < n; ++i)
-          for (int j = i + 1; j < n; ++j) {
-            int64_t v = speculatePair(i, j);
-            if (v >= 0 && v < best) {
-              best = v;
-              bi = i;
-              bj = j;
-            }
+        // Rank every candidate pair cheaply, then verify only the top few.
+        //
+        // The selection is still global -- no pair is excluded by a local rule
+        // like Neura's trip-diff -- but the expensive step is not. Scoring a
+        // pair by actually fusing it costs a module clone, a graph rebuild and
+        // a balance, and doing that for all O(V^2) pairs, every outer
+        // iteration, is what made this pass slow: on `bicg` (19 tasks, 171
+        // pairs) the run took 136s against 15.6s with fusion ranking off, and
+        // the ranking is the whole of that difference.
+        //
+        // That is the same failure this project set out to fix on the shape
+        // axis -- mapping every candidate to compare it does not scale -- so it
+        // gets the same treatment: rank with the cost model, verify the top-k.
+        const int64_t interval_without_fusion = speculate(/*do_fuse=*/false);
+        int64_t best_interval = interval_without_fusion;
+        int best_first = -1, best_second = -1;
+        const int node_count = (int)graph.nodes.size();
+
+        // Cheap score for fusing (a, b), with no clone: the two floors of the
+        // objective, evaluated on the graph that fusion would produce. Fusing
+        // puts both bodies on one tile array, so their ResMII adds and their
+        // trip counts merge to the larger -- the mechanism that makes
+        // unconditional fusion lose. The pipeline cycle is left out; this value
+        // only orders the shortlist, and the survivors are scored for real.
+        auto rankFusion = [&](int first, int second) -> int64_t {
+          const TaskGraphNode *lhs = graph.nodes[first].get();
+          const TaskGraphNode *rhs = graph.nodes[second].get();
+          const int64_t fused_ii = lhs->ii + rhs->ii;
+          const int64_t fused_steps = std::max(lhs->steps, rhs->steps);
+          const int64_t fused_trip =
+              std::max(lhs->trip_count, rhs->trip_count);
+          const int64_t fused_latency =
+              fused_ii * std::max<int64_t>(0, fused_trip - 1) + fused_steps;
+          const int fused_cells =
+              std::max(lhs->allocatedCgras(), rhs->allocatedCgras());
+
+          int64_t task_floor = fused_latency;
+          int64_t area_time = fused_latency * fused_cells;
+          for (auto &other : graph.nodes) {
+            if (other.get() == lhs || other.get() == rhs)
+              continue;
+            const int64_t latency = other->estimatedLatency();
+            task_floor = std::max(task_floor, latency);
+            area_time += latency * other->allocatedCgras();
           }
-        if (bi >= 0) {
+          return std::max<int64_t>(
+              task_floor, llvm::divideCeil(area_time, (int64_t)kTotalCGRAs));
+        };
+
+        SmallVector<std::pair<int64_t, std::pair<int, int>>> ranked;
+        for (int first = 0; first < node_count; ++first)
+          for (int second = first + 1; second < node_count; ++second)
+            if (fuser.canFuse(graph.nodes[first].get(),
+                              graph.nodes[second].get(), graph))
+              ranked.push_back(
+                  {rankFusion(first, second), {first, second}});
+        llvm::sort(ranked);
+
+        const int verify_limit = verifyTopK.getValue();
+        const int to_verify =
+            verify_limit <= 0
+                ? (int)ranked.size()
+                : std::min<int>(verify_limit, (int)ranked.size());
+        llvm::errs() << "[ResourceAware] global-fusion: " << ranked.size()
+                     << " legal pairs, verifying top " << to_verify << "\n";
+        for (int candidate = 0; candidate < to_verify; ++candidate) {
+          const auto [first, second] = ranked[candidate].second;
+          const int64_t candidate_interval = speculatePair(first, second);
+          if (candidate_interval >= 0 && candidate_interval < best_interval) {
+            best_interval = candidate_interval;
+            best_first = first;
+            best_second = second;
+          }
+        }
+        if (best_first >= 0) {
           llvm::errs() << "[ResourceAware] global-fusion: commit best pair ("
-                       << bi << "," << bj << ") interval " << i_nofuse << "->"
-                       << best << "\n";
-          fuse_changed =
-              fuser.fuseNodes(func, graph.nodes[bi].get(),
-                              graph.nodes[bj].get(), graph, profile_fn);
+                       << best_first << "," << best_second << ") interval "
+                       << interval_without_fusion << "->" << best_interval
+                       << "\n";
+          fuse_changed = fuser.fuseNodes(func, graph.nodes[best_first].get(),
+                                         graph.nodes[best_second].get(), graph,
+                                         profile_fn);
         } else {
           llvm::errs() << "[ResourceAware] global-fusion: no improving pair "
                           "(nofuse="
-                       << i_nofuse << ")\n";
+                       << interval_without_fusion << ")\n";
         }
       } else if (!costGuidedFusion.getValue()) {
         fuse_changed =
             fuser.fuse(func, graph, profile_fn); // legacy unconditional
       } else {
-        int64_t i_fuse = speculate(/*do_fuse=*/true);
-        if (i_fuse < 0) {
+        const int64_t interval_with_fusion = speculate(/*do_fuse=*/true);
+        if (interval_with_fusion < 0) {
           // no legal fusion available.
         } else {
-          int64_t i_nofuse = speculate(/*do_fuse=*/false);
-          if (i_fuse < i_nofuse) {
+          const int64_t interval_without_fusion = speculate(/*do_fuse=*/false);
+          if (interval_with_fusion < interval_without_fusion) {
             fuse_changed =
-                fuser.fuse(func, graph, profile_fn); // commit — it helps
+                fuser.fuse(func, graph, profile_fn); // commit -- it helps
           } else {
             llvm::errs() << "[ResourceAware] cost-guided: skip fusion (nofuse="
-                         << i_nofuse << " <= fuse=" << i_fuse << ")\n";
+                         << interval_without_fusion
+                         << " <= fuse=" << interval_with_fusion << ")\n";
           }
         }
       }
@@ -4748,90 +6103,100 @@ struct ResourceAwareTaskOptimizationPass
       // analytical latency curve, vs Neura's greedy bottleneck balance.
       //
       // The configuration of a task is the triple (c, k, T):
-      //   c = cgra_count  (tile-array size; changes II, needs a re-profile)
-      //   k = replicas    (data-parallel copies; divides the iteration space)
-      //   T = tiling      (loop partitioning; divides the iteration space and
-      //                    scales the per-iteration work, hence ResMII)
-      // Cost in CGRAs is c*k; k and T are analytic on top of the per-c profile,
-      // so each task is profiled only kMaxCgrasPerTask times.
       // Every legal (cgra_count, replicas, tiling) for every task, with the
-      // latency and area each one costs. This is THE decision space: the exact
-      // allocator optimises over it, `dump-config-space` writes it out so an
-      // external solver can optimise over the same one, and nothing else
+      // latency and cell count each one costs. This is THE decision space: the
+      // exact allocator optimises over it, `dump-config-space` writes it out so
+      // an external solver can optimise over the same one, and nothing else
       // re-derives what is legal.
+      //
+      // Only `cgra_count` changes the mapped tile array, so only it needs a
+      // re-profile; replicas and tiling are analytic on top of that profile.
+      // Each task is therefore profiled kMaxCgrasPerTask times, not once per
+      // configuration.
       auto enumerateConfigSpace =
-          [&](TaskDependencyGraph &g) -> std::vector<std::vector<TaskConfig>> {
-        const int n = (int)g.nodes.size();
-        const int max_k = enableReplicas.getValue() ? kTotalCGRAs : 1;
-        const int max_t =
+          [&](TaskDependencyGraph &graph)
+          -> std::vector<std::vector<TaskConfig>> {
+        const int task_count = (int)graph.nodes.size();
+        const int replica_limit = enableReplicas.getValue() ? kTotalCGRAs : 1;
+        const int tiling_limit =
             enableTiling.getValue() ? std::max(1, maxTiling.getValue()) : 1;
-        std::vector<std::vector<TaskConfig>> configs(n);
-        for (int i = 0; i < n; ++i) {
-          TaskGraphNode *nd = g.nodes[i].get();
-          const int savec = nd->cgra_count, savek = nd->replicas,
-                    savet = nd->tiling;
-          const CgraShape saveshape = nd->shape;
-          const int64_t saveii = nd->ii, savesteps = nd->steps;
-          for (int c = 1; c <= kMaxCgrasPerTask; ++c) {
-            if (!canFitOnGrid(c))
+        std::vector<std::vector<TaskConfig>> configs(task_count);
+        for (int task_idx = 0; task_idx < task_count; ++task_idx) {
+          TaskGraphNode *node = graph.nodes[task_idx].get();
+          const int saved_cgra_count = node->cgra_count;
+          const int saved_replicas = node->replicas;
+          const int saved_tiling = node->tiling;
+          const CgraShape saved_shape = node->shape;
+          const int64_t saved_ii = node->ii, saved_steps = node->steps;
+          for (int cgra_count = 1; cgra_count <= kMaxCgrasPerTask;
+               ++cgra_count) {
+            if (!canFitOnGrid(cgra_count))
               continue;
-            nd->cgra_count = c;
-            g.profileWithBestShape(nd, nd->op, /*skip_mapper=*/true);
-            const int k_hi = nd->dlp_replicable ? max_k : 1;
-            const int t_hi = max_t; // tiling needs no DLP tag
-            for (int k = 1; k <= k_hi; ++k) {
-              for (int t = 1; t <= t_hi; t *= 2) {
-                // A tiled task becomes t separate tasks, EACH holding c*k
-                // CGRAs. Charging only c*k (as this allocator used to) hides a
-                // factor of t and lets the "exact" allocation ask for 128
-                // CGRAs on a 16-cell grid.
-                const int64_t area = (int64_t)c * k * t;
-                if (area > kTotalCGRAs)
+            node->cgra_count = cgra_count;
+            graph.profileWithBestShape(node, node->op, /*skip_mapper=*/true);
+            const int max_replicas = node->dlp_replicable ? replica_limit : 1;
+            const int max_tiling = tiling_limit; // tiling needs no DLP tag
+            for (int replicas = 1; replicas <= max_replicas; ++replicas) {
+              for (int tiling = 1; tiling <= max_tiling; tiling *= 2) {
+                // A tiled task becomes `tiling` separate tasks, EACH holding
+                // cgra_count * replicas cells. Charging only cgra_count *
+                // replicas (as this allocator used to) hides a factor of
+                // `tiling` and lets the "exact" allocation ask for 128 cells on
+                // a 16-cell grid.
+                const int64_t cells =
+                    (int64_t)cgra_count * replicas * tiling;
+                // The cap is the same budget the allocators enforce. Capping a
+                // single task at the spatial grid while the allocators size the
+                // SUM against the temporal budget made the enumerated space a
+                // strict subset of the greedy's, so the exact allocator and any
+                // solver reading `--dump-config-space` optimised over a smaller
+                // problem than the one they were compared against.
+                if (cells > perTaskCellBudget())
                   break;
-                // Both moves draw from the same partition space.
-                if ((int64_t)k * t > nd->split_space)
+                // Both DLP moves draw from the same partition space.
+                if ((int64_t)replicas * tiling > node->split_space)
                   break;
                 // Tiling must be realisable as a cut of the loop nest.
-                if (t > 1 && !TaskTiler::canTile(nd->op, t))
+                if (tiling > 1 && !TaskTiler::canTile(node->op, tiling))
                   continue;
-                nd->replicas = k;
-                nd->tiling = t;
-                configs[i].push_back(
-                    {c, k, t, (int)area, nd->estimatedLatency()});
+                node->replicas = replicas;
+                node->tiling = tiling;
+                configs[task_idx].push_back({cgra_count, replicas, tiling,
+                                             (int)cells,
+                                             node->estimatedLatency()});
               }
-              if ((int64_t)c * (k + 1) > kTotalCGRAs)
+              if ((int64_t)cgra_count * (replicas + 1) > kTotalCGRAs)
                 break;
             }
           }
-          nd->cgra_count = savec;
-          nd->replicas = savek;
-          nd->tiling = savet;
-          nd->shape = saveshape;
-          nd->ii = saveii;
-          nd->steps = savesteps;
+          node->cgra_count = saved_cgra_count;
+          node->replicas = saved_replicas;
+          node->tiling = saved_tiling;
+          node->shape = saved_shape;
+          node->ii = saved_ii;
+          node->steps = saved_steps;
         }
         return configs;
       };
 
-      auto optimalFissionAllocate = [&](TaskDependencyGraph &g) -> bool {
-        int n = (int)g.nodes.size();
-        if (n == 0)
+      auto optimalFissionAllocate = [&](TaskDependencyGraph &graph) -> bool {
+        int task_count = (int)graph.nodes.size();
+        if (task_count == 0)
           return false;
         using Config = TaskConfig;
-        std::vector<std::vector<Config>> configs = enumerateConfigSpace(g);
-        for (int i = 0; i < n; ++i)
+        std::vector<std::vector<Config>> configs = enumerateConfigSpace(graph);
+        for (int i = 0; i < task_count; ++i)
           if (configs[i].empty())
             return false;
 
-        // Min feasible latency target L: for each task take the cheapest config
-        // meeting L; feasible iff the total CGRA cost fits the grid.
+        // Minimum feasible latency target: for each task take the cheapest config
+        // meeting latency_target; feasible iff the total CGRA cost fits the grid.
         std::vector<int64_t> targets;
         for (auto &row : configs)
-          for (auto &cf : row)
-            targets.push_back(cf.lat);
-        std::sort(targets.begin(), targets.end());
-        targets.erase(std::unique(targets.begin(), targets.end()),
-                      targets.end());
+          for (auto &config : row)
+            targets.push_back(config.latency);
+        llvm::sort(targets);
+        targets.erase(llvm::unique(targets), targets.end());
 
         // Sweeps the latency target. For each target take the cheapest config
         // per task that meets it; that is the exact min-max allocation under a
@@ -4841,17 +6206,64 @@ struct ResourceAwareTaskOptimizationPass
         // min-max optimum but NOT the optimum of the objective the rest of the
         // pass is minimising -- that is why its prediction did not survive
         // materialisation. Every feasible target is now scored with
-        // g.objective() and the best is kept, so "exact" means exact for the
+        // graph.objective() and the best is kept, so "exact" means exact for the
         // objective actually in use.
-        std::vector<Config> best_alloc;
-        int64_t best_obj = INT64_MAX;
+        std::vector<Config> best_picked;
+        int64_t best_objective = INT64_MAX;
         const int grid_budget = allowTemporal.getValue()
                                     ? kTotalCGRAs * kMaxTemporalWaves
                                     : kTotalCGRAs;
         // Saves the live state so scoring can mutate the graph freely.
-        std::vector<std::tuple<int, int, int>> saved;
-        for (auto &nd : g.nodes)
-          saved.emplace_back(nd->cgra_count, nd->replicas, nd->tiling);
+        std::vector<std::tuple<int, int, int>> saved_state;
+        for (auto &node : graph.nodes)
+          saved_state.emplace_back(node->cgra_count, node->replicas, node->tiling);
+
+        // Installs an allocation and re-profiles every task on it.
+        //
+        // `graph.objective()` derives each task's latency from `node->ii`, and
+        // `ii` is a property of the tile array, not of the allocation record.
+        // `enumerateConfigSpace` restores the incumbent's `ii` on exit, so
+        // scoring a candidate without re-profiling scores its cgra_count
+        // against the incumbent's II: every move that grows the array is priced
+        // as if it bought nothing, and every move that shrinks it is priced as
+        // if it cost nothing. On gemv, whose II falls from 26 to 8 between
+        // cgra_count 1 and 3, that returned cgra_count=1 for all 18 tasks.
+        // The profile cache absorbs the cost -- `enumerateConfigSpace` has
+        // already profiled every one of these configurations.
+        auto installAndProfile = [&](llvm::ArrayRef<Config> allocation) {
+          for (int i = 0; i < task_count; ++i) {
+            TaskGraphNode *node = graph.nodes[i].get();
+            node->cgra_count = allocation[i].cgra_count;
+            node->replicas = allocation[i].replicas;
+            node->tiling = allocation[i].tiling;
+            graph.profileWithBestShape(node, node->op, /*skip_mapper=*/true);
+          }
+        };
+
+        // Every (rule, target) pair produces one complete allocation, and
+        // there are many: 84 on bicg, 104 on cnn_tiled. Scoring one for real
+        // means re-profiling every task and running the pipeline-cycle list
+        // schedule, so scoring them all is the same cost blow-up the fusion
+        // ranking had -- and it gets the same treatment. Each candidate is
+        // ranked by a closed-form score that reads only the enumerated
+        // (latency, cells) records, then the top `verify-top-k` are installed,
+        // profiled and scored by the objective that actually decides.
+        //
+        // The ranking score is the two floors. It is exactly the part of the
+        // objective that is separable, so it costs nothing beyond arithmetic
+        // already done during enumeration; the part it omits, the pipeline
+        // cycle, is what the verification adds back.
+        auto cheapAllocationScore =
+            [&](llvm::ArrayRef<Config> allocation) -> int64_t {
+          int64_t task_floor = 0, area_time = 0;
+          for (const Config &config : allocation) {
+            task_floor = std::max(task_floor, config.latency);
+            area_time += config.latency * (int64_t)config.cells;
+          }
+          return std::max<int64_t>(
+              task_floor, llvm::divideCeil(area_time, (int64_t)kTotalCGRAs));
+        };
+        SmallVector<std::pair<int64_t, std::vector<Config>>> candidates;
 
         // Two per-task rules, both scored with the real objective.
         //
@@ -4863,22 +6275,22 @@ struct ResourceAwareTaskOptimizationPass
         // decides. On cnn_tiled the area rule alone returned an allocation the
         // objective scored 154550 while the hill-climb reached 60342.
         for (int rule = 0; rule < 2; ++rule)
-          for (int64_t L : targets) {
-            long sum = 0;
-            std::vector<Config> alloc;
+          for (int64_t latency_target : targets) {
+            int64_t total_cells = 0;
+            std::vector<Config> picked;
             bool ok = true;
-            for (int i = 0; i < n && ok; ++i) {
+            for (int i = 0; i < task_count && ok; ++i) {
               const Config *pick = nullptr;
-              for (const Config &cf : configs[i]) {
-                if (cf.lat > L)
+              for (const Config &config : configs[i]) {
+                if (config.latency > latency_target)
                   continue;
                 // Which config is "best at this latency target" depends on the
                 // objective, and getting this wrong is what made the exact
                 // allocator lose to the greedy one:
                 //
                 //  pipeline: the objective is max(max_t lat, ceil(sum_t
-                //    lat*area / 16)). Given the target L, the task floor is
-                //    already satisfied by lat <= L, so the exact choice per
+                //    lat*area / 16)). Given the target latency_target, the task floor is
+                //    already satisfied by lat <= latency_target, so the exact choice per
                 //    task is the one minimising its own lat*area contribution
                 //    to the resource floor -- a separable sum, so termwise
                 //    minimisation is exact. Minimising raw AREA instead (the
@@ -4889,68 +6301,95 @@ struct ResourceAwareTaskOptimizationPass
                 //    cheapest config meeting the target is the right pick.
                 bool better;
                 if (rule == 0) {
-                  int64_t a = cf.lat * (int64_t)cf.cost;
-                  int64_t b = pick ? pick->lat * (int64_t)pick->cost : 0;
-                  better = !pick || a < b || (a == b && cf.lat < pick->lat);
+                  const int64_t cand_area_time =
+                      config.latency * (int64_t)config.cells;
+                  const int64_t best_area_time =
+                      pick ? pick->latency * (int64_t)pick->cells : 0;
+                  better = !pick || cand_area_time < best_area_time ||
+                           (cand_area_time == best_area_time &&
+                            config.latency < pick->latency);
                 } else {
-                  better = !pick || cf.cost < pick->cost ||
-                           (cf.cost == pick->cost && cf.lat < pick->lat);
+                  better = !pick || config.cells < pick->cells ||
+                           (config.cells == pick->cells && config.latency < pick->latency);
                 }
                 if (better)
-                  pick = &cf;
+                  pick = &config;
               }
               if (!pick)
                 ok = false;
               else {
-                alloc.push_back(*pick);
-                sum += pick->cost;
+                picked.push_back(*pick);
+                total_cells += pick->cells;
               }
             }
-            if (!ok || sum > grid_budget)
+            if (!ok || total_cells > grid_budget)
               continue;
-            for (int i = 0; i < n; ++i) {
-              g.nodes[i]->cgra_count = alloc[i].c;
-              g.nodes[i]->replicas = alloc[i].k;
-              g.nodes[i]->tiling = alloc[i].t;
-            }
-            int64_t obj = g.objective();
-            if (obj < best_obj) {
-              best_obj = obj;
-              best_alloc = alloc;
-            }
+            candidates.push_back({cheapAllocationScore(picked),
+                                  std::move(picked)});
           }
+        llvm::sort(candidates, [](const auto &lhs, const auto &rhs) {
+          return lhs.first < rhs.first;
+        });
+        const int verify_limit = verifyTopK.getValue();
+        const int to_verify =
+            verify_limit <= 0
+                ? (int)candidates.size()
+                : std::min<int>(verify_limit, (int)candidates.size());
+        llvm::errs() << "  [OptimalFission] " << candidates.size()
+                     << " feasible allocations, verifying top " << to_verify
+                     << "\n";
+        for (int candidate = 0; candidate < to_verify; ++candidate) {
+          installAndProfile(candidates[candidate].second);
+          const int64_t objective_value = graph.objective();
+          if (objective_value < best_objective) {
+            best_objective = objective_value;
+            best_picked = candidates[candidate].second;
+          }
+        }
+
         // The incumbent is a candidate too. The sweep only visits one
         // allocation per (rule, target), so nothing guarantees it dominates the
-        // allocation the graph arrived with.
-        for (int i = 0; i < n; ++i) {
-          std::tie(g.nodes[i]->cgra_count, g.nodes[i]->replicas,
-                   g.nodes[i]->tiling) = saved[i];
+        // allocation the graph arrived with. It is re-profiled like any other
+        // candidate: `graph.objective()` reads each node's `ii`, so scoring the
+        // incumbent on the II left behind by the last candidate compares two
+        // different allocations.
+        SmallVector<Config> incumbent;
+        for (int i = 0; i < task_count; ++i) {
+          Config config;
+          std::tie(config.cgra_count, config.replicas, config.tiling) =
+              saved_state[i];
+          incumbent.push_back(config);
         }
-        if (best_alloc.empty() || g.objective() <= best_obj)
+        installAndProfile(incumbent);
+        if (best_picked.empty() || graph.objective() <= best_objective)
           return false;
 
         bool changed = false;
-        for (int i = 0; i < n; ++i) {
-          TaskGraphNode *nd = g.nodes[i].get();
-          const Config &cf = best_alloc[i];
-          if (nd->cgra_count != cf.c || nd->replicas != cf.k ||
-              nd->tiling != cf.t)
+        for (int i = 0; i < task_count; ++i) {
+          TaskGraphNode *node = graph.nodes[i].get();
+          const Config &config = best_picked[i];
+          if (node->cgra_count != config.cgra_count || node->replicas != config.replicas ||
+              node->tiling != config.tiling)
             changed = true;
-          nd->cgra_count = cf.c;
-          nd->replicas = cf.k;
-          nd->tiling = cf.t;
-          g.profileWithBestShape(nd, nd->op, /*skip_mapper=*/true);
-          llvm::errs() << "  [OptimalFission] " << nd->op.getTaskName()
-                       << " -> cgra_count=" << cf.c << ", replicas=" << cf.k
-                       << ", tiling=" << cf.t << ", cores=" << cf.cost
-                       << ", est_latency=" << nd->estimatedLatency() << "\n";
+          node->cgra_count = config.cgra_count;
+          node->replicas = config.replicas;
+          node->tiling = config.tiling;
+          graph.profileWithBestShape(node, node->op, /*skip_mapper=*/true);
+          llvm::errs() << "  [OptimalFission] " << node->op.getTaskName()
+                       << " -> cgra_count=" << config.cgra_count << ", replicas=" << config.replicas
+                       << ", tiling=" << config.tiling << ", cores=" << config.cells
+                       << ", est_latency=" << node->estimatedLatency() << "\n";
         }
         return changed;
       };
       // Writes the decision space (and the DAG it is scored on) so an external
       // solver can be held to exactly this problem. Emitted before the
-      // allocation runs, because profiling mutates the nodes.
-      if (!dumpConfigSpace.getValue().empty())
+      // allocation runs, because profiling mutates the nodes, and only on the
+      // first outer iteration: later iterations see a graph fusion has already
+      // rewritten, so writing every time left the file describing a different
+      // problem from the one the comment promises, at the cost of a full
+      // re-enumeration each round.
+      if (!dumpConfigSpace.getValue().empty() && outer == 0)
         writeConfigSpace(graph, enumerateConfigSpace(graph),
                          dumpConfigSpace.getValue());
 
@@ -4965,6 +6404,14 @@ struct ResourceAwareTaskOptimizationPass
         balance_changed = balancer.balance(graph, balance_profile_fn);
       } else {
         // Score a shortlist of complete allocations, keep the best.
+        //
+        // This one is not ranked-then-verified, unlike the fusion-pair,
+        // allocation, shape and per-move shortlists. Those enumerate candidates
+        // that are cheap to describe and expensive to evaluate, which is what
+        // makes a cheap ranking worth having. Here each candidate IS the output
+        // of a whole search, so generating it is the expensive part and there
+        // is nothing to rank before paying for it; scoring the four that come
+        // out costs four objective evaluations.
         //
         // Each strategy is a hill-climb on its own surface and each has a
         // failure mode the others do not: the per-task rule cannot see the
@@ -5126,24 +6573,40 @@ struct ResourceAwareTaskOptimizationPass
           llvm::errs() << "[ResourceAware] Outer loop hit its iteration limit; "
                        << "materialising the current allocation.\n";
         // Converged — optionally re-profile with the real mapper for accuracy.
-        // When balance-skip-mapper=false, runs the mapper once per task that
-        // had its cgra_count changed, to get authoritative compiled_ii/steps.
+        // When balance-skip-mapper=false, runs the mapper once per task to get
+        // an authoritative compiled_ii/steps for the allocation that was
+        // chosen.
+        //
+        // `use_analytical` used to force this off, which conflated two
+        // different questions: whether the SEARCH consults the mapper, and
+        // whether the RESULT is verified by it. Conflating them makes the
+        // configuration this cost model exists for -- search analytically, map
+        // once at the end -- impossible to express, and therefore impossible to
+        // time against a baseline that does map. An explicit
+        // `balance-skip-mapper=false` now wins; the default is unchanged,
+        // because balanceSkipMapper defaults to true.
         bool balance_skip_mapper =
-            use_analytical || balanceSkipMapper.getValue();
+            use_analytical && balanceSkipMapper.getValue();
         if (!balance_skip_mapper) {
           llvm::errs() << "[ResourceAware] Running final mapper verification "
                        << "for converged allocation...\n";
           for (auto &node : graph.nodes) {
-            // Re-profile with the real mapper to get accurate II/steps. Keeps
-            // the shape the search settled on; only falls back to the geometric
-            // pick when the shape search is off or the shape went stale.
-            if (!searchShape.getValue() ||
-                node->shape.area() < node->cgra_count ||
-                (node->shape.is_rectangular &&
-                 node->shape.area() != node->cgra_count))
+            // This is the one place a real lowering is worth spending, so it is
+            // the one place the shortlist is cashed in: rank every legal shape
+            // by the closed form, then run the actual mapper on the top k and
+            // keep whichever it measures fastest.
+            //
+            // It used to map exactly one shape -- whatever the analytical
+            // search had settled on -- which made `search-shape` a decision
+            // taken entirely on the model. Ranking is still free and still
+            // covers every candidate; only k of them are lowered.
+            if (!searchShape.getValue()) {
               node->shape = pickBestShape(node->cgra_count);
-            graph.profileTask(node.get(), node->op,
-                              /*skip_mapper=*/false);
+              graph.profileTask(node.get(), node->op, /*skip_mapper=*/false);
+              continue;
+            }
+            graph.profileWithBestShape(node.get(), node->op,
+                                       /*skip_mapper=*/false);
           }
         }
 
@@ -5205,58 +6668,53 @@ struct ResourceAwareTaskOptimizationPass
             int tiling, replicas, cgra_count;
             int64_t ii, steps;
           };
-          SmallVector<Decision> decisions;
-          for (auto &node : graph.nodes)
-            decisions.push_back({node->op, node->tiling, node->replicas,
-                                 node->cgra_count, node->ii, node->steps});
-          for (Decision &d : decisions) {
-            // Tiling FIRST: it cuts the root range, and the replica partition
-            // table must be computed over each tile's own (cut) range, not over
-            // the original one — otherwise every tile ships the same table
-            // covering the whole loop and the two moves overlap.
-            SmallVector<TaskflowTaskOp> targets;
-            if (d.tiling > 1) {
-              auto tiles = TaskTiler::tile(d.op, d.tiling, group_id, d.ii,
-                                           d.steps, d.cgra_count, d.replicas);
-              if (tiles.empty()) {
-                ++n_refused;
-                llvm::errs() << "  [Apply] REFUSED tiling=" << d.tiling
-                             << " on " << d.op.getTaskName() << "\n";
-                OpBuilder rb(d.op);
-                d.op->setAttr("tiling", rb.getI32IntegerAttr(1));
-                targets.push_back(d.op);
-              } else {
-                llvm::errs()
-                    << "  [Apply] tiling=" << d.tiling << " -> " << tiles.size()
-                    << " tasks, group " << group_id << "\n";
-                ++n_tiled;
-                ++group_id;
-                targets.assign(tiles.begin(), tiles.end());
-              }
-            } else {
-              targets.push_back(d.op);
-            }
-
-            if (d.replicas > 1) {
-              for (TaskflowTaskOp t : targets) {
-                if (TaskTiler::emitPartitionConfig(t, d.replicas)) {
-                  ++n_replicated;
-                } else {
-                  ++n_refused;
-                  llvm::errs() << "  [Apply] REFUSED replicas=" << d.replicas
-                               << " on " << t.getTaskName()
-                               << " (no partitionable root counter)\n";
-                  OpBuilder rb(t);
-                  t->setAttr("replicas", rb.getI32IntegerAttr(1));
-                }
-              }
-            }
-          }
+          MaterialiseCounts counts =
+              materialiseDecisions(graph, group_id, /*quiet=*/false);
+          n_tiled = counts.tiled;
+          n_replicated = counts.replicated;
+          n_refused = counts.refused;
           // Re-measures on the REWRITTEN IR rather than trusting the search's
           // own estimate, so predicted and materialised can be compared.
           TaskDependencyGraph applied;
           configureGraph(applied);
           applied.build(func, use_analytical);
+          // The verification above ran on the graph BEFORE these decisions were
+          // materialised, so it profiled a task that tiling was about to cut
+          // into `tiling` pieces. That is the wrong body to certify: bicg's
+          // tasks are 404 ops before the cut, which needs ResMII 26 against a
+          // `ctrl_mem_items` ceiling of 20, so the solver correctly answers
+          // "not mappable at this shape" for a task that is never emitted at
+          // that size. Re-verifying here puts the certified II on the bodies
+          // the IR actually carries.
+          //
+          // It runs only for the exact solver. The heuristic mapper is not
+          // worth a second pass over every emitted task, and this path exists
+          // because the certified number is the one that gets published.
+          // `rescore-with=cpsat` is a MEASUREMENT, not a decision. Every choice
+          // above has already been made and materialised; this only re-reads
+          // the result with the exact solver.
+          //
+          // It exists because the arms are otherwise measured with different
+          // instruments. The shipped allocator estimates II with the heuristic
+          // mapper, which runs well above what the solver certifies, so a raw
+          // baseline-vs-ours interval ratio contains the baseline's estimator
+          // error as well as its decisions. Giving the baseline the solver as
+          // its SEARCH estimator would be worse -- that is a compiler nobody
+          // ships. Letting each arm search exactly as it does and then reading
+          // both outcomes with one instrument is what makes the two numbers
+          // comparable.
+          const bool rescore =
+              applied.verifier_is_cpsat || rescoreWith.getValue() == "cpsat";
+          if (rescore) {
+            const bool saved = applied.verifier_is_cpsat;
+            applied.verifier_is_cpsat = true;
+            llvm::errs() << "[ResourceAware] Re-scoring " <<
+                applied.nodes.size() << " materialised tasks with the exact "
+                "solver (measurement only; no decision changes)...\n";
+            for (auto &node : applied.nodes)
+              applied.profileTask(node.get(), node->op, /*skip_mapper=*/false);
+            applied.verifier_is_cpsat = saved;
+          }
           // Refreshes the derived attributes on the rewritten task list: the
           // tiles inherited the pre-cut trip_count / est_latency from their
           // parent when they were cloned.
@@ -5275,6 +6733,9 @@ struct ResourceAwareTaskOptimizationPass
                        << graph.nodes.size() << "->" << applied.nodes.size()
                        << ", objective predicted=" << predicted
                        << " materialised=" << applied.objective() << "\n";
+          if (reportRealInterval.getValue())
+            llvm::errs() << "[Apply] real pipeline interval="
+                         << realPipelineIntervalOf(func) << "\n";
         }
         break;
       }
@@ -5284,6 +6745,11 @@ struct ResourceAwareTaskOptimizationPass
     // grid.
     {
       TaskDependencyGraph final_graph;
+      // Configured like every other graph in this pass: the makespan and the
+      // schedule_start/schedule_finish attributes reported below are computed
+      // from it, and an unconfigured graph reports them with comm_weight = 0
+      // even when the run priced communication.
+      configureGraph(final_graph);
       final_graph.build(func, use_analytical);
       int final_total = final_graph.getTotalAllocatedCGRAs();
 
