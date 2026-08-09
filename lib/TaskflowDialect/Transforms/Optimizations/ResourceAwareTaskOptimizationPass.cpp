@@ -3620,6 +3620,50 @@ public:
       llvm::sort(pool, [](const Scored &a, const Scored &b) {
         return a.score < b.score;
       });
+
+      // Drop members that ARE another member. `getRectangularShapes` and
+      // `getNonRectangularShapes` both offer a 1x2 for two CGRAs, and the
+      // per-cgra_count dedup above compares only shapes, so the same
+      // (cgra_count, shape, replicas, tiling) reaches the pool more than once.
+      //
+      // It cost real verifications. On gemver round 0 the shortlist was
+      //
+      //   cand 0 cgras=2 shape=2x1 replicas=2 tiling=2 scored=9229 measured=4100
+      //   cand 1 cgras=1 shape=1x1 replicas=2 tiling=2 scored=9229 measured=4100
+      //   cand 2 cgras=2 shape=1x2 replicas=2 tiling=2 scored=9229 measured=4100
+      //   cand 3 cgras=2 shape=1x2 replicas=2 tiling=2 scored=9229 measured=4100
+      //
+      // -- four lowerings for three configurations, because cand 2 and cand 3
+      // are the same one. k is the budget the whole design rests on, so
+      // spending a quarter of it re-measuring a config already measured is not
+      // a cosmetic defect: it silently makes the shortlist shallower than the
+      // flag says it is.
+      //
+      // Only exact repeats go. Ties on score are left alone -- two different
+      // configurations that score the same are exactly what the verification
+      // step exists to separate, and dropping one of them because the ranking
+      // could not tell them apart would put the greedy choice back.
+      SmallVector<Scored> distinct;
+      unsigned dropped = 0;
+      for (const Scored &candidate : pool) {
+        bool repeat = false;
+        for (const Scored &kept : distinct)
+          repeat |= kept.cgra_count == candidate.cgra_count &&
+                    kept.replicas == candidate.replicas &&
+                    kept.tiling == candidate.tiling &&
+                    kept.shape.irAttr() == candidate.shape.irAttr();
+        if (repeat)
+          ++dropped;
+        else
+          distinct.push_back(candidate);
+      }
+      if (dropped > 0) {
+        llvm::errs() << "[Joint]   pool: dropped " << dropped
+                     << " duplicate configurations, " << distinct.size()
+                     << " distinct\n";
+        pool = std::move(distinct);
+      }
+
       const unsigned keep = std::min<unsigned>(
           pool.size(), joint_top_k > 0 ? joint_top_k : pool.size());
 
