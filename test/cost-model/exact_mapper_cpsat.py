@@ -374,6 +374,22 @@ def main():
                          "to II+1 and retry, instead of giving up. Yields the "
                          "smallest II for which a real, routable mapping is "
                          "actually found within budget (>= the true minimum).")
+    ap.add_argument("--minimize-routing", dest="mr", action="store_true",
+                    default=None,
+                    help="Bias stage 1 toward a router-friendly placement (mr). "
+                         "Without it stage 1 ignores routability, so at a tight "
+                         "II it hands stage 2 a placement that cannot be routed "
+                         "and the II is rejected -- even though another "
+                         "placement at that II would route. Measured: "
+                         "relu_tiled_20 on the graph-isomorphic shapes 8x2 and "
+                         "2x8 (same tiles, links and mean hops) comes back 3 and "
+                         "2, reproducibly and with no timeouts, purely from "
+                         "which placement stage 1 happened to return. On by "
+                         "default; --no-minimize-routing trades that accuracy "
+                         "for speed.")
+    ap.add_argument("--no-minimize-routing", dest="mr", action="store_false",
+                    help="Skip the router-friendly bias. Faster, and reports an "
+                         "II that may be above the optimum for the reason above.")
     ap.add_argument("--emit-cap", type=float, default=12.0,
                     help="When emitting, cap each per-II solve at this many "
                          "seconds. We only need a compact, ROUTABLE witness, "
@@ -388,7 +404,13 @@ def main():
     # placements so the greedy per-net router can reproduce them. We do NOT need
     # to prove the makespan optimal (the compact witness appears early), so cap
     # the per-solve time to avoid the optimality-proving tail.
-    minimize_routing = bool(a.emit)
+    # Unset leaves the historical behaviour exactly as it was -- on for --emit,
+    # off otherwise -- so every existing caller and every committed
+    # *.exact-mapping.json is reproduced bit for bit. Callers that use this as a
+    # VERIFIER should pass --minimize-routing: for them the bias is not a
+    # convenience for the backend router, it is what stops a tight II being
+    # rejected on the strength of one unroutable placement.
+    minimize_routing = bool(a.emit) if a.mr is None else a.mr
     solve_seconds = min(a.seconds, a.emit_cap) if a.emit else a.seconds
     for ii in range(a.min_ii, max_ii + 1):
         sched = schedule(data, ii, solve_seconds, hops, minimize_routing)

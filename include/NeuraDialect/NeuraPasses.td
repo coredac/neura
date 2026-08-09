@@ -132,6 +132,21 @@ def DumpDfgJson : Pass<"dump-dfg-json", "ModuleOp"> {
     stdout. Consumed by test/cost-model/exact_oracle.py to compute the exact
     minimum-II modulo schedule (the trustworthy oracle).
   }];
+  let options =
+      [Option<
+           "x_tiles", "x-tiles", "int", /*default=*/"0",
+           "Total tiles in X (0 = use the global Architecture singleton).">,
+       Option<
+           "y_tiles", "y-tiles", "int", /*default=*/"0",
+           "Total tiles in Y (0 = use the global Architecture singleton).">,
+       Option<
+           "valid_tiles", "valid-tiles", "std::string", /*default=*/"\"\"",
+           "Comma-separated tile coordinates (x_y) present in a "
+           "non-rectangular shape; empty = all tiles in the rectangle.">,
+       Option<
+           "output_file", "output-file", "std::string", /*default=*/"\"\"",
+           "Write the JSON to this file instead of stdout, so a caller that is "
+           "itself producing output can hand the DFG to the exact mapper.">];
   let constructor = "neura::createDumpDfgJsonPass()";
 }
 

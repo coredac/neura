@@ -18,6 +18,9 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+
+#include "llvm/Support/FileSystem.h"
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/Support/raw_ostream.h"
@@ -64,6 +67,12 @@ struct DumpDfgJsonPass
     : public PassWrapper<DumpDfgJsonPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(DumpDfgJsonPass)
   DumpDfgJsonPass() = default;
+  DumpDfgJsonPass(const DumpDfgJsonOptions &options) : DumpDfgJsonPass() {
+    x_tiles = options.x_tiles;
+    y_tiles = options.y_tiles;
+    valid_tiles = options.valid_tiles;
+    output_file = options.output_file;
+  }
   DumpDfgJsonPass(const DumpDfgJsonPass &pass)
       : PassWrapper<DumpDfgJsonPass, OperationPass<ModuleOp>>(pass) {}
   StringRef getArgument() const override { return "dump-dfg-json"; }
@@ -87,6 +96,14 @@ struct DumpDfgJsonPass
   Option<std::string> valid_tiles{
       *this, "valid-tiles",
       llvm::cl::desc("Comma-separated tile coords (x_y) for non-rect shapes."),
+      llvm::cl::init("")};
+  // Writing to stdout is fine for a human reading one kernel, but the exact
+  // mapper is a separate process that takes a FILE, and a caller that wants to
+  // solve a kernel mid-compilation cannot pick stdout back out of its own
+  // output. With this set the dump goes to the named file instead.
+  Option<std::string> output_file{
+      *this, "output-file",
+      llvm::cl::desc("Write the JSON here instead of stdout."),
       llvm::cl::init("")};
 
   std::unique_ptr<Architecture>
@@ -264,11 +281,25 @@ struct DumpDfgJsonPass
     std::unique_ptr<Architecture> custom_arch = buildCustomArch(global_arch);
     const Architecture &arch = custom_arch ? *custom_arch : global_arch;
     bool emitted = false;
+    std::unique_ptr<llvm::raw_fd_ostream> file_stream;
+    if (!output_file.getValue().empty()) {
+      std::error_code error;
+      file_stream = std::make_unique<llvm::raw_fd_ostream>(
+          output_file.getValue(), error, llvm::sys::fs::OF_Text);
+      if (error) {
+        llvm::errs() << "[dump-dfg-json] cannot write "
+                     << output_file.getValue() << ": " << error.message()
+                     << "\n";
+        signalPassFailure();
+        return;
+      }
+    }
+    llvm::raw_ostream &os = file_stream ? *file_stream : llvm::outs();
     auto tryEmit = [&](Operation *op, Region &region) {
       auto accel_attr = op->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
       if (accel_attr && accel_attr.getValue() == accel::kNeuraTarget &&
           !region.empty()) {
-        emitRegion(region, arch, llvm::outs());
+        emitRegion(region, arch, os);
         emitted = true;
       }
     };
@@ -280,7 +311,7 @@ struct DumpDfgJsonPass
     if (!emitted) {
       module.walk([&](func::FuncOp func) {
         if (!emitted && !func.getBody().empty()) {
-          emitRegion(func.getBody(), arch, llvm::outs());
+          emitRegion(func.getBody(), arch, os);
           emitted = true;
         }
       });
@@ -290,7 +321,7 @@ struct DumpDfgJsonPass
 } // namespace
 
 namespace mlir::neura {
-std::unique_ptr<Pass> createDumpDfgJsonPass() {
-  return std::make_unique<DumpDfgJsonPass>();
+std::unique_ptr<Pass> createDumpDfgJsonPass(const DumpDfgJsonOptions &options) {
+  return std::make_unique<DumpDfgJsonPass>(options);
 }
 } // namespace mlir::neura
