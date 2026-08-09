@@ -14,6 +14,8 @@
 #include "mlir/IR/BuiltinOps.h"
 
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
@@ -368,6 +370,108 @@ IIBound calculateRouteMii(Region &region, const Architecture &arch) {
 }
 
 //===----------------------------------------------------------------------===//
+// meanHopDistance — mean directed tile-to-tile distance over the link graph.
+//
+// BFS from every tile over the real directed links, averaged over the ordered
+// pairs that are actually reachable. Unreachable pairs are skipped rather than
+// charged a sentinel: a disconnected shape would otherwise get an enormous mean
+// and be ranked last for a reason that has nothing to do with its traffic.
+// Self-pairs are excluded -- a value produced and consumed on one tile crosses
+// no link and is not what this term prices.
+//===----------------------------------------------------------------------===//
+double meanHopDistance(const Architecture &arch) {
+  std::vector<Link *> links = arch.getAllLinks();
+  if (links.empty()) {
+    return 0.0;
+  }
+
+  // Adjacency straight off the link list, so any topology works -- mesh,
+  // strip, or the irregular blocks the shape search proposes.
+  llvm::DenseMap<Tile *, llvm::SmallVector<Tile *, 8>> neighbours;
+  llvm::SmallVector<Tile *, 64> tiles;
+  llvm::DenseSet<Tile *> seen;
+  for (Link *link : links) {
+    Tile *src = link->getSrcTile();
+    Tile *dst = link->getDstTile();
+    if (!src || !dst) {
+      continue;
+    }
+    neighbours[src].push_back(dst);
+    for (Tile *tile : {src, dst}) {
+      if (seen.insert(tile).second) {
+        tiles.push_back(tile);
+      }
+    }
+  }
+  if (tiles.size() < 2) {
+    return 0.0;
+  }
+
+  long long total_hops = 0, pairs = 0;
+  llvm::DenseMap<Tile *, int> distance;
+  llvm::SmallVector<Tile *, 64> queue;
+  for (Tile *source : tiles) {
+    distance.clear();
+    queue.clear();
+    distance[source] = 0;
+    queue.push_back(source);
+    for (size_t head = 0; head < queue.size(); ++head) {
+      Tile *current = queue[head];
+      int next_distance = distance[current] + 1;
+      auto found = neighbours.find(current);
+      if (found == neighbours.end()) {
+        continue;
+      }
+      for (Tile *neighbour : found->second) {
+        if (distance.insert({neighbour, next_distance}).second) {
+          queue.push_back(neighbour);
+        }
+      }
+    }
+    for (auto &[tile, hops] : distance) {
+      if (tile == source) {
+        continue;
+      }
+      total_hops += hops;
+      ++pairs;
+    }
+  }
+  return pairs ? (double)total_hops / (double)pairs : 0.0;
+}
+
+//===----------------------------------------------------------------------===//
+// RouteHopMII — RouteMII's demand, charged for distance.
+//
+//   RouteHopMII = ceil( channel_demand * mean_hops / #links )
+//
+// RouteMII prices every transfer at one link, which is why it cannot tell a
+// 4x4 block from a 1x16 strip carrying the same traffic. A value crossing h
+// tiles occupies h links for its residue, so multiplying the demand by the mean
+// hop distance restores the topology signal. Not a lower bound -- a clustered
+// placement can beat the mean -- so it is reported separately and never folded
+// into `final_ii`.
+//===----------------------------------------------------------------------===//
+IIBound calculateRouteHopMii(Region &region, const Architecture &arch) {
+  IIBound bound = calculateRouteMii(region, arch);
+  const double mean_hops = meanHopDistance(arch);
+  // A fabric with no links, or one where RouteMII already declined to apply,
+  // has nothing to scale: keep whatever RouteMII decided rather than inventing
+  // a distance for a transfer that never crosses a link.
+  if (mean_hops <= 1.0 || bound.capacity <= 0 || bound.demand <= 0) {
+    bound.detail += " (route_hop: mean_hops=" + std::to_string(mean_hops) +
+                    ", not applied)";
+    return bound;
+  }
+  const long long scaled_demand =
+      (long long)std::llround((double)bound.demand * mean_hops);
+  bound.value = std::max<int>(1, ceilDiv(scaled_demand, bound.capacity));
+  bound.detail += " mean_hops=" + std::to_string(mean_hops) +
+                  " hop_demand=" + std::to_string(scaled_demand);
+  bound.demand = scaled_demand;
+  return bound;
+}
+
+//===----------------------------------------------------------------------===//
 // RegMII — peak simultaneously-live values vs total register capacity.
 //
 //   For each placed value v with an ASAP def level and a later use, it is
@@ -555,6 +659,19 @@ AnalyticalIIBreakdown computeAnalyticalII(Region &region,
   } else {
     breakdown.final_ii = std::max(1, max_bound_ii);
   }
+
+  // The shape-aware prediction sits on top of the sound floor and never below
+  // it. `final_ii` is left exactly as it was so every existing consumer,
+  // including the pruning proofs that rely on it not over-predicting, is
+  // unaffected; a caller that wants accuracy rather than soundness reads
+  // `predicted_ii`.
+  breakdown.route_hop = calculateRouteHopMii(region, arch);
+  breakdown.mean_hops = meanHopDistance(arch);
+  int predicted = std::max(breakdown.final_ii, breakdown.route_hop.value);
+  if (breakdown.max_ii > 0 && predicted > breakdown.max_ii) {
+    predicted = breakdown.max_ii;
+  }
+  breakdown.predicted_ii = std::max(1, predicted);
   return breakdown;
 }
 
@@ -566,11 +683,15 @@ void AnalyticalIIBreakdown::print(llvm::raw_ostream &os) const {
   os << "  route_mii=" << route.value << " (" << route.detail << ")\n";
   os << "  reg_mii=" << reg.value << " (" << reg.detail << ")\n";
   os << "  issue_mii=" << issue.value << " (" << issue.detail << ")\n";
+  os << "  route_hop_mii=" << route_hop.value << " (" << route_hop.detail
+     << ")\n";
   os << "  final_ii=" << final_ii << " (dominant=" << dominant;
   if (clamped) {
     os << ", clamped-to-max_ii=" << max_ii;
   }
   os << ")\n";
+  os << "  predicted_ii=" << predicted_ii << " (mean_hops=" << mean_hops
+     << ")\n";
 }
 
 } // namespace neura
