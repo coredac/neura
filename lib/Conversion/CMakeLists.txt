@@ -6,8 +6,6 @@ add_subdirectory(LlvmToNeura)
 add_subdirectory(MemRefToNeura)
 add_subdirectory(BuiltinToNeura)
 add_subdirectory(TorchToNeura)
-add_subdirectory(AffineToTaskflow)
-add_subdirectory(TaskflowToNeura)
 
 add_library(MLIRConversion INTERFACE)
 
@@ -25,7 +23,5 @@ target_link_libraries(MLIRConversion INTERFACE
   MLIRNeuraMemRefToNeuraPass
   MLIRNeuraBuiltinToNeuraPass
   MLIRNeuraTorchToNeuraPass
-  MLIRAffineToTaskflowPass
-  MLIRTaskflowToNeuraPass
   ${dialect_libs}
 )

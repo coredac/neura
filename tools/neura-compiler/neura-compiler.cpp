@@ -9,7 +9,6 @@
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraPasses.h"
 #include "NeuraDialect/Util/ArchParser.h"
-#include "TaskflowDialect/TaskflowPasses.h"
 #include "mlir/Support/LogicalResult.h"
 
 using mlir::neura::Architecture;
@@ -61,15 +60,11 @@ int main(int argc, char **argv) {
   // Registers MLIR dialects.
   mlir::DialectRegistry registry;
   registry.insert<mlir::neura::NeuraDialect>();
-  registry.insert<mlir::taskflow::TaskflowDialect>();
 
   mlir::registerAllDialects(registry);
   mlir::registerAllExtensions(registry);
 
   mlir::neura::registerNeuraConversionPassPipeline();
-  mlir::taskflow::registerTosaToAffineConversionPassPipeline();
-  mlir::taskflow::registerTaskflowConversionPassPipeline();
-  mlir::taskflow::registerLinalgToAffineConversionPassPipeline();
 
   // Print architecture spec file info
   if (!architecture_spec_file.empty()) {

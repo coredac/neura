@@ -21,10 +21,6 @@ std::unique_ptr<mlir::Pass> createLowerBuiltinToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerTorchToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerAffineToNeuraPass();
 
-// TaskFlow Conversion Passes.
-std::unique_ptr<mlir::Pass> createConvertAffineToTaskflowPass();
-std::unique_ptr<mlir::Pass> createConvertTaskflowToNeuraPass();
-
 // Memref SubView and Copy Conversion Passes.
 std::unique_ptr<mlir::Pass> createFoldSubViewPass();
 std::unique_ptr<mlir::Pass> createConvertCopyToAffineLoopsPass();
