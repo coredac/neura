@@ -45,6 +45,34 @@ static int64_t getRequiredTaskDuration(TaskflowTaskOp task) {
     return -1;
   }
 
+  // Derive the cycle count when `est_latency` is absent but its ingredients are
+  // not. An allocator that does not publish the product still publishes
+  // `compiled_ii` and `trip_count`, and `duration` is the `steps` term:
+  //
+  //   est_latency = compiled_ii * (trip_count - 1) + duration
+  //
+  // Without this the instrument silently changes units with the allocator that
+  // produced the IR. On `gemm`, main's output measures 5 -- a count of DFG
+  // levels -- against 262148 cycles for the identical schedule from an
+  // allocator that publishes `est_latency`, and 5 against 262148 reads as a
+  // 52000x difference rather than as two different quantities.
+  //
+  // What it buys: a baseline can be measured without being modified. The only
+  // reason `apply-decisions` was ever handed to a baseline arm was to make it
+  // publish `est_latency`, and that option does not exist on main -- main's
+  // resource-aware pass has exactly two, `balance-skip-mapper` and
+  // `estimation-mode`. The measurement no longer needs the measured party's
+  // cooperation.
+  auto ii_attr = task->getAttrOfType<IntegerAttr>("compiled_ii");
+  auto trip_attr = task->getAttrOfType<IntegerAttr>("trip_count");
+  if (ii_attr && trip_attr) {
+    const int64_t ii = ii_attr.getInt();
+    const int64_t trip = trip_attr.getInt();
+    const int64_t steps = duration.getInt();
+    if (ii > 0 && trip > 0 && steps > 0)
+      return std::max<int64_t>(1, ii * (trip - 1) + steps);
+  }
+
   return std::max<int64_t>(1, duration.getInt());
 }
 
