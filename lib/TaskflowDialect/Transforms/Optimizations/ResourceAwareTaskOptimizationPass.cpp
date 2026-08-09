@@ -1161,6 +1161,29 @@ struct TaskGraphNode {
   // width, so the packer places them independently.
   int allocatedCgras() const { return cgra_count * std::max(1, replicas); }
 
+  // Replicas run at the same instant, so they need room at the same instant.
+  //
+  // The temporal budget does not apply to them. `allow-temporal` raises the
+  // area budget to `kTotalCGRAs * kMaxTemporalWaves` because a task can be
+  // scheduled in a later context wave, and a TILED task can use that: its tiles
+  // become separate tasks the orchestrator may place in different contexts. A
+  // replicated task cannot. The orchestrator pins every replica to the first
+  // replica's start time, drops the ones that do not fit, and warns that
+  // `est_latency` still assumes the count that was asked for.
+  //
+  // Charging replicas against the temporal budget let the search buy 64
+  // concurrent replicas of a one-CGRA task on a 16-cell grid. The orchestrator
+  // placed 16 and warned; the interval analysis read the attribute and reported
+  // one wave. gemm came back at 4100 against the 16400 the pass's own objective
+  // computed for the same allocation, and `grid_utilisation` printed 4.000.
+  bool replicasFitGrid() const {
+    return (int64_t)cgra_count * std::max(1, replicas) <= kTotalCGRAs;
+  }
+
+  static bool replicasFitGrid(int cgra_count, int replicas) {
+    return (int64_t)cgra_count * std::max(1, replicas) <= kTotalCGRAs;
+  }
+
   // Total cells this node's work claims, tiles included.
   //
   // A pending cut (`tiling = t` before materialisation) is t future tasks of
@@ -3652,6 +3675,7 @@ public:
     }
     options.replicas.push_back(node->replicas);
     if (node->dlp_replicable &&
+        TaskGraphNode::replicasFitGrid(node->cgra_count, node->replicas + 1) &&
         (int64_t)(node->replicas + 1) * std::max(1, node->tiling) <=
             node->root_trip &&
         TaskTiler::canReplicate(node->op, node->replicas + 1))
@@ -3771,6 +3795,11 @@ public:
             for (int tiling : axes.tiling) {
               if (cgras * std::max(1, replicas) * std::max(1, tiling) >
                   bottleneck->cgra_count + budget_left)
+                continue;
+              // The cross product pairs a cgra_count with a replica count the
+              // axis enumerator cleared against a DIFFERENT cgra_count, so the
+              // spatial check belongs here as well as there.
+              if (!TaskGraphNode::replicasFitGrid(cgras, replicas))
                 continue;
               bottleneck->cgra_count = cgras;
               bottleneck->shape = shape;
@@ -3977,6 +4006,7 @@ public:
       // Same rule as tiling: only propose a replica count whose partition table
       // the compiler can actually emit.
       if (enable_replicas && bottleneck->dlp_replicable &&
+          TaskGraphNode::replicasFitGrid(old_cgra_count, old_replicas + 1) &&
           old_cgra_count * (old_replicas + 1) * std::max(1, old_tiling) <=
               budget_left &&
           bottleneck->effectiveTripCount() > 1 &&
@@ -6399,6 +6429,10 @@ struct ResourceAwareTaskOptimizationPass
                 // solver reading `--dump-config-space` optimised over a smaller
                 // problem than the one they were compared against.
                 if (cells > perTaskCellBudget())
+                  break;
+                // Replicas are concurrent, so they answer to the spatial grid
+                // and not to the temporal budget `perTaskCellBudget()` allows.
+                if (!TaskGraphNode::replicasFitGrid(cgra_count, replicas))
                   break;
                 // Both DLP moves draw from the same partition space.
                 if ((int64_t)replicas * tiling > node->split_space)
