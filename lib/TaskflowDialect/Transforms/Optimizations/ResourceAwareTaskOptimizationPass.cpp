@@ -3552,6 +3552,39 @@ private:
 //===----------------------------------------------------------------------===//
 // Identifies critical-path bottlenecks and allocates extra CGRAs.
 
+// A cut the search is considering but the IR does not carry yet, in the one
+// form that survives cloning: a task NAME. The op that has to be rewritten
+// lives in the clone the measurement builds, and the op the search holds does
+// not, so a pointer would be useless on the other side.
+//
+// This is what lets a candidate be measured as the program it would become.
+// `tiling` is the only axis the published attributes cannot express: an
+// allocation is `cgra_count` cells and `replicas` copies of ONE task, and the
+// orchestrator honours both from the attributes alone, but a cut is `t`
+// separate tasks that do not exist. Handing the names down means the clone can
+// cut them before anything measures it.
+struct PendingCut {
+  std::string task_name;
+  int tiling = 1, replicas = 1, cgra_count = 1;
+  int64_t ii = 0, steps = 0;
+};
+
+// Every cut the graph is carrying that the IR is not. `tile_group >= 0` marks a
+// task that IS a tile, cut by an earlier outer iteration; its `tiling` is 1 and
+// re-cutting it would be cutting the same loop twice.
+//
+// Free rather than a member of either class: both levels of the search measure,
+// and both have to send the same list, or the level that forgets is comparing
+// discounted numbers with honest ones.
+inline SmallVector<PendingCut> pendingCutsOf(const TaskDependencyGraph &graph) {
+  SmallVector<PendingCut> cuts;
+  for (auto &n : graph.nodes)
+    if (n->tiling > 1 && n->tile_group < 0)
+      cuts.push_back({n->op.getTaskName().str(), n->tiling, n->replicas,
+                      n->cgra_count, n->ii, n->steps});
+  return cuts;
+}
+
 class PipelineBalancer {
 public:
   using ProfileFn = std::function<void(TaskGraphNode *, TaskflowTaskOp)>;
@@ -3559,7 +3592,10 @@ public:
   // (orchestrate + the interval analysis). Injected rather than called
   // directly, because it lives on the pass and this is a separate class; the
   // balancer must not grow a dependency on the pass to reach it.
-  using RealIntervalFn = std::function<int64_t()>;
+  //
+  // Takes the pending cuts because the measurement has to apply them to its own
+  // clone; see `PendingCut`.
+  using RealIntervalFn = std::function<int64_t(ArrayRef<PendingCut>)>;
   RealIntervalFn real_interval_fn;
   // Profiles a task the EXPENSIVE way: the real mapper, or the exact solver
   // when one is configured. `profile_fn` obeys `estimation-mode`, so under
@@ -3714,9 +3750,10 @@ public:
   // `realPipelineIntervalOf`, which clones the module and runs the actual
   // `orchestrate-tasks-on-accelerators` and `analyze-task-pipeline-interval`.
   // So placement, temporal context assignment and the reported interval are the
-  // real ones. Tiling is the exception -- materialising it erases task ops, so
-  // it cannot be applied and rolled back per candidate, and on that one axis
-  // the verification still reads the attribute rather than the rewritten loop.
+  // real ones -- including tiling, which is cut on the clone before the
+  // downstream run sees it. Materialising a cut erases task ops and cannot be
+  // rolled back, but the clone is discarded after every candidate, so there is
+  // nothing to roll back: the destructive step happens on the copy.
   struct JointConfig {
     SmallVector<int> cgra_count, replicas, tiling;
     SmallVector<CgraShape> shape;
@@ -3971,26 +4008,31 @@ public:
                    << " centre=" << centre_score << " best_scored="
                    << pool.front().score << " verifying top " << keep << "\n";
 
-      // What the downstream run reports, floored by the cut it has not made
-      // yet.
+      // What the downstream run reports for the program this candidate WOULD
+      // become, cut and all.
       //
-      // `real_interval_fn` measures the graph as it stands, and a `tiling`
-      // attribute is a decision the IR does not yet carry: the task is still
-      // ONE task, and `publish_fn` has already divided its `est_latency` by the
-      // factor. So the measurement of a pending cut is the interval of a
-      // program with t times fewer tasks each doing 1/t of the work -- exactly
-      // the reading the cut is supposed to earn, obtained without paying for
-      // it. On gemm the shortlist measured cgra_count=1 x replicas=4 x
-      // tiling=16 at 4100 and adopted it; materialising the same allocation
-      // produced 16400, which is what the analytical score had said. The
-      // measurement was 4x optimistic and it overruled a model that was right.
+      // The attributes cannot state a cut. `publish_fn` writes `cgra_count`,
+      // `replicas` and an `est_latency` already divided by the tiling factor,
+      // and the orchestrator honours them -- so a pending cut reached the
+      // measurement as ONE task doing 1/t of the work, which is the reading the
+      // cut is supposed to earn, obtained without paying for it. On gemm the
+      // shortlist measured cgra_count=1 x replicas=4 x tiling=16 at 4100 and
+      // adopted it; materialising the same allocation produced 16400, which is
+      // what the analytical score had said. The measurement was 4x optimistic
+      // and it overruled a model that was right.
       //
-      // `taskFloor()` is a floor on any schedule of the MATERIALISED graph, so
-      // taking the larger of the two costs nothing when there is no pending cut
-      // (the floor is already below the measurement) and removes the discount
-      // when there is: 4100 -> 16400, matching materialisation exactly.
+      // So the cuts travel with the request and the measurement applies them to
+      // its own clone. Every task the schedule contends over is then a task the
+      // emitted program has, and the discount is gone at the source rather than
+      // corrected afterwards.
+      //
+      // `taskFloor()` stays as the backstop for the one case materialisation
+      // does not cover: `TaskTiler::tile` may REFUSE a cut on the clone, and an
+      // un-cut measurement of a divided `est_latency` is the optimistic reading
+      // again. The floor is valid for any schedule of the materialised graph,
+      // so it costs nothing when the cut did happen.
       auto measure = [&]() -> int64_t {
-        const int64_t reported = real_interval_fn();
+        const int64_t reported = real_interval_fn(pendingCutsOf(graph));
         return reported > 0 ? std::max(reported, graph.taskFloor()) : reported;
       };
 
@@ -5574,7 +5616,8 @@ struct ResourceAwareTaskOptimizationPass
   // verify with "'__constant_64x256xf32' does not reference a valid global
   // memref" -- which is exactly the five programs that carry constants, and
   // exactly the five this returned -1 for.
-  int64_t realPipelineIntervalOf(func::FuncOp func) {
+  int64_t realPipelineIntervalOf(func::FuncOp func,
+                                 ArrayRef<PendingCut> cuts = {}) {
     auto parent = func->getParentOfType<ModuleOp>();
     if (!parent)
       return -1;
@@ -5587,7 +5630,47 @@ struct ResourceAwareTaskOptimizationPass
     });
     if (interval != 0)
       return -1;
+    applyPendingCuts(*clone, name, cuts);
     return realPipelineInterval(*clone, name);
+  }
+
+  // Cuts the clone, so what runs downstream is the program the candidate
+  // describes rather than a collapsed stand-in for it.
+  //
+  // Matched by task name: the caller holds ops in the function being optimised
+  // and these are their copies. `TaskTiler::tile` replaces the task with its
+  // tiles, each carrying the parent's `est_latency` -- which `publish_fn`
+  // already divided by the factor, so the per-tile figure is right without
+  // touching it -- plus its own cut counter bounds, `cgra_count` and
+  // `replicas`. The orchestrator then contends over `t` tasks, which is the
+  // whole point.
+  //
+  // No `emitPartitionConfig`: replication is measured through the `replicas`
+  // attribute on both the cut and the un-cut path, and emitting the table on
+  // one of them only would make the two incomparable. This function exists to
+  // remove an asymmetry, not to add one.
+  void applyPendingCuts(ModuleOp mod, StringRef func_name,
+                        ArrayRef<PendingCut> cuts) {
+    if (cuts.empty())
+      return;
+    llvm::StringMap<TaskflowTaskOp> by_name;
+    mod.walk([&](func::FuncOp f) {
+      if (!func_name.empty() && f.getName() != func_name)
+        return;
+      f.walk([&](TaskflowTaskOp task) { by_name[task.getTaskName()] = task; });
+    });
+    int group_id = 0;
+    for (const PendingCut &cut : cuts) {
+      auto found = by_name.find(cut.task_name);
+      if (found == by_name.end())
+        continue;
+      // A refusal leaves the task whole; `measure` floors that case rather than
+      // trusting it.
+      if (!TaskTiler::tile(found->second, cut.tiling, group_id, cut.ii,
+                           cut.steps, cut.cgra_count, cut.replicas)
+               .empty())
+        ++group_id;
+    }
   }
 
   // `mod` must be a standalone clone: a pass manager may not run on anything
@@ -5828,8 +5911,8 @@ struct ResourceAwareTaskOptimizationPass
     // clone run the whole downstream pipeline per candidate would cost far more
     // than the decision it is informing.
     if (top_k_override < 0) {
-      b.real_interval_fn = [this]() -> int64_t {
-        return current_func ? realPipelineIntervalOf(current_func) : -1;
+      b.real_interval_fn = [this](ArrayRef<PendingCut> cuts) -> int64_t {
+        return current_func ? realPipelineIntervalOf(current_func, cuts) : -1;
       };
     }
     b.verify_top_k =
@@ -6865,12 +6948,23 @@ struct ResourceAwareTaskOptimizationPass
           }
         };
         // The score a candidate allocation is judged on.
+        //
+        // Same measurement as inside a strategy, cuts included. Without the
+        // cuts this level had the discount the joint search had removed, and
+        // one yardstick with two calibrations is still two yardsticks: on atax
+        // the joint climb reached Task_0 = 1 cgra x 2 replicas x 8 tiles and
+        // measured it, cut, at 520, while the portfolio compared it against a
+        // 16-cell allocation whose cut it did not make -- and the discounted
+        // reading of the second won. What shipped was the 16-cell one, which
+        // measures 1032 because its two nests run in sequence.
         auto scoreOf = [&]() -> int64_t {
           if (!measured_portfolio)
             return graph.objective();
           writeDecisionAttributes(graph);
-          const int64_t measured = realPipelineIntervalOf(current_func);
-          return measured > 0 ? measured : graph.objective();
+          const int64_t measured =
+              realPipelineIntervalOf(current_func, pendingCutsOf(graph));
+          return measured > 0 ? std::max(measured, graph.taskFloor())
+                              : graph.objective();
         };
 
         const auto initial = snapshot();
