@@ -757,7 +757,14 @@ bool TaskScheduler::schedule(func::FuncOp func,
         cgra_count = attr.getInt();
       }
 
-      TaskPlacement placement = findBestPlacement(task_node, cgra_count, graph);
+      // Data-parallel replicas are ONE item, not `replicas` of them: they run
+      // the same configuration on disjoint partitions of the same iteration
+      // space at the same instant. `findBestPlacement` places the set together
+      // and reports how much of it the grid took.
+      int replicas = task_node->getReplicas();
+      int replicas_placed = 0;
+      TaskPlacement placement = findBestPlacement(task_node, cgra_count, graph,
+                                                  replicas, &replicas_placed);
 
       assert(!placement.cgra_positions.empty() &&
              "findBestPlacement must succeed: cgra_count should be "
@@ -766,35 +773,8 @@ bool TaskScheduler::schedule(func::FuncOp func,
 
       for (const auto &pos : placement.cgra_positions) {
         task_node->placement.push_back(pos);
-      }
-
-      for (const auto &pos : placement.cgra_positions) {
         if (posInBounds(pos)) {
           markOccupied(pos.row, pos.col, pos.start_time, pos.duration);
-        }
-      }
-
-      // Data-parallel replicas: each is another tile array of the same shape
-      // running concurrently, so they are pinned to the first replica's slot.
-      // A replica that does not fit is dropped and the achieved count is
-      // recorded, because the grid — not the cost model — has the final say.
-      int replicas = task_node->getReplicas();
-      int replicas_placed = 1;
-      if (replicas > 1) {
-        int64_t first_replica_start_time =
-            placement.cgra_positions.front().start_time;
-        for (int replica_idx = 1; replica_idx < replicas; ++replica_idx) {
-          TaskPlacement replica_placement = findBestPlacement(
-              task_node, cgra_count, graph,
-              /*force_start=*/first_replica_start_time);
-          if (replica_placement.cgra_positions.empty())
-            break;
-          for (const auto &pos : replica_placement.cgra_positions) {
-            task_node->placement.push_back(pos);
-            if (posInBounds(pos))
-              markOccupied(pos.row, pos.col, pos.start_time, pos.duration);
-          }
-          ++replicas_placed;
         }
       }
       task_node->replicas_placed = replicas_placed;
@@ -1185,15 +1165,60 @@ bool TaskScheduler::assignAllSrams(TaskMemoryGraph &graph) {
   return changed;
 }
 
+// Rectangles that hold `replicas` copies of `base`.
+//
+// A replicated task is one rigid item, not `replicas` independent ones: every
+// copy runs the same configuration on a disjoint data partition at the same
+// instant, so the set is resident together or not at all. Giving the set a
+// SHAPE is what lets the existing origin scan place it that way -- `a` copies
+// down by `b` across, for every factorisation a*b = replicas, in both
+// orientations of the tile array.
+SmallVector<CgraShape> TaskScheduler::replicaSetShapes(const CgraShape &base,
+                                                       int replicas) {
+  SmallVector<CgraShape> composites;
+  if (!base.is_rectangular || replicas <= 1)
+    return composites;
+
+  llvm::DenseSet<int64_t> seen_keys;
+  for (const CgraShape &orientation : rotationsOf(base)) {
+    for (int down = 1; down <= replicas; ++down) {
+      if (replicas % down != 0)
+        continue;
+      int rows = orientation.rows * down;
+      int cols = orientation.cols * (replicas / down);
+      if (rows > grid_rows_ || cols > grid_cols_)
+        continue;
+      int64_t key = ((int64_t)rows << 16) | cols;
+      if (seen_keys.insert(key).second)
+        composites.push_back({rows, cols, /*is_rectangular=*/true, {}});
+    }
+  }
+
+  // Most-square first, matching `getAllPlacementShapes`. A square set leaves
+  // square holes, and the holes are what the next task has to fit into.
+  llvm::sort(composites, [](const CgraShape &lhs, const CgraShape &rhs) {
+    int squareness_lhs = std::abs(lhs.rows - lhs.cols);
+    int squareness_rhs = std::abs(rhs.rows - rhs.cols);
+    if (squareness_lhs != squareness_rhs)
+      return squareness_lhs < squareness_rhs;
+    return lhs.area() < rhs.area();
+  });
+  return composites;
+}
+
 // Finds the best placement for `task_node` on the 2D multi-CGRA grid.
 //
-// In SpatialTemporal mode an outer time loop applies ASAP scheduling:
-// the earliest feasible start time is computed from dependency constraints,
-// then incremented by task_duration until a valid grid position is found.
+// In SpatialTemporal mode the search walks candidate start times: the earliest
+// one allowed by dependencies, then each instant a cell frees up.
 TaskPlacement TaskScheduler::findBestPlacement(TaskNode *task_node,
                                                int cgra_count,
                                                TaskMemoryGraph &graph,
-                                               int64_t force_start) {
+                                               int replicas,
+                                               int *replicas_placed) {
+  replicas = std::max(1, replicas);
+  if (replicas_placed)
+    *replicas_placed = 0;
+
   SmallVector<CgraShape> shapes_to_try;
   if (auto attr = task_node->op->getAttrOfType<StringAttr>("cgra_shape")) {
     StringRef cgra_shape_str = attr.getValue();
@@ -1206,54 +1231,83 @@ TaskPlacement TaskScheduler::findBestPlacement(TaskNode *task_node,
     shapes_to_try = getAllPlacementShapes(cgra_count);
   }
 
+  // Rectangles holding the whole replica set, tried before the individual
+  // arrays. A set placed as one rectangle leaves rectangular holes, and the
+  // holes are what the next task has to fit into.
+  SmallVector<CgraShape> set_shapes;
+  if (replicas > 1) {
+    llvm::DenseSet<int64_t> seen_keys;
+    for (const CgraShape &base : shapes_to_try) {
+      for (const CgraShape &composite : replicaSetShapes(base, replicas)) {
+        int64_t key = ((int64_t)composite.rows << 16) | composite.cols;
+        if (seen_keys.insert(key).second)
+          set_shapes.push_back(composite);
+      }
+    }
+  }
+
   int64_t task_duration = task_node->getDuration();
 
   int64_t t_start = (mode_ == SchedulingMode::SpatialTemporal)
                     ? computeEarliestStartTime(task_node)
                     : 0;
-  if (force_start >= 0) {
-    // Replica placement: all replicas of one task run concurrently, so this
-    // one is pinned to the slot the first replica took.
-    TaskPlacement pinned;
-    int64_t pinned_score = INT64_MIN;
-    for (const CgraShape &shape : shapes_to_try) {
-      SmallVector<std::pair<int, int>> offsets;
+
+  // Best-scoring placement of ONE `shapes` item at `start_time`, treating the
+  // cells in `reserved` as taken. `reserved` carries the arrays of this same
+  // task placed earlier in this attempt: they are not in `cgra_occupancy_` yet,
+  // because nothing is committed until the whole set is known to fit.
+  auto bestItemAt = [&](llvm::ArrayRef<CgraShape> shapes, int64_t start_time,
+                        const TaskPlacement &reserved) -> TaskPlacement {
+    TaskPlacement best;
+    int64_t best_score = INT64_MIN;
+    for (const CgraShape &shape : shapes) {
+      SmallVector<std::pair<int, int>> shape_offsets;
       if (shape.is_rectangular) {
-        for (int r = 0; r < shape.rows; ++r)
-          for (int c = 0; c < shape.cols; ++c)
-            offsets.push_back({c, r});
+        for (int r = 0; r < shape.rows; ++r) {
+          for (int c = 0; c < shape.cols; ++c) {
+            shape_offsets.push_back({c, r});
+          }
+        }
       } else {
-        offsets = SmallVector<std::pair<int, int>>(shape.cgra_positions.begin(),
-                                                   shape.cgra_positions.end());
+        shape_offsets = SmallVector<std::pair<int, int>>(
+            shape.cgra_positions.begin(), shape.cgra_positions.end());
       }
+
       for (int origin_row = 0; origin_row < grid_rows_; ++origin_row) {
         for (int origin_col = 0; origin_col < grid_cols_; ++origin_col) {
           bool valid = true;
           TaskPlacement candidate;
-          for (auto &[col_off, row_off] : offsets) {
+          for (auto &[col_off, row_off] : shape_offsets) {
             int abs_row = origin_row + row_off;
             int abs_col = origin_col + col_off;
             if (abs_row < 0 || abs_row >= grid_rows_ || abs_col < 0 ||
                 abs_col >= grid_cols_ ||
-                isOccupied(abs_row, abs_col, force_start, task_duration)) {
+                isOccupied(abs_row, abs_col, start_time, task_duration)) {
               valid = false;
               break;
             }
-            candidate.cgra_positions.push_back(
-                {abs_row, abs_col, force_start, task_duration, 0});
+            CgraPosition position{abs_row, abs_col, start_time, task_duration,
+                                  0};
+            if (llvm::is_contained(reserved.cgra_positions, position)) {
+              valid = false;
+              break;
+            }
+            candidate.cgra_positions.push_back(position);
           }
-          if (!valid)
+          if (!valid) {
             continue;
+          }
           int64_t score = computeScore(task_node, candidate, graph);
-          if (score > pinned_score) {
-            pinned_score = score;
-            pinned = candidate;
+          if (score > best_score) {
+            best_score = score;
+            best = candidate;
           }
         }
       }
     }
-    return pinned;
-  }
+    return best;
+  };
+
   // Candidate start times.
   //
   // The earliest time a task can start is `t_start` or the instant some cell
@@ -1282,53 +1336,53 @@ TaskPlacement TaskScheduler::findBestPlacement(TaskNode *task_node,
     candidate_times.erase(llvm::unique(candidate_times), candidate_times.end());
   }
 
+  // The whole data-parallel set is placed at one instant or not at all.
+  //
+  // Every replica runs the same configuration on a disjoint partition of the
+  // same iteration space, so they are resident together. Placing the first
+  // replica where it scored best and pinning the rest into the remainder placed
+  // them against a grid the first replica had itself fragmented: on gesummv
+  // three tiles held 12 of 16 cells as six scattered 1x2 arrays, and the fourth
+  // tile placed one array and then found its two free cells at (1,0) and (3,3),
+  // which are not adjacent, so its second replica was dropped. `est_latency`
+  // still divided the trip count by two and the interval analysis reads that
+  // attribute, so the row reported the latency of work no hardware performs.
+  //
+  // Trying the compact form first and the scattered form second means a set
+  // that only fits scattered still lands at the same instant it used to, and
+  // one that fits either way takes the form that leaves the grid packable.
+  TaskPlacement best_partial;
+  int best_partial_count = 0;
   for (int64_t candidate_start_time : candidate_times) {
-    int64_t best_score = INT64_MIN;
-    TaskPlacement best_at_time;
-
-    for (const CgraShape &shape : shapes_to_try) {
-      SmallVector<std::pair<int, int>> shape_offsets;
-      if (shape.is_rectangular) {
-        for (int r = 0; r < shape.rows; ++r) {
-          for (int c = 0; c < shape.cols; ++c) {
-            shape_offsets.push_back({c, r});
-          }
-        }
-      } else {
-        shape_offsets = SmallVector<std::pair<int, int>>(
-            shape.cgra_positions.begin(), shape.cgra_positions.end());
-      }
-
-      for (int origin_row = 0; origin_row < grid_rows_; ++origin_row) {
-        for (int origin_col = 0; origin_col < grid_cols_; ++origin_col) {
-          bool valid = true;
-          TaskPlacement candidate;
-          for (auto &[col_off, row_off] : shape_offsets) {
-            int abs_row = origin_row + row_off;
-            int abs_col = origin_col + col_off;
-            if (abs_row < 0 || abs_row >= grid_rows_ || abs_col < 0 ||
-                abs_col >= grid_cols_ ||
-                isOccupied(abs_row, abs_col, candidate_start_time, task_duration)) {
-              valid = false;
-              break;
-            }
-            candidate.cgra_positions.push_back(
-                {abs_row, abs_col, candidate_start_time, task_duration, 0});
-          }
-          if (!valid) {
-            continue;
-          }
-          int64_t score = computeScore(task_node, candidate, graph);
-          if (score > best_score) {
-            best_score = score;
-            best_at_time = candidate;
-          }
-        }
+    if (!set_shapes.empty()) {
+      TaskPlacement whole =
+          bestItemAt(set_shapes, candidate_start_time, TaskPlacement{});
+      if (!whole.cgra_positions.empty()) {
+        if (replicas_placed)
+          *replicas_placed = replicas;
+        return whole;
       }
     }
 
-    if (!best_at_time.cgra_positions.empty()) {
-      return best_at_time;
+    TaskPlacement accumulated;
+    int placed = 0;
+    for (int replica_idx = 0; replica_idx < replicas; ++replica_idx) {
+      TaskPlacement one =
+          bestItemAt(shapes_to_try, candidate_start_time, accumulated);
+      if (one.cgra_positions.empty())
+        break;
+      accumulated.cgra_positions.append(one.cgra_positions.begin(),
+                                        one.cgra_positions.end());
+      ++placed;
+    }
+    if (placed == replicas) {
+      if (replicas_placed)
+        *replicas_placed = placed;
+      return accumulated;
+    }
+    if (placed > best_partial_count) {
+      best_partial_count = placed;
+      best_partial = accumulated;
     }
 
     if (mode_ == SchedulingMode::Spatial) {
@@ -1336,7 +1390,11 @@ TaskPlacement TaskScheduler::findBestPlacement(TaskNode *task_node,
     }
   }
 
-  return TaskPlacement{};
+  // No instant holds the whole set. The grid -- not the cost model -- has the
+  // final say, so the caller is handed what fits and told how much that was.
+  if (replicas_placed)
+    *replicas_placed = best_partial_count;
+  return best_partial;
 }
 
 CgraShape TaskScheduler::parseCgraShapeToBase(StringRef cgra_shape,

@@ -291,13 +291,19 @@ private:
   // Searches legal grid positions and returns the best-scoring placement for
   // one task under the current scheduling mode.
   //
-  // `force_start` pins the placement to one time slot instead of searching
-  // forward from the earliest feasible one. It is used to place the replicas of
-  // a data-parallel task, which must all be resident simultaneously; -1 means
-  // the normal ASAP search.
+  // `replicas` places the task's whole data-parallel set: the returned
+  // placement covers `cgra_count * replicas` cells, all at one instant,
+  // preferring the compact form (the set as one rectangle) over the scattered
+  // one. `replicas_placed` receives how many of them the grid took, which is
+  // fewer than asked only when no instant holds the whole set.
   TaskPlacement findBestPlacement(TaskNode *task_node, int cgra_count,
-                                  TaskMemoryGraph &graph,
-                                  int64_t force_start = -1);
+                                  TaskMemoryGraph &graph, int replicas = 1,
+                                  int *replicas_placed = nullptr);
+
+  // Rectangles that hold `replicas` copies of `base`, most-square first.
+  // Empty when `base` is not rectangular.
+  llvm::SmallVector<CgraShape> replicaSetShapes(const CgraShape &base,
+                                                int replicas);
 
   // Parses a cgra_shape attribute string into its base placement shape.
   CgraShape parseCgraShapeToBase(StringRef cgra_shape, int cgra_count);
