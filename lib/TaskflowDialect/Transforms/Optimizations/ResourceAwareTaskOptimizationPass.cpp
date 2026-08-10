@@ -1213,10 +1213,74 @@ struct TaskGraphNode {
     return std::max<int64_t>(1, llvm::divideCeil(trip_count, divisor));
   }
 
-  // Returns estimated task latency using the pipelined execution model:
+  // Would a `factor`-way cut of this task yield tiles that may overlap in time?
+  //
+  // `TaskTiler::tilingIsParallel` walks the loop nest, and the ranking is
+  // arithmetic on facts read once per task body, so the answers are computed
+  // once at graph construction and looked up here. Indexed by log2(factor),
+  // because every proposer doubles.
+  llvm::SmallVector<bool, 8> tiling_parallel_by_log2;
+
+  bool tilingParallel(int factor) const {
+    if (factor <= 1)
+      return true;
+    unsigned bit = llvm::Log2_32((unsigned)factor);
+    return bit < tiling_parallel_by_log2.size() ? tiling_parallel_by_log2[bit]
+                                                : false;
+  }
+
+  // Latency of ONE tile: the pipelined execution model applied to the piece of
+  // the iteration space this tile array runs.
   //   latency = II * (trip_count - 1) + steps.
+  //
+  // This is the duration of one ITEM. A caller that wants what the node costs
+  // the schedule wants `scheduledLatency()`.
   int64_t estimatedLatency() const {
     return effectiveII() * (effectiveTripCount() - 1) + steps;
+  }
+
+  // What this node costs the schedule: its own makespan.
+  //
+  // A cut on a dimension that does not index every store is legal but ORDERED
+  // -- the tiles accumulate through the same memory and run back to back. They
+  // still occupy `t` times the area, so an ordered cut buys nothing and costs
+  // `t` pipeline drains, and it is never the right answer.
+  //
+  // `estimatedLatency` divides the trip count by `tiling` unconditionally,
+  // which prices that cut at latency/t. Every proposer scores its candidates on
+  // a scalar latency, so the discount made each further cut look like a win and
+  // the climb walked to `max-tiling` regardless of the cap: on atax's
+  // reduction, 4100 -> 2052 -> 1028 -> 516 through the model, while the
+  // orchestrator ran the 16 tiles one per context wave for 2376 at
+  // grid_utilisation 0.222. The pipeline-cycle objective chains ordered tiles
+  // and had the right answer (2376, against a resource floor of 528), but it
+  // sees the allocation only after the climb has chosen it.
+  // The grid charges the same constant a second way, and for the same reason.
+  //
+  // A PARALLEL cut whose tiles do not all fit at once runs in batches too. On
+  // gemm the search buys cgra_count=1 x replicas=4 x tiling=16 -- 64 cells
+  // against a 16-cell grid -- and the orchestrator runs four context waves.
+  // Waves are sequential, so that allocation delivers the throughput of 16
+  // cells while spending four times the budget, and it pays `steps` once per
+  // wave: 4 x 4100 = 16400 against the 16388 the same work costs uncut. The
+  // cap is what stopped the climb, not the model, which is why the reported
+  // interval tracked `max-tiling` instead of the machine.
+  //
+  // Both faces cost `(groups - 1) * (steps - ii)`: 4 on atax's ordered pair, 12
+  // on gemm's four waves.
+  int64_t tileBatches() const {
+    const int cut = std::max(1, tiling);
+    if (cut == 1)
+      return 1;
+    if (!tilingParallel(cut))
+      return cut; // Ordered: no two tiles may overlap, whatever the area.
+    const int per_batch =
+        std::max(1, kTotalCGRAs / std::max(1, allocatedCgras()));
+    return llvm::divideCeil(cut, per_batch);
+  }
+
+  int64_t scheduledLatency() const {
+    return estimatedLatency() * tileBatches();
   }
 
   // Wall-clock work this node contributes when its tiles are NOT yet
@@ -1740,9 +1804,9 @@ public:
   void explainPipelineInterval(llvm::raw_ostream &os, StringRef tag) const {
     int64_t task_floor = 0, area_time = 0;
     for (auto &n : nodes) {
-      int64_t lat = n->estimatedLatency();
-      task_floor = std::max(task_floor, lat);
-      area_time += lat * (int64_t)std::max(1, n->footprintCgras());
+      task_floor = std::max(task_floor, n->scheduledLatency());
+      area_time += n->estimatedLatency() *
+                   (int64_t)std::max(1, n->footprintCgras());
     }
     int64_t edges = 0;
     for (auto &n : nodes)
@@ -1759,6 +1823,17 @@ public:
        << "\n";
   }
 
+  // The longest any single task's own work takes, cuts included.
+  //
+  // A floor on any schedule of this graph: no arrangement of the other tasks
+  // makes one task's batches run faster than back to back.
+  int64_t taskFloor() const {
+    int64_t floor = 0;
+    for (auto &n : nodes)
+      floor = std::max(floor, n->scheduledLatency());
+    return floor;
+  }
+
   int64_t pipelineInterval() const {
     // The two idealised floors. `resource_floor` assumes the work is perfectly
     // divisible across the 16 cells -- and that assumption is exactly why an
@@ -1768,9 +1843,9 @@ public:
     // are indistinguishable.
     int64_t task_floor = 0, area_time = 0;
     for (auto &n : nodes) {
-      int64_t lat = n->estimatedLatency();
-      task_floor = std::max(task_floor, lat);
-      area_time += lat * (int64_t)std::max(1, n->footprintCgras());
+      task_floor = std::max(task_floor, n->scheduledLatency());
+      area_time += n->estimatedLatency() *
+                   (int64_t)std::max(1, n->footprintCgras());
     }
     int64_t floor_lb = std::max<int64_t>(
         task_floor, llvm::divideCeil(area_time, (int64_t)kTotalCGRAs));
@@ -2009,7 +2084,7 @@ public:
         cell_items[c].push_back(i);
     int64_t worst = 0;
     for (auto &n : nodes)
-      worst = std::max(worst, n->estimatedLatency());
+      worst = std::max(worst, n->scheduledLatency());
     for (int c = 0; c < kTotalCGRAs; ++c) {
       auto &on_cell = cell_items[c];
       if (on_cell.empty())
@@ -2061,7 +2136,7 @@ public:
     for (auto &n : nodes) {
       const void *node_key = key(n.get());
       int64_t &node_weight = weight[node_key];
-      node_weight = std::max(node_weight, n->estimatedLatency());
+      node_weight = std::max(node_weight, n->scheduledLatency());
       for (const TaskGraphNode *succ_key_of : n->successors) {
         const void *succ_key = key(succ_key_of);
         if (succ_key == node_key)
@@ -2200,6 +2275,21 @@ public:
         node->dlp_replicable = false;
         node->partition_illegal = true;
       }
+      // Whether each cut the search can propose would yield overlapping tiles.
+      // Answered here, once per task body, because `scheduledLatency()` is on
+      // every scoring path and walking the loop nest there would turn the
+      // ranking into a traversal. `kMaxProposableTiling` bounds the table
+      // rather than `max-tiling`, so the cap stays a safety limit and never a
+      // decision: the same node answers the same way whatever the cap is set
+      // to.
+      constexpr int kMaxProposableTiling = 64;
+      // Index is log2(factor), so entry 0 is the uncut task.
+      node->tiling_parallel_by_log2.push_back(true);
+      for (int factor = 2; factor <= kMaxProposableTiling; factor *= 2)
+        node->tiling_parallel_by_log2.push_back(
+            TaskTiler::canTile(task, factor) &&
+            TaskTiler::tilingIsParallel(task, factor));
+
       // Tiles materialised by a previous outer iteration.
       if (auto attr = task->getAttrOfType<IntegerAttr>("tile_group"))
         node->tile_group = (int)attr.getInt();
@@ -3674,7 +3764,16 @@ public:
         options.cgra_count.push_back(next);
     }
     options.replicas.push_back(node->replicas);
-    if (node->dlp_replicable &&
+    // The same switches the other two proposers obey.
+    //
+    // `balanceImpl` gates its MoreReplicas/Tiling moves on these, and
+    // `enumerateConfigSpace` folds them into `tiling_limit`. This pool did
+    // neither, so `enable-replicas=false` and `enable-tiling=false` turned the
+    // axis off in two proposers out of three and the pool kept offering it.
+    // Every ablation arm that drops one of those flags was therefore measuring
+    // a search that still had the axis, which is why `no-tiling` on atax still
+    // emitted a two-way cut.
+    if (enable_replicas && node->dlp_replicable &&
         TaskGraphNode::replicasFitGrid(node->cgra_count, node->replicas + 1) &&
         (int64_t)(node->replicas + 1) * std::max(1, node->tiling) <=
             node->root_trip &&
@@ -3693,7 +3792,7 @@ public:
     // started from, and 16x what the search believed. An ordered cut costs the
     // same latency on more area, so it is never the right answer and the pool
     // should not carry it.
-    if (node->tile_group < 0 && node->tiling * 2 <= max_tiling &&
+    if (enable_tiling && node->tile_group < 0 && node->tiling * 2 <= max_tiling &&
         (int64_t)std::max(1, node->replicas) * (node->tiling * 2) <=
             node->split_space &&
         TaskTiler::canTile(node->op, node->tiling * 2) &&
@@ -3872,6 +3971,29 @@ public:
                    << " centre=" << centre_score << " best_scored="
                    << pool.front().score << " verifying top " << keep << "\n";
 
+      // What the downstream run reports, floored by the cut it has not made
+      // yet.
+      //
+      // `real_interval_fn` measures the graph as it stands, and a `tiling`
+      // attribute is a decision the IR does not yet carry: the task is still
+      // ONE task, and `publish_fn` has already divided its `est_latency` by the
+      // factor. So the measurement of a pending cut is the interval of a
+      // program with t times fewer tasks each doing 1/t of the work -- exactly
+      // the reading the cut is supposed to earn, obtained without paying for
+      // it. On gemm the shortlist measured cgra_count=1 x replicas=4 x
+      // tiling=16 at 4100 and adopted it; materialising the same allocation
+      // produced 16400, which is what the analytical score had said. The
+      // measurement was 4x optimistic and it overruled a model that was right.
+      //
+      // `taskFloor()` is a floor on any schedule of the MATERIALISED graph, so
+      // taking the larger of the two costs nothing when there is no pending cut
+      // (the floor is already below the measurement) and removes the discount
+      // when there is: 4100 -> 16400, matching materialisation exactly.
+      auto measure = [&]() -> int64_t {
+        const int64_t reported = real_interval_fn();
+        return reported > 0 ? std::max(reported, graph.taskFloor()) : reported;
+      };
+
       // Cash the shortlist in: lower each of the k and let the measurement,
       // not the score that produced the ranking, choose. Selecting on the score
       // here would make the verification unable to change any outcome.
@@ -3885,7 +4007,7 @@ public:
         bottleneck->tiling = candidate.tiling;
         verify(bottleneck, bottleneck->op);
         publish_fn(graph);
-        const int64_t measured = real_interval_fn();
+        const int64_t measured = measure();
         llvm::errs() << "[Joint]   cand " << i << " cgras="
                      << candidate.cgra_count << " shape="
                      << candidate.shape.describe(candidate.cgra_count)
@@ -3907,7 +4029,7 @@ public:
       // the allocation exactly as it was.
       restoreConfig(graph, centre);
       publish_fn(graph);
-      const int64_t centre_measured = real_interval_fn();
+      const int64_t centre_measured = measure();
       if (centre_measured > 0 && best_measured >= centre_measured) {
         llvm::errs() << "[Joint]   centre measured " << centre_measured
                      << " <= best candidate " << best_measured
@@ -3956,10 +4078,10 @@ public:
       // sits at the maximum and no single-task step can ever lower it.
       SmallVector<TaskGraphNode *, 8> peers;
       if (joint_criterion) {
-        const int64_t top = bottleneck->estimatedLatency();
+        const int64_t top = bottleneck->scheduledLatency();
         for (auto &n : graph.nodes)
           if (!saturated_nodes.count(n.get()) &&
-              n->cgra_count < kMaxCgrasPerTask && n->estimatedLatency() == top)
+              n->cgra_count < kMaxCgrasPerTask && n->scheduledLatency() == top)
             peers.push_back(n.get());
       }
       if (peers.empty())
@@ -3968,7 +4090,7 @@ public:
       // The quantity a move has to improve; see `joint_criterion`.
       auto score = [&]() -> int64_t {
         return joint_criterion ? graph.objective()
-                               : bottleneck->estimatedLatency();
+                               : bottleneck->scheduledLatency();
       };
 
       // Saves state for potential rollback.
@@ -4133,9 +4255,8 @@ public:
       auto cheapMoveScore = [&]() -> int64_t {
         int64_t task_floor = 0, area_time = 0;
         for (auto &node : graph.nodes) {
-          const int64_t latency = node->estimatedLatency();
-          task_floor = std::max(task_floor, latency);
-          area_time += latency * node->footprintCgras();
+          task_floor = std::max(task_floor, node->scheduledLatency());
+          area_time += node->estimatedLatency() * node->footprintCgras();
         }
         return std::max<int64_t>(
             task_floor, llvm::divideCeil(area_time, (int64_t)kTotalCGRAs));
@@ -4234,7 +4355,7 @@ private:
           std::max(max_successor_path, computeCriticalPathFrom(succ, cache));
     }
 
-    int64_t path = node->estimatedLatency() + max_successor_path;
+    int64_t path = node->scheduledLatency() + max_successor_path;
     cache[node] = path;
     return path;
   }
@@ -4256,7 +4377,7 @@ private:
 
     // depth_from_source(node) = max(depth_from_source(pred) for all preds)
     //                           + node's own latency.
-    int64_t depth = max_predecessor_depth + node->estimatedLatency();
+    int64_t depth = max_predecessor_depth + node->scheduledLatency();
     cache[node] = depth;
     return depth;
   }
@@ -4313,13 +4434,13 @@ private:
       // slack = global_cp - depth_from - depth_to + node_latency
       // (because both depth_from and depth_to include node's own latency).
       int64_t slack = global_critical_path - depth_from - depth_to +
-                      node->estimatedLatency();
+                      node->scheduledLatency();
 
       if (slack != 0)
         continue; // Not on the critical path.
 
-      if (node->estimatedLatency() > max_latency) {
-        max_latency = node->estimatedLatency();
+      if (node->scheduledLatency() > max_latency) {
+        max_latency = node->scheduledLatency();
         bottleneck = node.get();
       }
     }
@@ -6259,9 +6380,8 @@ struct ResourceAwareTaskOptimizationPass
           for (auto &other : graph.nodes) {
             if (other.get() == lhs || other.get() == rhs)
               continue;
-            const int64_t latency = other->estimatedLatency();
-            task_floor = std::max(task_floor, latency);
-            area_time += latency * other->allocatedCgras();
+            task_floor = std::max(task_floor, other->scheduledLatency());
+            area_time += other->estimatedLatency() * other->allocatedCgras();
           }
           return std::max<int64_t>(
               task_floor, llvm::divideCeil(area_time, (int64_t)kTotalCGRAs));
@@ -6444,7 +6564,7 @@ struct ResourceAwareTaskOptimizationPass
                 node->tiling = tiling;
                 configs[task_idx].push_back({cgra_count, replicas, tiling,
                                              (int)cells,
-                                             node->estimatedLatency()});
+                                             node->scheduledLatency()});
               }
               if ((int64_t)cgra_count * (replicas + 1) > kTotalCGRAs)
                 break;
@@ -7214,7 +7334,7 @@ struct ResourceAwareTaskOptimizationPass
         }
         int64_t interval = 0, work = 0;
         for (auto &node : final_graph.nodes) {
-          interval = std::max(interval, node->estimatedLatency());
+          interval = std::max(interval, node->scheduledLatency());
           work += node->estimatedLatency() *
                   (int64_t)std::max(1, node->footprintCgras());
         }
