@@ -615,7 +615,12 @@ TaskPipelineIntervalAnalyzer::findLongestPathToTarget(
       continue;
     }
 
-    int total_latency = edge.latency + suffix.total_latency;
+    // int64_t, not int: `edge.latency` and `suffix.total_latency` are both
+    // int64_t because a GPT-2 prefill block measures 1.85e9 cycles on one task.
+    // Two such hops sum past INT32_MAX and wrap negative, at which point the
+    // comparison below picks the SHORTER branch and the interval this analysis
+    // publishes is a fraction of the truth.
+    int64_t total_latency = edge.latency + suffix.total_latency;
     if (!best.found || total_latency > best.total_latency) {
       best.found = true;
       best.total_latency = total_latency;
@@ -1118,12 +1123,30 @@ TaskScheduler::computeEarliestStartTime(const TaskNode *task_node) const {
   }
   // A tile inherits its group's external predecessors: without this a tile
   // whose only SSA operand is its sibling would float to time 0.
+  //
+  // The inheritance has to reach the whole chain, not just the immediate
+  // sibling. TaskTiler seeds every tile from the ORIGINAL task's operands and
+  // then rewires only the memref dependence-state operand onto the previous
+  // tile, so a producer outside the group stays an operand of the HEAD tile
+  // alone. From tile i the head is i hops back, and every tile in between
+  // names nothing but a skipped sibling, so a single hop finds no external
+  // producer at all and tiles 2..n-1 start at time 0 -- ahead of the producer
+  // they read from. Bounded like the sibling walk above: a malformed chain
+  // must not hang the compiler.
   if (task_tile_group >= 0) {
-    for (const TaskNode *pred : task_node->ssa_operands) {
-      if (tileGroupOf(pred) != task_tile_group)
-        continue;
-      for (const TaskNode *group_external_pred : pred->ssa_operands)
+    const TaskNode *cur_tile = task_node;
+    for (int guard = 0; guard < 4096 && cur_tile; ++guard) {
+      const TaskNode *prev_tile = nullptr;
+      for (const TaskNode *pred : cur_tile->ssa_operands)
+        if (tileGroupOf(pred) == task_tile_group) {
+          prev_tile = pred;
+          break;
+        }
+      if (!prev_tile)
+        break;
+      for (const TaskNode *group_external_pred : prev_tile->ssa_operands)
         updateFromPlacement(group_external_pred);
+      cur_tile = prev_tile;
     }
   }
   return min_time;
