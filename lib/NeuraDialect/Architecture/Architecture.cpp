@@ -78,6 +78,11 @@ Tile::Tile(int id, int x, int y) {
   this->y = y;
 }
 
+// Defined here, where RegisterFileCluster is complete, so the unique_ptr member
+// can be destroyed. Destroying the cluster destroys its register files, and
+// each of those its registers.
+Tile::~Tile() = default;
+
 int Tile::getId() const { return id; }
 
 int Tile::getX() const { return x; }
@@ -108,17 +113,18 @@ const LinkSet &Tile::getOutLinks() const { return out_links; }
 
 const LinkSet &Tile::getInLinks() const { return in_links; }
 
-void Tile::addRegisterFileCluster(RegisterFileCluster *register_file_cluster) {
+void Tile::addRegisterFileCluster(
+    std::unique_ptr<RegisterFileCluster> register_file_cluster) {
   assert(register_file_cluster && "Cannot add null register file cluster");
   if (this->register_file_cluster != nullptr) {
     llvm::errs() << "Warning: Overwriting existing register file cluster ("
                  << this->register_file_cluster->getId() << ") in Tile "
                  << this->id << "\n";
-    // Removes the old register file cluster before adding the new one.
-    delete this->register_file_cluster;
   }
-  this->register_file_cluster = register_file_cluster;
-  register_file_cluster->setTile(this);
+  // Assigning through the unique_ptr frees the old cluster together with its
+  // register files and registers.
+  this->register_file_cluster = std::move(register_file_cluster);
+  this->register_file_cluster->setTile(this);
 }
 
 const std::vector<RegisterFile *> Tile::getRegisterFiles() const {
@@ -215,9 +221,12 @@ void RegisterFile::setRegisterFileCluster(
   this->register_file_cluster = register_file_cluster;
 }
 
-void RegisterFile::addRegister(Register *reg) {
-  registers[reg->getId()] = reg;
-  reg->setRegisterFile(this);
+void RegisterFile::addRegister(std::unique_ptr<Register> reg) {
+  assert(reg && "Cannot add null register");
+  Register *reg_ptr = reg.get();
+  register_storage.push_back(std::move(reg));
+  registers[reg_ptr->getId()] = reg_ptr;
+  reg_ptr->setRegisterFile(this);
 }
 
 const std::map<int, Register *> &RegisterFile::getRegisters() const {
@@ -236,9 +245,13 @@ void RegisterFileCluster::setTile(Tile *tile) { this->tile = tile; }
 
 Tile *RegisterFileCluster::getTile() const { return this->tile; }
 
-void RegisterFileCluster::addRegisterFile(RegisterFile *register_file) {
-  register_files[register_file->getId()] = register_file;
-  register_file->setRegisterFileCluster(this);
+void RegisterFileCluster::addRegisterFile(
+    std::unique_ptr<RegisterFile> register_file) {
+  assert(register_file && "Cannot add null register file");
+  RegisterFile *register_file_ptr = register_file.get();
+  register_file_storage.push_back(std::move(register_file));
+  register_files[register_file_ptr->getId()] = register_file_ptr;
+  register_file_ptr->setRegisterFileCluster(this);
 }
 
 const std::map<int, RegisterFile *> &
@@ -274,23 +287,22 @@ void Architecture::createRegisterFileCluster(
   num_already_assigned_global_registers =
       std::max(num_already_assigned_global_registers, global_id_start);
 
-  RegisterFileCluster *register_file_cluster =
-      new RegisterFileCluster(tile->getId());
+  auto register_file_cluster =
+      std::make_unique<RegisterFileCluster>(tile->getId());
 
   // Creates registers as a register file.
   int local_register_id = 0;
   for (int file_index = 0; file_index < num_register_files; ++file_index) {
-    RegisterFile *register_file = new RegisterFile(file_index);
+    auto register_file = std::make_unique<RegisterFile>(file_index);
     for (int register_index = 0; register_index < kNumRegistersPerFile;
          ++register_index) {
-      Register *new_register = new Register(
-          num_already_assigned_global_registers++, local_register_id++);
-      register_file->addRegister(new_register);
+      register_file->addRegister(std::make_unique<Register>(
+          num_already_assigned_global_registers++, local_register_id++));
     }
-    register_file_cluster->addRegisterFile(register_file);
+    register_file_cluster->addRegisterFile(std::move(register_file));
   }
 
-  tile->addRegisterFileCluster(register_file_cluster);
+  tile->addRegisterFileCluster(std::move(register_file_cluster));
 }
 
 // Configures default tile settings.
@@ -472,8 +484,14 @@ void Architecture::createRingLinks(int &link_id,
       }
       Tile *tile = found->second;
 
-      // Checks if tile is on the boundary.
-      if (isTileOnBoundary(x, y, getPerCgraColumns(), getPerCgraRows())) {
+      // Checks if tile is on the boundary. The helper takes (x, y, rows,
+      // columns) and compares x against columns and y against rows, matching
+      // the (x, y) convention used everywhere in this file; passing
+      // (columns, rows) here transposed BOTH extents. The two transpositions
+      // cancel on a square array and do not on a rectangular one, where they
+      // silently declared real boundary tiles interior (and so left them
+      // without outgoing ring links).
+      if (isTileOnBoundary(x, y, getPerCgraRows(), getPerCgraColumns())) {
         // Creates connections only to adjacent boundary tiles.
         createLinkIfValid(link_id, tile, x - 1, y, link_defaults); // West.
         createLinkIfValid(link_id, tile, x + 1, y, link_defaults); // East.
@@ -547,8 +565,15 @@ void Architecture::applyLinkOverrides(
         bool link_already_exists = findLink(src_tile, dst_tile) != nullptr;
 
         if (link_override.existence && !link_already_exists) {
-          // Creates new link.
-          auto link = std::make_unique<Link>(next_link_id++);
+          // Creates new link. The storage KEY must equal the link's own id:
+          // removeLink(Tile*, Tile*) erases link_storage_[link->getId()], so a
+          // link filed under any other key can be unlinked from both tiles and
+          // still be handed out by getAllLinks() forever after. Previously the
+          // id was consumed by `next_link_id++` in the constructor and the
+          // entry then stored at `next_link_id` (= id + 1), with a second bump
+          // on top, so every override-created link was unremovable and the id
+          // space advanced twice per link.
+          auto link = std::make_unique<Link>(next_link_id);
 
           // Sets link properties.
           if (link_override.latency > 0) {
@@ -718,10 +743,15 @@ void Architecture::removeLink(int link_id) {
 void Architecture::removeLink(Tile *src_tile, Tile *dst_tile) {
   Link *link = findLink(src_tile, dst_tile);
   if (link) {
-    // Removes the link from both tiles' connection sets.
-    src_tile->unlinkDstTile(link, dst_tile);
-    // Removes the link from storage.
-    link_storage_.erase(link->getId());
+    // Delegates to the id overload so there is exactly ONE removal
+    // implementation: this overload used to unlink the tiles itself and then
+    // erase link_storage_[link->getId()] on its own, which is only the same
+    // entry as long as every link is filed under its own id. The assert pins
+    // that invariant down rather than leaving the two paths free to disagree.
+    assert(link_storage_.find(link->getId()) != link_storage_.end() &&
+           link_storage_.find(link->getId())->second.get() == link &&
+           "link storage key must equal the link id");
+    removeLink(link->getId());
   }
 }
 

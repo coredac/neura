@@ -236,6 +236,9 @@ public:
 class Tile : public BasicResource {
 public:
   Tile(int id, int x, int y);
+  // Out-of-line so `register_file_cluster` (a forward-declared type at this
+  // point in the header) is complete where the unique_ptr is destroyed.
+  ~Tile() override;
 
   int getId() const override;
   std::string getType() const override { return "tile"; }
@@ -279,7 +282,15 @@ public:
     return false;
   }
 
-  void addRegisterFileCluster(RegisterFileCluster *register_file_cluster);
+  // Takes ownership of the cluster (and, transitively, of its register files
+  // and registers). Replacing an existing cluster frees the WHOLE old subtree;
+  // the previous raw-pointer version `delete`d only the cluster object itself
+  // and leaked every RegisterFile and Register underneath it -- 36 blocks per
+  // replaced cluster, and a replacement happens once per tile carrying a
+  // `num_registers` override. Nothing was freed at teardown either, because a
+  // raw pointer member has no destructor.
+  void addRegisterFileCluster(
+      std::unique_ptr<RegisterFileCluster> register_file_cluster);
 
   const std::vector<RegisterFile *> getRegisterFiles() const;
 
@@ -295,7 +306,8 @@ private:
   std::vector<std::unique_ptr<FunctionUnit>>
       functional_unit_storage;               // Owns FUs.
   std::set<FunctionUnit *> functional_units; // Non-owning, for fast lookup.
-  RegisterFileCluster *register_file_cluster = nullptr;
+  std::unique_ptr<RegisterFileCluster>
+      register_file_cluster; // Owns the cluster subtree.
 };
 
 //===----------------------------------------------------------------------===//
@@ -388,14 +400,16 @@ public:
 
   void setRegisterFileCluster(RegisterFileCluster *register_file_cluster);
 
-  void addRegister(Register *reg);
+  // Takes ownership of the register.
+  void addRegister(std::unique_ptr<Register> reg);
 
   const std::map<int, Register *> &getRegisters() const;
 
 private:
   int id;
-  std::map<int, Register *> registers;
-  RegisterFileCluster *register_file_cluster = nullptr;
+  std::vector<std::unique_ptr<Register>> register_storage; // Owns registers.
+  std::map<int, Register *> registers; // Non-owning, keyed by global id.
+  RegisterFileCluster *register_file_cluster = nullptr; // Non-owning parent.
 };
 
 //===----------------------------------------------------------------------===//
@@ -420,13 +434,16 @@ public:
   Tile *getTile() const;
   void setTile(Tile *tile);
 
-  void addRegisterFile(RegisterFile *register_file);
+  // Takes ownership of the register file (and its registers).
+  void addRegisterFile(std::unique_ptr<RegisterFile> register_file);
   const std::map<int, RegisterFile *> &getRegisterFiles() const;
 
 private:
   int id;
   Tile *tile;
-  std::map<int, RegisterFile *> register_files;
+  std::vector<std::unique_ptr<RegisterFile>>
+      register_file_storage;                    // Owns register files.
+  std::map<int, RegisterFile *> register_files; // Non-owning, keyed by id.
 };
 
 //===----------------------------------------------------------------------===//
