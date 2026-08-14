@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "NeuraDialect/Architecture/ArchitectureSpec.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace mlir {
 namespace neura {
@@ -580,6 +581,45 @@ private:
   LinkDefaults link_defaults_;
   std::vector<LinkOverride> link_overrides_;
 };
+
+// Builds the architecture a candidate SHAPE actually gets: an `x_tiles` x
+// `y_tiles` bounding box from which every tile absent from `valid_tiles` has
+// been removed. This is the one place that turns a `valid-tiles` string into an
+// `Architecture`, so the mapper, the exact CP-SAT oracle, --dump-dfg-json,
+// --cost-model-analytical and the task allocator all price a non-rectangular
+// (L- or T-shaped) candidate on the SAME tiles. Previously each of them parsed
+// the string itself (or, in the allocator's case, did not parse it at all and
+// priced the full bounding rectangle, systematically under-pricing every
+// non-rectangular candidate by the tiles it does not own).
+//
+// `valid_tiles` is a comma-separated list of `x_y` coordinates; whitespace
+// around an entry or around either coordinate is tolerated, so "0_0, 1_1"
+// parses. A coordinate outside the x/y-tiles grid is reported and ignored
+// rather than allowed to remove a real tile through a typo. An empty (or
+// entirely unparsable) list yields the full rectangle -- see below.
+//
+// `diag_tag` prefixes the two diagnostics ("[cost-model-analytical]",
+// "[MapToAcceleratorPass]", ...) so a warning still names its caller.
+//
+// Returns nullptr when x_tiles/y_tiles are not both positive: the caller then
+// keeps the global architecture singleton unchanged.
+//
+// IMPLEMENTATION NOTE, carried from MapToAcceleratorPass. Only the tiles ABSENT
+// from the valid set get an existence=false override; valid tiles are left
+// untouched so they keep their full default/YAML configuration (FU types,
+// register files). Do NOT mark every tile non-existent and then try to re-mark
+// the valid ones existent: removeTile() erases a tile destructively (from
+// tile_storage_/id_to_tile_/coord_to_tile_), so a subsequent existence=true
+// override cannot resurrect it -- it looks the tile up by coordinate, finds
+// nothing, and is silently dropped. That left the cloned architecture with zero
+// tiles, which inflated res_mii up to max_ii and made every op report "No
+// candidate locations found". For the same reason a valid set that selects NO
+// tile in the grid falls back to the full rectangle with a warning instead of
+// producing a zero-tile architecture.
+std::unique_ptr<Architecture>
+buildShapedArchitecture(const Architecture &global_arch, int x_tiles,
+                        int y_tiles, llvm::StringRef valid_tiles,
+                        llvm::StringRef diag_tag);
 
 // Function for getting the architecture object.
 const Architecture &getArchitecture();

@@ -3,6 +3,8 @@
 #include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/MappingState.h"
 #include "mlir/IR/Operation.h"
+#include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace mlir {
 namespace neura {
@@ -26,6 +28,60 @@ bool occupiesFU(Operation *op);
 // carries none); an op with no known class reports "other". Shared by the
 // analytical cost model and --dump-dfg-json so both bucket ops identically.
 std::string fuClassOf(Operation *op);
+
+// Tiles that physically provide `fu_class`.
+//
+// A class the FU table does not describe (absent, or present with no
+// OperationKinds) is UNCONSTRAINED: every tile is returned, because nothing is
+// known about which FU would run it. A class the table DOES describe but that
+// no tile provides returns EMPTY -- that is a real capacity of zero, i.e. the
+// op cannot be placed anywhere on this architecture. The two cases are
+// deliberately distinct, and --dump-dfg-json mirrors them: it emits no key for
+// an undescribed class (so the exact mapper's `fu_class_tiles.get(c, all)`
+// falls back to every tile) and an empty list for a described-but-unprovided
+// one. Single source of truth for the analytical cost model, --dump-dfg-json
+// and anything else that asks "how many tiles can run this class".
+llvm::SmallVector<Tile *, 16> tilesProvidingFuClass(const Architecture &arch,
+                                                    llvm::StringRef fu_class);
+
+// The placed ops of `region`, in the order --dump-dfg-json emits them.
+//
+// THIS ORDER IS A CONTRACT: op index i in the emitted JSON is placed_ops[i]
+// here, and --import-mapping replays the solver's placements onto exactly this
+// sequence. It is the region walk order filtered by occupiesFU; do not sort,
+// filter or otherwise reorder it.
+std::vector<Operation *> collectPlacedOps(Region &region);
+
+// The placed producer of `value` as the dependence graph sees it: unwraps one
+// data_mov to the op that really produced the value, and returns null for a
+// reserve (the loop-carried placeholder, which the omega=1 edges carry
+// instead). Non-asserting counterpart of getMaterializedProducer.
+Operation *getPlacedProducer(Value value);
+
+// One dependence edge over collectPlacedOps indices. `omega` is the iteration
+// distance: 0 for an intra-iteration operand edge, 1 for a loop-carried
+// ctrl_mov/reserve edge.
+struct DependenceEdge {
+  int src;
+  int dst;
+  int omega;
+};
+
+// The dependence edges over `placed_ops` (which must come from
+// collectPlacedOps on the same region): forward operand edges with omega=0
+// plus ctrl_mov/reserve back edges with omega=1.
+//
+// Edges are de-duplicated on (src, dst, omega). An op that reads the same
+// value twice (`x + x`) has two data_movs to one producer, but that is ONE
+// dependence net -- one value, one route -- and since an edge's delay is a
+// function of its source alone, the repeats are identical records. Emitting
+// them twice would double-book the shared link on import, and would put
+// parallel arcs in the cost model's recurrence graph that cannot change its
+// maximum cycle ratio. Shared by --dump-dfg-json (which hands these edges to
+// the exact mapper) and the analytical RecMII, so both reason about the same
+// graph.
+std::vector<DependenceEdge>
+buildDfgEdges(Region &region, const std::vector<Operation *> &placed_ops);
 
 // Returns true if the operation is a steering-mode operation that doesn't
 // require DataMovOp wrapping (e.g., constants, carry, invariant, etc.).

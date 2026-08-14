@@ -1,5 +1,8 @@
 #include <deque>
 #include <queue>
+#include <set>
+#include <tuple>
+#include <vector>
 
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraOps.h"
@@ -187,6 +190,117 @@ std::string fuClassOf(Operation *op) {
   }
   auto found = kindToFuClassTable().find(getOperationKindFromMlirOp(op));
   return found == kindToFuClassTable().end() ? "other" : found->second;
+}
+
+llvm::SmallVector<Tile *, 16> tilesProvidingFuClass(const Architecture &arch,
+                                                    llvm::StringRef fu_class) {
+  llvm::SmallVector<Tile *, 16> tiles;
+  auto found = kFuTypesToOperations.find(fu_class.str());
+  if (found == kFuTypesToOperations.end() || found->second.empty()) {
+    // Nothing is known about this class, so nothing constrains it: every tile
+    // is a candidate. See the header -- this is NOT the same answer as "no tile
+    // provides it", which is an empty list.
+    for (Tile *tile : arch.getAllTiles()) {
+      tiles.push_back(tile);
+    }
+    return tiles;
+  }
+  // Every OperationKind in a class is provided by the same FU, so one probe
+  // kind decides the whole class.
+  OperationKind probe_kind = found->second.front();
+  for (Tile *tile : arch.getAllTiles()) {
+    if (tile->canSupportOperation(probe_kind)) {
+      tiles.push_back(tile);
+    }
+  }
+  return tiles;
+}
+
+std::vector<Operation *> collectPlacedOps(Region &region) {
+  std::vector<Operation *> placed_ops;
+  region.walk([&](Operation *op) {
+    if (occupiesFU(op)) {
+      placed_ops.push_back(op);
+    }
+  });
+  return placed_ops;
+}
+
+Operation *getPlacedProducer(Value value) {
+  Operation *producer = value.getDefiningOp();
+  if (!producer) {
+    return nullptr;
+  }
+  if (isa<neura::ReserveOp>(producer)) {
+    return nullptr; // Loop-carried placeholder; handled via ctrl_mov edges.
+  }
+  if (auto move = dyn_cast<neura::DataMovOp>(producer)) {
+    Operation *inner_producer = move.getOperand().getDefiningOp();
+    if (inner_producer && !isa<neura::ReserveOp>(inner_producer)) {
+      return inner_producer;
+    }
+    return nullptr;
+  }
+  return producer;
+}
+
+std::vector<DependenceEdge>
+buildDfgEdges(Region &region, const std::vector<Operation *> &placed_ops) {
+  llvm::DenseMap<Operation *, int> op_id;
+  for (int index = 0; index < (int)placed_ops.size(); ++index) {
+    op_id[placed_ops[index]] = index;
+  }
+
+  std::vector<DependenceEdge> edges;
+  // (src, dst, omega) already emitted. An edge's delay is its source's latency,
+  // so this triple identifies the whole edge and any repeat is an exact
+  // duplicate of one dependence net.
+  std::set<std::tuple<int, int, int>> seen;
+  auto addEdge = [&](int src, int dst, int omega) {
+    if (seen.insert({src, dst, omega}).second) {
+      edges.push_back(DependenceEdge{src, dst, omega});
+    }
+  };
+
+  // Forward (intra-iteration) edges, omega=0.
+  for (Operation *consumer : placed_ops) {
+    auto consumer_id = op_id.find(consumer);
+    for (Value operand : consumer->getOperands()) {
+      Operation *producer = getPlacedProducer(operand);
+      auto producer_id = producer ? op_id.find(producer) : op_id.end();
+      if (producer_id != op_id.end()) {
+        addEdge(producer_id->second, consumer_id->second, 0);
+      }
+    }
+  }
+
+  // Loop-carried edges, omega=1: the producer of a ctrl_mov's value -> the
+  // placed users of the reserve it targets. Represents value[i] feeding the
+  // placeholder for iteration i+1.
+  region.walk([&](neura::CtrlMovOp ctrl_mov) {
+    Operation *producer = getPlacedProducer(ctrl_mov.getValue());
+    auto reserve = ctrl_mov.getTarget().getDefiningOp<neura::ReserveOp>();
+    auto producer_id = producer ? op_id.find(producer) : op_id.end();
+    if (producer_id == op_id.end() || !reserve) {
+      return;
+    }
+    for (Operation *user : reserve.getResult().getUsers()) {
+      Operation *placed_user = user;
+      if (is_non_materialized(user)) {
+        for (Operation *router_user : user->getUsers()) {
+          if (op_id.count(router_user)) {
+            placed_user = router_user;
+          }
+        }
+      }
+      auto user_id = op_id.find(placed_user);
+      if (user_id != op_id.end()) {
+        addEdge(producer_id->second, user_id->second, 1);
+      }
+    }
+  });
+
+  return edges;
 }
 
 } // namespace neura

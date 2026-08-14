@@ -35,6 +35,12 @@ struct IIBound {
   long long demand = 0;   // numerator (work / accesses / moves / live vals).
   long long capacity = 1; // denominator (FU count / ports / links / regs).
   std::string detail;     // human-readable dominant sub-term (e.g. FU class).
+  // Capacity is genuinely ZERO: the kernel needs an FU class that no tile on
+  // this architecture provides, so NO II makes it mappable. `value` is then
+  // just the largest floor worth reporting (the II ceiling) -- this flag, not
+  // the number, is what says "unmappable". Distinct from `clamped`, which means
+  // "mappable in principle but its floor exceeds the II ceiling".
+  bool infeasible = false;
 };
 
 // Full per-bound breakdown of the analytical II prediction for one region.
@@ -67,6 +73,13 @@ struct AnalyticalIIBreakdown {
   int predicted_ii = 1; // clamp(max(final_ii, route_hop), 1, max_ii).
   int max_ii = 0;       // architecture II ceiling (ctrl_mem_items).
   bool clamped = false; // true if max(bounds) exceeded max_ii.
+  // True if some bound reported capacity zero (an FU class no tile provides).
+  // The kernel does not map on this architecture at ANY II, so `final_ii` is
+  // reported at the ceiling and is a floor only vacuously. The exact mapper
+  // reaches the same verdict from the same empty tile list (it prints
+  // `TRUE_MIN_II > max_ii`), which is the point: both sides now agree that an
+  // unprovidable class is infeasibility, not capacity 1.
+  bool infeasible = false;
   std::string dominant; // name of the largest-demand bound (== final_ii unless
                         // clamped to max_ii).
   double mean_hops = 0.0; // mean tile-to-tile distance over the link graph.
@@ -120,7 +133,25 @@ IIBound calculateIssueMii(Region &region, const Architecture &arch);
 // topology, including the irregular L/T blocks the shape search proposes, so a
 // non-rectangular shape is priced by its actual connectivity rather than by its
 // bounding box. Returns 0 for a fabric with no inter-tile links.
-double meanHopDistance(const Architecture &arch);
+//
+// Two variants, both feeding the SAME objective -- this one via
+// calculateRouteHopMii -> predicted_ii, and (in the taskflow allocator) via
+// `predictedCost(lb, avg_hop, cp_depth, coef)`. They used to be two separate
+// implementations that disagreed numerically; this is the survivor, and it
+// lives in NeuraDialect because amoeba consumes this repo as a submodule and
+// must not have to link TaskflowDialect to price a shape.
+//
+//   * `mem_weighted=false` — mean over reachable ordered tile pairs. Cheap, but
+//     invariant under transposing the array (W x H and H x W have the same mean
+//     distance), so it cannot separate 8x4 from 4x8.
+//   * `mem_weighted=true`  — mean distance from every tile to its NEAREST
+//     memory-capable tile. Live values enter and leave the fabric through the
+//     memory FUs, and those can sit on an asymmetric subset of tiles
+//     (`tile_overrides` may put them on the left column and top row), so this
+//     variant IS orientation-sensitive. It degrades to the unweighted mean when
+//     no tile has a memory FU, or when every tile does (the weighting then
+//     carries no signal).
+double meanHopDistance(const Architecture &arch, bool mem_weighted = false);
 
 // RouteHopMII: RouteMII's demand charged for distance -- each move is assumed
 // to hold `meanHopDistance` links for its residue instead of one.

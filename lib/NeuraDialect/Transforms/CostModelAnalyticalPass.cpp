@@ -79,62 +79,13 @@ struct CostModelAnalyticalPass
 
   // Builds the target architecture, honouring x/y-tiles + valid-tiles exactly
   // like --map-to-accelerator so predictions can be compared per CGRA shape.
+  // buildShapedArchitecture IS what --map-to-accelerator calls, so "exactly
+  // like" is now shared code rather than a duplicated parser.
   std::unique_ptr<Architecture>
   buildCustomArch(const Architecture &global_arch) {
-    if (x_tiles.getValue() <= 0 || y_tiles.getValue() <= 0) {
-      return nullptr;
-    }
-    std::vector<TileOverride> overrides;
-    if (!valid_tiles.getValue().empty()) {
-      // applyTileOverrides can only REMOVE tiles (existence=false), not re-add
-      // them; so remove every tile NOT in the valid set, leaving valid ones.
-      std::set<std::pair<int, int>> valid_coords;
-      llvm::SmallVector<llvm::StringRef, 4> coords;
-      llvm::StringRef(valid_tiles.getValue()).split(coords, ',');
-      for (llvm::StringRef coord : coords) {
-        coord = coord.trim(); // tolerate "0_0, 1_1" with spaces after commas.
-        if (coord.empty()) {
-          continue;
-        }
-        auto parts = coord.split('_');
-        int x, y;
-        if (!parts.first.trim().getAsInteger(10, x) &&
-            !parts.second.trim().getAsInteger(10, y)) {
-          // Ignore coords outside the x/y-tiles grid rather than letting a typo
-          // silently remove real tiles.
-          if (x >= 0 && x < x_tiles.getValue() && y >= 0 &&
-              y < y_tiles.getValue()) {
-            valid_coords.insert({x, y});
-          } else {
-            llvm::errs() << "[cost-model-analytical] valid-tiles coord " << x
-                         << "_" << y << " is outside the " << x_tiles.getValue()
-                         << "x" << y_tiles.getValue() << " grid; ignored\n";
-          }
-        }
-      }
-      if (valid_coords.empty()) {
-        // Every valid tile would be removed -> a 0-tile arch, whose predictions
-        // are meaningless. Fall back to the full rectangle and warn.
-        llvm::errs() << "[cost-model-analytical] valid-tiles selected no tiles "
-                        "in the grid; using the full "
-                     << x_tiles.getValue() << "x" << y_tiles.getValue()
-                     << " rectangle\n";
-      } else {
-        for (int y = 0; y < y_tiles.getValue(); ++y) {
-          for (int x = 0; x < x_tiles.getValue(); ++x) {
-            if (!valid_coords.count({x, y})) {
-              TileOverride tile_override;
-              tile_override.tile_x = x;
-              tile_override.tile_y = y;
-              tile_override.existence = false;
-              overrides.push_back(tile_override);
-            }
-          }
-        }
-      }
-    }
-    return global_arch.cloneWithNewDimensions(y_tiles.getValue(),
-                                              x_tiles.getValue(), overrides);
+    return buildShapedArchitecture(global_arch, x_tiles.getValue(),
+                                   y_tiles.getValue(), valid_tiles.getValue(),
+                                   "[cost-model-analytical]");
   }
 
   void writeAttr(Operation *op, const AnalyticalIIBreakdown &breakdown) {

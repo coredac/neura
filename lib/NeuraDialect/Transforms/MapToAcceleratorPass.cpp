@@ -774,54 +774,19 @@ struct MapToAcceleratorPass
     std::unique_ptr<Architecture> custom_arch;
     const Architecture *target_arch = &global_arch;
 
-    if (x_tiles.getValue() > 0 && y_tiles.getValue() > 0) {
-      std::vector<TileOverride> additional_overrides;
-      if (!valid_tiles.getValue().empty()) {
-        llvm::SmallVector<llvm::StringRef, 4> coords;
-        llvm::StringRef(valid_tiles.getValue()).split(coords, ',');
-
-        // Parses the requested valid tile coordinates into a set.
-        std::set<std::pair<int, int>> valid_coords;
-        for (llvm::StringRef coord : coords) {
-          auto coord_pair = coord.split('_');
-          int x, y;
-          if (!coord_pair.first.getAsInteger(10, x) &&
-              !coord_pair.second.getAsInteger(10, y)) {
-            valid_coords.insert({x, y});
-          }
-        }
-
-        // Removes ONLY the tiles that are absent from the valid set. Tiles in
-        // the valid set are left untouched, so they keep their full
-        // default/YAML configuration (FU types, register files).
-        //
-        // Do NOT mark every tile non-existent and then try to re-mark the valid
-        // ones existent: removeTile() erases a tile destructively (from
-        // tile_storage_/id_to_tile_/coord_to_tile_), so a subsequent
-        // existence=true override cannot resurrect it -- it looks the tile up by
-        // coordinate, finds nothing, and is silently dropped. That left the
-        // cloned architecture with zero tiles, which inflated res_mii up to
-        // max_ii and made every op report "No candidate locations found".
-        for (int y = 0; y < y_tiles.getValue(); ++y) {
-          for (int x = 0; x < x_tiles.getValue(); ++x) {
-            if (valid_coords.count({x, y})) {
-              continue; // Keep valid tiles with their default configuration.
-            }
-            TileOverride tile_override;
-            tile_override.tile_x = x;
-            tile_override.tile_y = y;
-            tile_override.existence = false;
-            additional_overrides.push_back(tile_override);
-          }
-        }
-      }
-
-      // Builds a custom architecture with the requested tile dimensions.
-      // For non-rectangular shapes, tiles marked existence=false are removed
-      // before inter-tile links are created, so no boundary links connect to
-      // absent tiles.
-      custom_arch = global_arch.cloneWithNewDimensions(
-          y_tiles.getValue(), x_tiles.getValue(), additional_overrides);
+    // Builds a custom architecture with the requested tile dimensions, minus
+    // every tile absent from `valid_tiles`. The parsing (and the reason valid
+    // tiles are LEFT ALONE rather than re-marked existent) lives in
+    // buildShapedArchitecture, shared with --cost-model-analytical,
+    // --dump-dfg-json and the task allocator so that every one of them prices a
+    // shape on the same tiles. Its inline predecessor here skipped the
+    // coordinate trim, the grid-bounds check and the empty-set fallback, so a
+    // mistyped list could hand the mapper the zero-tile architecture that same
+    // fallback exists to prevent.
+    custom_arch = buildShapedArchitecture(
+        global_arch, x_tiles.getValue(), y_tiles.getValue(),
+        valid_tiles.getValue(), "[MapToAcceleratorPass]");
+    if (custom_arch) {
       target_arch = custom_arch.get();
       llvm::errs()
           << "[MapToAcceleratorPass] Overriding architecture dimensions to "

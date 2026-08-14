@@ -59,6 +59,24 @@ def shortest_hops(arch):
     return dist
 
 
+def unprovidable_classes(data):
+    """FU classes this kernel uses that the architecture describes but that NO
+    tile provides, i.e. capacity zero -- the kernel cannot be placed here at any
+    II. On a pruned (L/T-shaped) architecture this is a real outcome.
+
+    A class that is ABSENT from fu_class_tiles is a different case: nothing is
+    known about which FU runs it, so it is unconstrained and every tile is a
+    candidate (see the .get(cls, tile_ids) default below). Note that
+    `fu_class_tiles.get(cls) or tile_ids` collapses exactly these two cases --
+    an empty list is falsy, so a class no tile provides silently became ALL
+    tiles, and the mapper reported capacity num_tiles where the analytical cost
+    model reported infeasible."""
+    fu_class_tiles = data["arch"]["fu_class_tiles"]
+    return sorted({op["class"] for op in data["ops"]
+                   if op["class"] in fu_class_tiles
+                   and not fu_class_tiles[op["class"]]})
+
+
 def schedule(data, ii, seconds, hops, minimize_routing=False):
     """Stage 1: decide place[i] (tile) and issue_time[i] for every op at this II.
     Returns {i:(tile,time)} if feasible, None if infeasible, "unknown" on
@@ -68,6 +86,8 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
     tile_ids = [t["id"] for t in arch["tiles"]]
     fu_class_tiles = arch["fu_class_tiles"]
     num_ops = len(ops)
+    if unprovidable_classes(data):
+        return None                             # no tile can run some op: infeasible
     # Upper bound on any op's issue time. A modulo schedule fits within one II
     # window per op plus slack for the dependence chain and the pipeline depth of
     # multi-cycle ops; include the total op latency so a long chain of latency>1
@@ -79,9 +99,12 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
     place = []                                  # place[i]      = tile of op i
     issue_time = []                             # issue_time[i] = cycle op i fires
     for i, op in enumerate(ops):
-        # Restrict placement to tiles whose FU supports this op's class; if the
-        # class is unlisted, allow any tile.
-        valid_tiles = fu_class_tiles.get(op["class"]) or tile_ids
+        # Restrict placement to tiles whose FU supports this op's class. A class
+        # the arch does not list at all is unconstrained -> any tile; a class it
+        # lists as [] is provided by no tile and was rejected above, so the
+        # default here must be `.get(cls, tile_ids)`, never `.get(cls) or
+        # tile_ids` (the two differ exactly on the empty list).
+        valid_tiles = fu_class_tiles.get(op["class"], tile_ids)
         place_var = model.NewIntVarFromDomain(
             cp_model.Domain.FromValues(valid_tiles), f"place{i}")
         place.append(place_var)
@@ -412,6 +435,16 @@ def main():
     # rejected on the strength of one unroutable placement.
     minimize_routing = bool(a.emit) if a.mr is None else a.mr
     solve_seconds = min(a.seconds, a.emit_cap) if a.emit else a.seconds
+    # An op whose FU class no tile provides cannot be placed at ANY II, so say so
+    # once instead of proving every II infeasible. Reported with the same
+    # "> max_ii" verdict the II sweep uses when nothing fits this shape, which is
+    # what the C++ caller already reads as "not mappable at this shape".
+    missing = unprovidable_classes(data)
+    if missing:
+        print(f"[infeasible] no tile provides fu class(es): {', '.join(missing)}",
+              file=sys.stderr)
+        print(f"{'MAPPED_II' if a.fallback else 'TRUE_MIN_II'} > {max_ii}")
+        return
     for ii in range(a.min_ii, max_ii + 1):
         sched = schedule(data, ii, solve_seconds, hops, minimize_routing)
         if sched is None:

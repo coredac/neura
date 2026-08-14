@@ -19,6 +19,7 @@
 #include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
+#include <climits>
 #include <cmath>
 #include <map>
 #include <string>
@@ -29,26 +30,20 @@ using namespace mlir::neura;
 
 namespace {
 
-// occupiesFU (which ops need a tile/FU) and fuClassOf (an op's FU class) both
-// live in mapping_util.h -- the single source of truth shared with the mapper.
-// Reusing them keeps the cost model's op set and FU bucketing identical to the
-// mapper's; do not re-define either here.
+// occupiesFU (which ops need a tile/FU), fuClassOf (an op's FU class),
+// tilesProvidingFuClass (which tiles run a class) and buildDfgEdges (the
+// dependence graph) all live in mapping_util.h -- the single source of truth
+// shared with --dump-dfg-json and the mapper. Reusing them keeps the cost
+// model's op set, FU bucketing, FU capacities and edge set identical to the
+// instance the exact mapper solves; do not re-define any of them here.
 
-// Number of tiles that physically provide a given FU class.
+// Number of tiles that physically provide a given FU class. Zero means NO tile
+// provides it (the kernel is unmappable on this architecture); see
+// tilesProvidingFuClass for the undescribed-class case, which is unconstrained
+// rather than empty.
 int tilesSupportingClass(const Architecture &arch,
                          const std::string &fu_class) {
-  auto found = kFuTypesToOperations.find(fu_class);
-  if (found == kFuTypesToOperations.end() || found->second.empty()) {
-    return arch.getNumTiles(); // unknown class: don't over-constrain.
-  }
-  OperationKind probe_kind = found->second.front();
-  int supporting_tiles = 0;
-  for (Tile *tile : arch.getAllTiles()) {
-    if (tile->canSupportOperation(probe_kind)) {
-      ++supporting_tiles;
-    }
-  }
-  return supporting_tiles;
+  return (int)tilesProvidingFuClass(arch, fu_class).size();
 }
 
 // Bit width carried by an SSA value (for routing channel demand).
@@ -98,8 +93,19 @@ IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
 
   IIBound bound;
   bound.value = 1;
+  // Classes this kernel uses that the arch describes but that NO tile provides.
+  std::vector<std::string> unprovidable_classes;
   for (const auto &[fu_class, class_work] : work_by_class) {
-    int fu_count = std::max(1, tilesSupportingClass(arch, fu_class));
+    int fu_count = tilesSupportingClass(arch, fu_class);
+    if (fu_count == 0) {
+      // A class no tile provides is capacity ZERO, not one. Clamping the
+      // divisor to 1 here used to fabricate "some tile has it" and report a
+      // finite II for a kernel that cannot be placed at all on a pruned
+      // (L/T-shaped) architecture -- while the exact mapper, reading the same
+      // empty tile list, correctly rejects it. Record it and flag the bound.
+      unprovidable_classes.push_back(fu_class);
+      continue;
+    }
     int class_ii = ceilDiv(class_work, fu_count);
     if (class_ii > bound.value) {
       bound.value = class_ii;
@@ -108,6 +114,19 @@ IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
       bound.detail = "class=" + fu_class +
                      " work=" + std::to_string(class_work) +
                      " fus=" + std::to_string(fu_count);
+    }
+  }
+  if (!unprovidable_classes.empty()) {
+    // No II makes this kernel mappable, so every finite floor is vacuously
+    // valid; report the architecture's II ceiling, the largest representable
+    // one, and let the flag (not the number) carry "unmappable".
+    bound.infeasible = true;
+    bound.demand = work_by_class[unprovidable_classes.front()];
+    bound.capacity = 0;
+    bound.value = std::max(bound.value, std::max(1, arch.getMaxCtrlMemItems()));
+    bound.detail = "INFEASIBLE: no tile provides fu class";
+    for (const std::string &fu_class : unprovidable_classes) {
+      bound.detail += " " + fu_class;
     }
   }
   if (bound.detail.empty()) {
@@ -133,9 +152,11 @@ IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
 // the mapper's proven optimum) is 9; this version returns 9. Because it is the
 // exact max cycle ratio it dominates any enumerated cycle, so nothing is lost.
 //
-// Edge set matches DumpDfgJsonPass exactly (same nodes/edges the exact mapper
-// solves over): forward operand edges (omega=0) plus ctrl_mov/reserve back
-// edges (omega=1). Edge "delay" is the producer's latency, matching the
+// The node and edge set come from neura::collectPlacedOps / neura::buildDfgEdges
+// (mapping_util), the same call --dump-dfg-json makes, so this is the exact
+// instance the mapper solves rather than a second construction that happens to
+// agree: forward operand edges (omega=0) plus ctrl_mov/reserve back edges
+// (omega=1). Edge "delay" is the producer's latency, matching the
 // scheduler's precedence  t[dst] >= t[src] + lat(src) + hop - omega*II  with
 // hop dropped (a lower bound, hop >= 0).
 //===----------------------------------------------------------------------===//
@@ -145,84 +166,36 @@ IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
   bound.value = 1;
   bound.detail = "no recurrence";
 
-  // Node ids for the materialized ops (same predicate the mapper/dump use).
-  llvm::DenseMap<Operation *, int> op_id;
-  region.walk([&](Operation *op) {
-    if (occupiesFU(op)) {
-      op_id[op] = (int)op_id.size();
-    }
-  });
-  if (op_id.empty()) {
+  // Nodes and edges from the shared builder -- literally the graph
+  // --dump-dfg-json hands the exact mapper, so the model and the mapper reason
+  // about one instance. (De-duplicated on (src, dst, omega): repeated operand
+  // edges are one dependence net, and parallel arcs cannot change a maximum
+  // cycle ratio anyway.)
+  std::vector<Operation *> placed_ops = collectPlacedOps(region);
+  if (placed_ops.empty()) {
     return bound;
   }
-
-  // Safe producer unwrap through a DataMovOp; ReserveOp (loop-carried
-  // placeholder) returns null and is handled by the back-edge walk. Mirrors
-  // DumpDfgJsonPass::materializedProducer (no asserts).
-  auto producerOf = [](Value value) -> Operation * {
-    Operation *producer = value.getDefiningOp();
-    if (!producer || isa<neura::ReserveOp>(producer)) {
-      return nullptr;
-    }
-    if (auto mov = dyn_cast<neura::DataMovOp>(producer)) {
-      Operation *inner = mov.getOperand().getDefiningOp();
-      return (inner && !isa<neura::ReserveOp>(inner)) ? inner : nullptr;
-    }
-    return producer;
-  };
+  std::vector<DependenceEdge> dfg_edges = buildDfgEdges(region, placed_ops);
 
   struct Arc {
     int dst;
     int delay;
     int omega;
   };
-  std::vector<std::vector<Arc>> out(op_id.size());
+  std::vector<std::vector<Arc>> out(placed_ops.size());
   long long total_delay = 0;
-  // Forward (intra-iteration) edges, omega=0.
-  for (auto &entry : op_id) {
-    Operation *consumer = entry.first;
-    for (Value operand : consumer->getOperands()) {
-      Operation *producer = producerOf(operand);
-      auto found = producer ? op_id.find(producer) : op_id.end();
-      if (found != op_id.end()) {
-        int delay = std::max(1, getOpLatency(producer));
-        out[found->second].push_back({entry.second, delay, 0});
-        total_delay += delay;
-      }
-    }
+  for (const DependenceEdge &edge : dfg_edges) {
+    // Edge delay is the producer's latency, matching the scheduler's
+    // precedence constraint.
+    int delay = std::max(1, getOpLatency(placed_ops[edge.src]));
+    out[edge.src].push_back({edge.dst, delay, edge.omega});
+    total_delay += delay;
   }
-  // Loop-carried edges, omega=1: producer of a ctrl_mov's value -> the
-  // materialized users of the reserve it targets (value[i] feeding iteration
-  // i+1). Same construction as DumpDfgJsonPass.
-  region.walk([&](neura::CtrlMovOp ctrl_mov) {
-    Operation *producer = producerOf(ctrl_mov.getValue());
-    auto reserve = ctrl_mov.getTarget().getDefiningOp<neura::ReserveOp>();
-    auto found = producer ? op_id.find(producer) : op_id.end();
-    if (found == op_id.end() || !reserve) {
-      return;
-    }
-    int delay = std::max(1, getOpLatency(producer));
-    for (Operation *user : reserve.getResult().getUsers()) {
-      Operation *materialized_user = user;
-      if (is_non_materialized(user)) {
-        for (Operation *router_user : user->getUsers()) {
-          if (op_id.count(router_user)) {
-            materialized_user = router_user;
-          }
-        }
-      }
-      auto user_id = op_id.find(materialized_user);
-      if (user_id != op_id.end()) {
-        out[found->second].push_back({user_id->second, delay, 1});
-        total_delay += delay;
-      }
-    }
-  });
 
   // Max cycle ratio via binary search on r: a cycle has ratio > r iff the graph
   // with edge weight (delay - r*omega) has a positive cycle. Every cycle uses
   // >=1 omega=1 back-edge (forward edges form a DAG), so the ratio is finite.
-  const int num_nodes = (int)op_id.size();
+  const int num_nodes = (int)placed_ops.size();
   auto hasPositiveCycle = [&](double r) {
     std::vector<double> dist(num_nodes, 0.0);
     for (int iter = 0; iter < num_nodes; ++iter) {
@@ -284,10 +257,15 @@ IIBound calculateMemMii(Region &region, const Architecture &arch) {
     }
   });
 
-  int mem_tiles = std::max(1, tilesSupportingClass(arch, "mem"));
-  int indexed_tiles = std::max(1, tilesSupportingClass(arch, "mem_indexed"));
-  int mem_ii = ceilDiv(num_mem_ops, mem_tiles);
-  int indexed_ii = ceilDiv(num_indexed_ops, indexed_tiles);
+  int mem_tiles = tilesSupportingClass(arch, "mem");
+  int indexed_tiles = tilesSupportingClass(arch, "mem_indexed");
+  // Same rule as ResMII: a memory op with no memory tile to run on is
+  // infeasible, not "one tile's worth of contention". Only the divisor is
+  // clamped, and only so the ratio below stays defined.
+  bool infeasible = (num_mem_ops > 0 && mem_tiles == 0) ||
+                    (num_indexed_ops > 0 && indexed_tiles == 0);
+  int mem_ii = ceilDiv(num_mem_ops, std::max(1, mem_tiles));
+  int indexed_ii = ceilDiv(num_indexed_ops, std::max(1, indexed_tiles));
 
   IIBound bound;
   if (indexed_ii >= mem_ii) {
@@ -302,6 +280,11 @@ IIBound calculateMemMii(Region &region, const Architecture &arch) {
     bound.capacity = mem_tiles;
     bound.detail = "loads+stores=" + std::to_string(num_mem_ops) +
                    " mem_fus=" + std::to_string(mem_tiles);
+  }
+  if (infeasible) {
+    bound.infeasible = true;
+    bound.value = std::max(bound.value, std::max(1, arch.getMaxCtrlMemItems()));
+    bound.detail = "INFEASIBLE: no memory tile provides it -- " + bound.detail;
   }
   return bound;
 }
@@ -378,39 +361,50 @@ IIBound calculateRouteMii(Region &region, const Architecture &arch) {
 // and be ranked last for a reason that has nothing to do with its traffic.
 // Self-pairs are excluded -- a value produced and consumed on one tile crosses
 // no link and is not what this term prices.
+//
+// The taskflow allocator used to carry a second implementation of this
+// (`averageHop`) that fed the same objective through `predictedCost`, and the
+// two disagreed on both points above: it counted dist[source]==0 in the pair
+// count, reading ~6.25% low on a connected 16-tile fabric, and it enumerated
+// tiles from getAllTiles() so an ISOLATED tile contributed a zero row and made
+// a worse-connected shape score BETTER. Excluding self-pairs settles both:
+// once dist[source] is skipped, a tile with no links contributes no pair at
+// all, so enumerating the sources from getAllTiles() (done here, as the
+// architecture -- not the link list -- is what defines the tile set) is
+// identical to enumerating them from the link endpoints.
+//
+// Why the shape-blind MII family needs this at all: `ResMII = ceil(ops/tiles)`
+// sees only the tile count and `RouteMII = moves/links` is invariant under
+// transposing the array, so two arrays of equal area score identically where
+// the real mapper does not (fir on 8x4 -> II 6 vs 4x8 -> II 5). This is the
+// topology feature that turns a sound floor into a shape-aware prediction; the
+// floor itself is left untouched.
 //===----------------------------------------------------------------------===//
-double meanHopDistance(const Architecture &arch) {
-  std::vector<Link *> links = arch.getAllLinks();
-  if (links.empty()) {
+double meanHopDistance(const Architecture &arch, bool mem_weighted) {
+  std::vector<Tile *> tiles = arch.getAllTiles();
+  if (tiles.size() < 2) {
     return 0.0;
   }
 
   // Adjacency straight off the link list, so any topology works -- mesh,
   // strip, or the irregular blocks the shape search proposes.
+  llvm::DenseSet<Tile *> present(tiles.begin(), tiles.end());
   llvm::DenseMap<Tile *, llvm::SmallVector<Tile *, 8>> neighbours;
-  llvm::SmallVector<Tile *, 64> tiles;
-  llvm::DenseSet<Tile *> seen;
-  for (Link *link : links) {
+  for (Link *link : arch.getAllLinks()) {
     Tile *src = link->getSrcTile();
     Tile *dst = link->getDstTile();
     if (!src || !dst) {
       continue;
     }
-    neighbours[src].push_back(dst);
-    for (Tile *tile : {src, dst}) {
-      if (seen.insert(tile).second) {
-        tiles.push_back(tile);
-      }
+    if (!present.contains(src) || !present.contains(dst)) {
+      continue;
     }
-  }
-  if (tiles.size() < 2) {
-    return 0.0;
+    neighbours[src].push_back(dst);
   }
 
-  long long total_hops = 0, pairs = 0;
   llvm::DenseMap<Tile *, int> distance;
   llvm::SmallVector<Tile *, 64> queue;
-  for (Tile *source : tiles) {
+  auto bfs = [&](Tile *source) {
     distance.clear();
     queue.clear();
     distance[source] = 0;
@@ -428,6 +422,48 @@ double meanHopDistance(const Architecture &arch) {
         }
       }
     }
+  };
+
+  // Memory-capable tiles: the sources/sinks of every live value.
+  if (mem_weighted) {
+    llvm::DenseSet<Tile *> mem_tiles;
+    for (Tile *tile : tiles) {
+      if (tile->canSupportOperation(ILoadIndexed) ||
+          tile->canSupportOperation(IStoreIndexed) ||
+          tile->canSupportOperation(ILoad) ||
+          tile->canSupportOperation(IStore)) {
+        mem_tiles.insert(tile);
+      }
+    }
+    // No memory FU anywhere (or all of them): the weighting carries no signal,
+    // so fall through to the plain pairwise mean rather than returning a
+    // constant.
+    if (!mem_tiles.empty() && mem_tiles.size() != tiles.size()) {
+      // Mean over tiles of the distance to the nearest memory tile. A memory
+      // tile is at distance 0 from itself: it already holds what it needs.
+      long long total = 0;
+      long long counted = 0;
+      for (Tile *tile : tiles) {
+        bfs(tile);
+        int best = INT_MAX;
+        for (Tile *mem_tile : mem_tiles) {
+          auto found = distance.find(mem_tile);
+          if (found != distance.end()) {
+            best = std::min(best, found->second);
+          }
+        }
+        if (best != INT_MAX) {
+          total += best;
+          ++counted;
+        }
+      }
+      return counted ? (double)total / (double)counted : 0.0;
+    }
+  }
+
+  long long total_hops = 0, pairs = 0;
+  for (Tile *source : tiles) {
+    bfs(source);
     for (auto &[tile, hops] : distance) {
       if (tile == source) {
         continue;
@@ -653,7 +689,17 @@ AnalyticalIIBreakdown computeAnalyticalII(Region &region,
   breakdown.dominant = dominant_name;
 
   breakdown.max_ii = arch.getMaxCtrlMemItems();
-  if (breakdown.max_ii > 0 && max_bound_ii > breakdown.max_ii) {
+  // A capacity-zero FU class is infeasibility, not a large II: no II maps this
+  // kernel on this architecture. Report the ceiling (every floor is vacuously
+  // valid then) and let `infeasible` carry the verdict, so a caller can tell
+  // "does not fit" from "fits, expensively". Marked clamped too, since that is
+  // the flag existing callers already read as "not mappable at this shape".
+  breakdown.infeasible = breakdown.res.infeasible || breakdown.mem.infeasible;
+  if (breakdown.infeasible) {
+    breakdown.final_ii =
+        breakdown.max_ii > 0 ? breakdown.max_ii : std::max(1, max_bound_ii);
+    breakdown.clamped = true;
+  } else if (breakdown.max_ii > 0 && max_bound_ii > breakdown.max_ii) {
     breakdown.final_ii = breakdown.max_ii;
     breakdown.clamped = true;
   } else {
@@ -686,6 +732,9 @@ void AnalyticalIIBreakdown::print(llvm::raw_ostream &os) const {
   os << "  route_hop_mii=" << route_hop.value << " (" << route_hop.detail
      << ")\n";
   os << "  final_ii=" << final_ii << " (dominant=" << dominant;
+  if (infeasible) {
+    os << ", INFEASIBLE: an fu class this kernel needs is provided by no tile";
+  }
   if (clamped) {
     os << ", clamped-to-max_ii=" << max_ii;
   }

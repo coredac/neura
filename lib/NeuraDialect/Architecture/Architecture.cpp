@@ -1,9 +1,12 @@
 #include "NeuraDialect/Architecture/Architecture.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cassert>
 #include <memory>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace mlir;
@@ -744,6 +747,76 @@ void Architecture::removeLink(int src_tile_x, int src_tile_y, int dst_tile_x,
     return; // One of the tiles does not exist.
   removeLink(src_it->second, dst_it->second);
 }
+
+namespace mlir {
+namespace neura {
+
+// See the contract (and the removeTile()/existence=true explanation) in
+// Architecture.h.
+std::unique_ptr<Architecture>
+buildShapedArchitecture(const Architecture &global_arch, int x_tiles,
+                        int y_tiles, llvm::StringRef valid_tiles,
+                        llvm::StringRef diag_tag) {
+  if (x_tiles <= 0 || y_tiles <= 0) {
+    return nullptr;
+  }
+
+  std::vector<TileOverride> overrides;
+  if (!valid_tiles.empty()) {
+    // applyTileOverrides can only REMOVE tiles (existence=false); it cannot
+    // re-add a removed tile. So emit a removal override for every tile NOT in
+    // the valid set, and leave the valid tiles untouched.
+    std::set<std::pair<int, int>> valid_coords;
+    llvm::SmallVector<llvm::StringRef, 4> coords;
+    valid_tiles.split(coords, ',');
+    for (llvm::StringRef coord : coords) {
+      coord = coord.trim(); // tolerate "0_0, 1_1" with spaces after commas.
+      if (coord.empty()) {
+        continue;
+      }
+      auto parts = coord.split('_');
+      int x, y;
+      if (!parts.first.trim().getAsInteger(10, x) &&
+          !parts.second.trim().getAsInteger(10, y)) {
+        // Ignore out-of-grid coords rather than silently removing real tiles.
+        if (x >= 0 && x < x_tiles && y >= 0 && y < y_tiles) {
+          valid_coords.insert({x, y});
+        } else {
+          llvm::errs() << diag_tag << " valid-tiles coord " << x << "_" << y
+                       << " is outside the " << x_tiles << "x" << y_tiles
+                       << " grid; ignored\n";
+        }
+      }
+    }
+    if (valid_coords.empty()) {
+      // Every tile would be removed -> a 0-tile arch, whose predictions and
+      // mappings are meaningless. Fall back to the full rectangle and warn.
+      llvm::errs() << diag_tag
+                   << " valid-tiles selected no tiles in the grid; using the "
+                      "full "
+                   << x_tiles << "x" << y_tiles << " rectangle\n";
+    } else {
+      for (int y = 0; y < y_tiles; ++y) {
+        for (int x = 0; x < x_tiles; ++x) {
+          if (!valid_coords.count({x, y})) {
+            TileOverride tile_override;
+            tile_override.tile_x = x;
+            tile_override.tile_y = y;
+            tile_override.existence = false;
+            overrides.push_back(tile_override);
+          }
+        }
+      }
+    }
+  }
+
+  // Tiles marked existence=false are removed before inter-tile links are
+  // created, so no boundary link connects to an absent tile.
+  return global_arch.cloneWithNewDimensions(y_tiles, x_tiles, overrides);
+}
+
+} // namespace neura
+} // namespace mlir
 
 bool Architecture::canSupportCounter() const {
   for (const auto &[id, tile] : this->tile_storage_) {
