@@ -110,7 +110,13 @@ struct RecurrenceCycle {
 // Collects recurrence cycles rooted at reserve and closed by ctrl_mov.
 SmallVector<RecurrenceCycle, 4> collectRecurrenceCycles(Region &region);
 
-// Calculates ResMII: ceil(#ops / #tiles).
+// Calculates ResMII: ceil(#ops / #tiles), where #ops counts exactly the ops
+// satisfying occupiesFU -- the same set the mapper places. This is numerically
+// identical to the cost model's IssueMII bound (see calculateIssueMii in
+// analytical_cost_model.h) on the same region and tile count; the two are
+// deliberately one formula over one predicate, so the mapper's starting II
+// floor and the analytical floor can never disagree. If you change the op
+// filter, change occupiesFU, not this function.
 int calculateResMii(Region &region, const Architecture &architecture);
 
 // Returns topologically sorted operations in region.

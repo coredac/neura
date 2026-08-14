@@ -648,7 +648,12 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
 //
 // FU-agnostic floor: every op needs some tile-slot per iteration regardless of
 // class. This is exactly the legacy calculateResMii formula, kept as its own
-// bound so nothing is lost by replacing that coarse ResMII with the per-class one.
+// bound so nothing is lost by replacing that coarse ResMII with the per-class
+// one -- and "exactly" is now literal: neura::calculateResMii counts with this
+// same occupiesFU predicate over the same region, so the mapper's starting
+// floor and this bound are equal by construction, not by coincidence. They used
+// to differ by one, because that function's hand-written isa<> list forgot
+// neura::YieldOp; do not reintroduce a second op filter here.
 //===----------------------------------------------------------------------===//
 IIBound calculateIssueMii(Region &region, const Architecture &arch) {
   long long num_ops = 0;

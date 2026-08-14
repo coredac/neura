@@ -125,6 +125,11 @@ IIBound calculateRegMii(Region &region, const Architecture &arch);
 // bandwidth (1 issue / tile / cycle here). Coincides with the crude
 // ceil(#ops / #tiles) baseline and is kept separate so multi-issue tiles are
 // expressible.
+//
+// Equal by construction to neura::calculateResMii (mapping_util.h), which the
+// mapper uses for its starting II floor: both count occupiesFU ops over
+// arch.getNumTiles(). Anything that would make them differ is a bug in one of
+// them -- keep the single predicate rather than two lists kept in step.
 IIBound calculateIssueMii(Region &region, const Architecture &arch);
 
 // Mean directed tile-to-tile distance, in link hops, over the REAL link graph

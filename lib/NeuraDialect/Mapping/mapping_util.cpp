@@ -451,21 +451,27 @@ mlir::neura::collectRecurrenceCycles(Region &region) {
 
 int mlir::neura::calculateResMii(Region &region,
                                  const Architecture &architecture) {
+  // Counts exactly the ops that occupy a tile/FU. This MUST be occupiesFU and
+  // not a hand-rolled isa<> list: the number divided here is a count of tile
+  // issue slots, so it has to be the same set the mapper actually places --
+  // HeuristicMapping filters its worklist with !is_non_materialized, and
+  // collectPlacedOps/--dump-dfg-json/--import-mapping all filter with
+  // occupiesFU.
+  //
+  // The list that used to live here omitted neura::YieldOp, so it counted one
+  // op per kernel body that no tile ever runs. neura.yield is a Terminator /
+  // Pure / ReturnLike region terminator: it names the values leaving a
+  // kernel/fused_op region, the mapper never assigns it a mapping_locs, and
+  // GenerateCodePass skips it when building the DFG, so it emits no
+  // instruction. Counting it inflated this floor by ceil(1/tiles) and made the
+  // mapper start its search one II above the cost model's IssueMII on the same
+  // region -- e.g. axpy on a 15-tile array got res_mii=2 here against
+  // issue_mii=1 there, for the same 15 placed ops.
   int num_ops = 0;
-
-  // Count all "compute" operations (non-terminators, non-block ops).
   region.walk([&](Operation *op) {
-    // Skips non-materialized ops.
-    if (isa<func::FuncOp>(op) ||
-        isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op)) {
-      return;
+    if (occupiesFU(op)) {
+      ++num_ops;
     }
-    // Skips operations inside fused_op regions
-    Operation *parent_op = op->getParentOp();
-    if (isa<neura::FusedOp>(parent_op)) {
-      return;
-    }
-    ++num_ops;
   });
 
   llvm::errs() << "[calculateResMii] Total operations: " << num_ops << "\n";
