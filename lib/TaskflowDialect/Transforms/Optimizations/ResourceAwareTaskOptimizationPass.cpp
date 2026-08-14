@@ -1140,13 +1140,36 @@ struct TaskGraphNode {
   // once at graph construction and looked up here. Indexed by log2(factor),
   // because every proposer doubles.
   llvm::SmallVector<bool, 8> tiling_parallel_by_log2;
+  // Answers for factors the log2 table cannot hold, filled on demand. Same
+  // question, same two predicates; only the indexing differs.
+  mutable llvm::SmallDenseMap<int, bool, 4> tiling_parallel_by_factor;
 
   bool tilingParallel(int factor) const {
     if (factor <= 1)
       return true;
-    unsigned bit = llvm::Log2_32((unsigned)factor);
-    return bit < tiling_parallel_by_log2.size() ? tiling_parallel_by_log2[bit]
-                                                : false;
+    // The table is indexed by log2 because every PROPOSER doubles -- but not
+    // every factor arrives from a proposer. `tiling` is also read straight off
+    // the IR (`tiling` attribute) and out of an imported allocation's `t`,
+    // neither of which is constrained to a power of two. `Log2_32` rounds
+    // DOWN, so a 3-way cut used to be answered by the 2-way entry and a 6-way
+    // cut by the 4-way one: a task whose only parallel-safe split is 2-way
+    // reported its 3-way cut as parallel, and `tileBatches()` then priced
+    // three ordered tiles as one batch.
+    if (llvm::isPowerOf2_32((unsigned)factor)) {
+      unsigned bit = llvm::Log2_32((unsigned)factor);
+      if (bit < tiling_parallel_by_log2.size())
+        return tiling_parallel_by_log2[bit];
+    }
+    auto cached = tiling_parallel_by_factor.find(factor);
+    if (cached != tiling_parallel_by_factor.end())
+      return cached->second;
+    // No op to ask (a synthetic node in a unit test): refuse rather than
+    // inherit some other factor's answer.
+    TaskflowTaskOp task = op;
+    const bool parallel = task && TaskTiler::canTile(task, factor) &&
+                          TaskTiler::tilingIsParallel(task, factor);
+    tiling_parallel_by_factor[factor] = parallel;
+    return parallel;
   }
 
   // Latency of ONE tile: the pipelined execution model applied to the piece of
@@ -1830,8 +1853,15 @@ public:
       const int64_t lat = n->estimatedLatency();
       const int area = std::min(std::max(1, n->allocatedCgras()), kTotalCGRAs);
       const int tiling = std::max(1, n->tiling);
-      if (tiling > 1 && n->tile_group < 0 && n->op &&
-          !TaskTiler::tilingIsParallel(n->op, tiling))
+      // `TaskGraphNode::tilingParallel`, not `TaskTiler::tilingIsParallel`.
+      // Two reasons, and both matter here: this runs once per node on every
+      // scoring call -- `pipelineCycle` is the objective -- and walking the
+      // loop nest from inside the objective is what the answer was tabulated
+      // at graph construction to avoid; and the table also asks `canTile`,
+      // which the bare predicate does not, so scoring a cut here as parallel
+      // while `tileBatches()` scored the same cut as ordered had the model
+      // disagreeing with itself about one node.
+      if (tiling > 1 && n->tile_group < 0 && !n->tilingParallel(tiling))
         ordered_cut.insert(n.get());
       for (int t = 0; t < tiling; ++t) {
         node_items[n.get()].push_back(items.size());
@@ -2070,13 +2100,33 @@ public:
     // Longest path to `target`; -1 marks "cannot reach", so an unreachable
     // branch never contributes.
     DenseMap<const void *, int64_t> memo;
+    // The cycle guard and the memo are two different statements and must not
+    // share a slot. Writing `-1` into `memo` to mark "on the stack" made the
+    // guard's answer indistinguishable from a real "cannot reach", and -- worse
+    // -- the value computed while a back-edge was being suppressed was then
+    // stored as if it were complete. A later query that reaches the same node
+    // from outside the cycle reuses that truncated walk, so `longestPathBetween`
+    // returns a length that depends on the order the recursion happened to
+    // visit the graph in.
+    //
+    // Collapsing a parallel tile group to one key is what makes cycles
+    // reachable at all: two groups that exchange values in both directions are
+    // acyclic per task and cyclic per group.
+    DenseSet<const void *> on_stack;
+    int64_t truncations = 0;
     std::function<int64_t(const void *)> best = [&](const void *node_key) -> int64_t {
       if (node_key == target)
         return 0;
       auto it = memo.find(node_key);
       if (it != memo.end())
         return it->second;
-      memo[node_key] = -1; // cycle guard
+      if (!on_stack.insert(node_key).second) {
+        // A back edge: this walk may not go round again. Not an answer about
+        // the node, so nothing is cached -- here or in any caller below it.
+        ++truncations;
+        return -1;
+      }
+      const int64_t truncations_before = truncations;
       int64_t longest_tail = -1;
       auto succ_it = succ.find(node_key);
       if (succ_it != succ.end())
@@ -2086,7 +2136,9 @@ public:
             continue;
           longest_tail = std::max(longest_tail, weight.lookup(succ_key_of) + delay + tail_len);
         }
-      memo[node_key] = longest_tail;
+      on_stack.erase(node_key);
+      if (truncations == truncations_before)
+        memo[node_key] = longest_tail;
       return longest_tail;
     };
     const void *src = key(from);
@@ -2456,8 +2508,24 @@ public:
     // A VERIFIED profile still carries the shape: there the mapper or the
     // solver is handed the actual tile array, and that is the whole point of
     // running it.
+    // ...and the closed form is what `estimation-mode=analytical` asks for. It
+    // is NOT what `cost-model-analytical` asks for. That mode's II is
+    // `neura::computeAnalyticalII` -- the parametric model, which also charges
+    // MemMII / RouteMII / RegMII / IssueMII, prices them on the architecture
+    // the candidate SHAPE defines, and counts `neura.data_mov` ops that exist
+    // only after InsertDataMov has run on the CLONE. None of that is
+    // reproducible from the three body facts, and the in-place body carries no
+    // data_mov at all (RouteMII would read 0 there).
+    //
+    // So the shortcut, and the shape-blind key that goes with it, apply only
+    // when the closed form IS the model. Under `cost-model-analytical` this
+    // path returned before `profileTaskUncached` -- the only caller of
+    // `computeAnalyticalII` -- ever ran, so the mode served the crude
+    // max(ceil(n_ops/tiles), rec_mii) estimate under the full model's name.
+    const bool closed_form_is_the_model = skip_mapper && !use_full_cost_model;
     const auto key = std::make_tuple(
-        identity, skip_mapper ? std::string("*") : node->shape.irAttr(),
+        identity,
+        closed_form_is_the_model ? std::string("*") : node->shape.irAttr(),
         skip_mapper ? 1 : 0);
     auto cached = profile_cache->find(key);
     // The ranking compiles nothing at all.
@@ -2473,7 +2541,7 @@ public:
     // So the facts are read in place, once per task body, and every shape after
     // that is arithmetic. On gemver this replaced 30 clone-and-lower rounds
     // with 3 IR walks.
-    if (skip_mapper && cached == profile_cache->end()) {
+    if (closed_form_is_the_model && cached == profile_cache->end()) {
       int64_t body_ops = 0, body_rec = 1, body_steps = 1;
       if (readBodyFactsInPlace(task, body_ops, body_rec, body_steps)) {
         ProfileResult facts;
@@ -2490,7 +2558,10 @@ public:
       node->steps = cached->second.steps;
       node->n_ops = cached->second.n_ops;
       node->rec_mii = cached->second.rec_mii;
-      if (!skip_mapper) {
+      // A parametric entry is stored complete and keyed on its shape, so it is
+      // served as-is; re-deriving the closed form on top of it would put the
+      // crude estimate back and undo the model the mode was asked for.
+      if (!closed_form_is_the_model) {
         node->ii = cached->second.ii;
         node->avg_hop = cached->second.avg_hop;
         node->predicted_cost = cached->second.predicted_cost;
@@ -3715,6 +3786,14 @@ public:
     SmallVector<int> cgra_count, replicas, tiling;
   };
 
+  // `budget_left` is what the grid has free for THIS node, its own current
+  // footprint included: the caller computes it as
+  // `grid_budget - total_allocated + node->footprintCgras()`. Adding
+  // `cgra_count` on top credits that footprint a second time -- and a third
+  // over, since the footprint is `cgra_count * replicas * tiling` while the
+  // extra credit is `cgra_count`, so the overspend grows with both DLP knobs.
+  // The greedy climb (`balanceImpl`) compares its candidates against
+  // `budget_left` alone, which is why the two searches disagreed on what fits.
   AxisOptions axisOptionsFor(TaskGraphNode *node, int budget_left) const {
     AxisOptions options;
     options.cgra_count.push_back(node->cgra_count);
@@ -3722,7 +3801,7 @@ public:
       if (next != node->cgra_count && canFitOnGrid(next) &&
           next <= node->trip_count &&
           next * std::max(1, node->replicas) * std::max(1, node->tiling) <=
-              node->cgra_count + budget_left)
+              budget_left)
         options.cgra_count.push_back(next);
     }
     options.replicas.push_back(node->replicas);
@@ -3854,14 +3933,38 @@ public:
                   : centre.ii[bottleneck->id];
           for (int replicas : axes.replicas) {
             for (int tiling : axes.tiling) {
+              // `budget_left` already contains the bottleneck's own footprint;
+              // see `axisOptionsFor`.
               if (cgras * std::max(1, replicas) * std::max(1, tiling) >
-                  bottleneck->cgra_count + budget_left)
+                  budget_left)
                 continue;
               // The cross product pairs a cgra_count with a replica count the
               // axis enumerator cleared against a DIFFERENT cgra_count, so the
               // spatial check belongs here as well as there.
               if (!TaskGraphNode::replicasFitGrid(cgras, replicas))
                 continue;
+              // And the same holds for the PARTITION space, which is what the
+              // two DLP knobs actually spend. `axisOptionsFor` cleared
+              // `replicas + 1` against the current tiling and `tiling * 2`
+              // against the current replica count; the pair reaches the pool
+              // having been cleared against neither, so a task with 4 root
+              // partitions can be offered 2 replicas x 4 tiles = 8 of them.
+              // Replicas need a parallel-safe dimension (`root_trip`); tiling
+              // may cut any level (`split_space`). The centre is exempt: it is
+              // the "leave it alone" member and must stay in the pool whatever
+              // an earlier decision or an imported allocation put there.
+              const int64_t partitions =
+                  (int64_t)std::max(1, replicas) * std::max(1, tiling);
+              // The bottleneck still holds the centre's values here: every
+              // candidate restores them before the next one is scored.
+              const bool is_centre = replicas == bottleneck->replicas &&
+                                     tiling == bottleneck->tiling;
+              if (!is_centre) {
+                if (partitions > bottleneck->split_space)
+                  continue;
+                if (replicas > 1 && partitions > bottleneck->root_trip)
+                  continue;
+              }
               bottleneck->cgra_count = cgras;
               bottleneck->shape = shape;
               bottleneck->replicas = replicas;
