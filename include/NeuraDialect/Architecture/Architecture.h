@@ -92,7 +92,17 @@ enum OperationKind {
   ICtrlMov = 40,
   // Counter operations.
   ICounter = 41,
-  IExtractPredicate = 42
+  IExtractPredicate = 42,
+  // No modelled functional unit.
+  //
+  // Returned by getOperationKindFromMlirOp for any op whose FU is not described
+  // here (neura.carry / merge / invariant / true_steer / false_steer / fmax /
+  // fmin / mul_add / vadd / vmul / vfadd / memset / gather / ...). It is
+  // deliberately absent from kFuTypesToOperations, so fuClassOf reports "other"
+  // and tilesProvidingFuClass returns EVERY tile: unknown means unconstrained,
+  // never infeasible. This used to be spelled `IAdd`, which claimed the op ran
+  // on an adder and priced it against the adder capacity.
+  IUnknown = 43
 };
 
 // Maps hardware resource names to their supported operations.

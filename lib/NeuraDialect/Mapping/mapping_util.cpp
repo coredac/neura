@@ -68,6 +68,8 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   // Logical operations
   if (isa<neura::OrOp>(op))
     return IOr;
+  if (isa<neura::AndOp>(op))
+    return IAnd;
   if (isa<neura::NotOp>(op))
     return INot;
   if (isa<neura::ICmpOp>(op))
@@ -100,7 +102,17 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   // Control flow operations
   if (isa<neura::ReturnOp>(op))
     return IReturn;
+  // The dataflow-mode returns are the same return FU as neura.return; they are
+  // not terminators, so they are placed like any other op.
+  if (isa<neura::ReturnVoidOp>(op))
+    return IReturn;
+  if (isa<neura::ReturnValueOp>(op))
+    return IReturn;
   if (isa<neura::PhiOp>(op))
+    return IPhi;
+  // phi_start is the loop-initialisation phi (init value + reserve), so it runs
+  // on the same phi FU as a general phi merge.
+  if (isa<neura::PhiStartOp>(op))
     return IPhi;
 
   // Data movement operations
@@ -127,8 +139,32 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   if (isa<neura::ConstantOp>(op))
     return IConstant;
 
-  // Default fallback
-  return IAdd;
+  // Counter operations
+  if (isa<neura::CounterOp>(op))
+    return ICounter;
+  if (isa<neura::ExtractPredicateOp>(op))
+    return IExtractPredicate;
+
+  // Anything else has no FU class in kFuTypesToOperations, so it is reported as
+  // unknown rather than silently claiming to be an adder. Unknown is treated as
+  // UNCONSTRAINED everywhere (fuClassOf -> "other" -> every tile), never as
+  // infeasible -- see IUnknown in Architecture.h and tileCanRunOp below.
+  //
+  // Deliberately NOT enumerated here, even though a plausible kind exists:
+  //   - neura.memset / neura.gather. IStore / ILoadIndexed would be defensible,
+  //     but "mem" and "mem_indexed" are scarce on the pruned specs (7 of 16
+  //     tiles on test/arch_spec/architecture.yaml), so claiming them would move
+  //     currently-passing placements and add these ops to MemMII. That is a
+  //     modelling decision about what a memset costs, not a fix to a mislabelled
+  //     FU, so it is left out of this change.
+  //   - neura.carry / merge / invariant (ICarryInvariant / IConditionalSelect /
+  //     IInvariantGroup exist in the enum but no FU class lists them), and
+  //     neura.true_steer / false_steer / fmax / fmin / mul_add / vadd / vmul /
+  //     vfadd / fneg / gep, which have no OperationKind at all. Every one of
+  //     these resolves to "other" whether or not it gets an arm here, so the arm
+  //     would add nothing today and would silently become a placement
+  //     constraint the day someone adds the kind to kFuTypesToOperations.
+  return IUnknown;
 }
 
 // Returns true if the operation does not need CGRA tile placement.
@@ -178,6 +214,24 @@ static const std::map<OperationKind, std::string> &kindToFuClassTable() {
     return inverse;
   }();
   return table;
+}
+
+// Whether `tile` can run `op`, as the mapper's tile filter needs it.
+//
+// Distinct from Tile::canSupportOperation(getOperationKindFromMlirOp(op)): an op
+// whose kind no FU class describes (IUnknown, or one of the enum kinds absent
+// from kFuTypesToOperations, e.g. ICarryInvariant) is UNCONSTRAINED and runs
+// anywhere, whereas canSupportOperation answers "no" for every tile and the
+// mapper then aborts with "not supported by any tile". This is the same
+// unknown-means-unconstrained rule tilesProvidingFuClass applies -- see the
+// header -- and it is what kept neura.carry / mul_add / vadd mappable back when
+// the kind lookup fell through to IAdd.
+static bool tileCanRunOp(const Tile *tile, Operation *op) {
+  OperationKind kind = getOperationKindFromMlirOp(op);
+  if (!kindToFuClassTable().count(kind)) {
+    return true;
+  }
+  return tile->canSupportOperation(kind);
 }
 
 std::string fuClassOf(Operation *op) {
@@ -1151,7 +1205,7 @@ mlir::neura::calculateAward(Operation *op, std::set<Operation *> &critical_ops,
   // Early exit if the operation is not supported by all the tiles.
   bool op_can_be_supported = false;
   for (Tile *tile : architecture.getAllTiles()) {
-    if (tile->canSupportOperation(getOperationKindFromMlirOp(op))) {
+    if (tileCanRunOp(tile, op)) {
       op_can_be_supported = true;
     }
   }
@@ -1194,7 +1248,7 @@ mlir::neura::calculateAward(Operation *op, std::set<Operation *> &critical_ops,
                << "; Producers: " << producers.size() << "\n";
 
   for (Tile *tile : architecture.getAllTiles()) {
-    if (!tile->canSupportOperation(getOperationKindFromMlirOp(op))) {
+    if (!tileCanRunOp(tile, op)) {
       llvm::errs() << "[calculateAward] Tile<" << tile->getX() << ", "
                    << tile->getY() << "> does not support operation: " << *op
                    << "\n";

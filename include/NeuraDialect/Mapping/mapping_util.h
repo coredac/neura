@@ -8,7 +8,14 @@
 
 namespace mlir {
 namespace neura {
-// Returns the kind of operation from the MLIR operation.
+// Returns the kind of operation from the MLIR operation, or IUnknown when the
+// op has no modelled functional unit. IUnknown is NOT a member of any FU class,
+// so fuClassOf reports "other" for it and every consumer must treat it as
+// unconstrained (runs on any tile), never as infeasible. It used to fall
+// through to IAdd, which made ~20 op kinds -- counter, phi_start, and,
+// return_value, extract_predicate, carry, merge, invariant, the steers, fmax /
+// fmin, mul_add, the vector ops, memset, gather -- claim the adder class and be
+// priced against the adder capacity.
 OperationKind getOperationKindFromMlirOp(Operation *op);
 
 // Returns true if the operation does not need CGRA tile placement.
