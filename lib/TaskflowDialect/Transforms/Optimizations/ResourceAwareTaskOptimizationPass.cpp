@@ -2476,13 +2476,14 @@ public:
       return false;
 
     n_ops = 0;
+    // `occupiesFU`, not a fourth hand-written copy of its op list. This walks
+    // the live pipeline IR, whose kernel terminator IS `neura.yield`, and the
+    // list this replaced did not skip it -- so it returned one more op than
+    // `neura::calculateResMii` counts on the same body, and the closed form
+    // divided a slot count including an op no tile ever runs.
     region.walk([&](Operation *op) {
-      if (isa<func::FuncOp>(op) ||
-          isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op))
-        return;
-      if (op->getParentOp() && isa<neura::FusedOp>(op->getParentOp()))
-        return;
-      ++n_ops;
+      if (neura::occupiesFU(op))
+        ++n_ops;
     });
 
     rec_mii = 1;
@@ -2535,24 +2536,24 @@ public:
     // A VERIFIED profile still carries the shape: there the mapper or the
     // solver is handed the actual tile array, and that is the whole point of
     // running it.
-    // ...and the closed form is what `estimation-mode=analytical` asks for. It
-    // is NOT what `cost-model-analytical` asks for. That mode's II is
-    // `neura::computeAnalyticalII` -- the parametric model, which also charges
-    // MemMII / RouteMII / RegMII / IssueMII, prices them on the architecture
-    // the candidate SHAPE defines, and counts `neura.data_mov` ops that exist
-    // only after InsertDataMov has run on the CLONE. None of that is
-    // reproducible from the three body facts, and the in-place body carries no
-    // data_mov at all (RouteMII would read 0 there).
+    // `estimation-mode=cost-model-analytical` does NOT change this. That mode
+    // selects what a VERIFIED candidate is measured with -- the parametric
+    // `neura::computeAnalyticalII` instead of the mapper -- and its only call
+    // site is `runNeuraPipelineOnKernel`, on the clone, which the ranking does
+    // not reach. Ranking stays closed-form under every estimation mode, so the
+    // key stays shape-blind here.
     //
-    // So the shortcut, and the shape-blind key that goes with it, apply only
-    // when the closed form IS the model. Under `cost-model-analytical` this
-    // path returned before `profileTaskUncached` -- the only caller of
-    // `computeAnalyticalII` -- ever ran, so the mode served the crude
-    // max(ceil(n_ops/tiles), rec_mii) estimate under the full model's name.
-    const bool closed_form_is_the_model = skip_mapper && !use_full_cost_model;
+    // This was briefly the other way round. Making the mode reach the ranking
+    // is possible -- the parametric model additionally charges MemMII /
+    // RouteMII / RegMII / IssueMII and counts `neura.data_mov` ops that only
+    // exist after InsertDataMov has run, so it needs the clone and cannot be
+    // had from the three body facts -- but it costs the property the whole
+    // search is built on. Measured on gemver: profiles went 60 to 180 and
+    // parametric evaluations 12 to 42, for e2e 4.610x to 4.633x and no change
+    // at all on the fourteen kernels. Not worth trading "the ranking compiles
+    // nothing" for.
     const auto key = std::make_tuple(
-        identity,
-        closed_form_is_the_model ? std::string("*") : node->shape.irAttr(),
+        identity, skip_mapper ? std::string("*") : node->shape.irAttr(),
         skip_mapper ? 1 : 0);
     auto cached = profile_cache->find(key);
     // The ranking compiles nothing at all.
@@ -2568,7 +2569,7 @@ public:
     // So the facts are read in place, once per task body, and every shape after
     // that is arithmetic. On gemver this replaced 30 clone-and-lower rounds
     // with 3 IR walks.
-    if (closed_form_is_the_model && cached == profile_cache->end()) {
+    if (skip_mapper && cached == profile_cache->end()) {
       int64_t body_ops = 0, body_rec = 1, body_steps = 1;
       if (readBodyFactsInPlace(task, body_ops, body_rec, body_steps)) {
         ProfileResult facts;
@@ -2585,10 +2586,10 @@ public:
       node->steps = cached->second.steps;
       node->n_ops = cached->second.n_ops;
       node->rec_mii = cached->second.rec_mii;
-      // A parametric entry is stored complete and keyed on its shape, so it is
-      // served as-is; re-deriving the closed form on top of it would put the
-      // crude estimate back and undo the model the mode was asked for.
-      if (!closed_form_is_the_model) {
+      // A verified entry is stored complete and keyed on its shape, so it is
+      // served as-is; re-deriving the closed form on top of it would discard
+      // the measurement that was paid for.
+      if (!skip_mapper) {
         node->ii = cached->second.ii;
         node->avg_hop = cached->second.avg_hop;
         node->predicted_cost = cached->second.predicted_cost;
