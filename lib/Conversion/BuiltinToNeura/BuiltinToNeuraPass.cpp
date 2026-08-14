@@ -1,5 +1,5 @@
 #include "Common/AcceleratorAttrs.h"
-#include "Conversion/ConversionPasses.h"
+#include "Conversion/NeuraConversionPasses.h"
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"

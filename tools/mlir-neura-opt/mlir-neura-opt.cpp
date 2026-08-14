@@ -21,13 +21,11 @@
 #include "mlir/Tools/mlir-opt/MlirOptMain.h"
 #include "llvm/Support/CommandLine.h"
 
-#include "Conversion/ConversionPasses.h"
+#include "Conversion/NeuraConversionPasses.h"
 #include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraPasses.h"
 #include "NeuraDialect/Util/ArchParser.h"
-#include "TaskflowDialect/TaskflowDialect.h"
-#include "TaskflowDialect/TaskflowPasses.h"
 using mlir::neura::Architecture;
 using mlir::neura::util::ArchParser;
 
@@ -107,7 +105,6 @@ int main(int argc, char **argv) {
   registry.insert<mlir::linalg::LinalgDialect>();
   registry.insert<mlir::tosa::TosaDialect>();
   registry.insert<mlir::bufferization::BufferizationDialect>();
-  registry.insert<mlir::taskflow::TaskflowDialect>();
   registry.insert<mlir::math::MathDialect>();
   mlir::registerAllExtensions(registry);
   mlir::linalg::registerBufferizableOpInterfaceExternalModels(registry);
@@ -119,9 +116,8 @@ int main(int argc, char **argv) {
 
   mlir::neura::registerPasses();
   mlir::registerAllPasses();
-  mlir::registerPasses();
+  mlir::registerNeuraConversionPasses();
   mlir::registerViewOpGraphPass();
-  mlir::taskflow::registerPasses();
 
   // Register all standard conversion passes
   mlir::registerConversionPasses();

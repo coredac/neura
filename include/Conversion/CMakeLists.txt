@@ -1,3 +1,3 @@
-set(LLVM_TARGET_DEFINITIONS ConversionPasses.td)
-mlir_tablegen(ConversionPasses.h.inc --gen-pass-decls)
-add_public_tablegen_target(MLIRConversionIncGen)
+set(LLVM_TARGET_DEFINITIONS NeuraConversionPasses.td)
+mlir_tablegen(NeuraConversionPasses.h.inc --gen-pass-decls -name NeuraConversion)
+add_public_tablegen_target(MLIRNeuraConversionIncGen)
