@@ -148,95 +148,15 @@ struct CgraShape {
 //
 // The floor `LB` is left untouched — it stays sound for proofs and pruning; the
 // prediction is used only for ranking/selection.
-//===----------------------------------------------------------------------===//
 //
-// Two variants:
-//   * `mem_weighted=false` — mean over ALL ordered tile pairs. Cheap, but it is
-//     invariant under transposing the array (W x H and H x W have the same mean
-//     distance), so it cannot separate 8x4 from 4x8.
-//   * `mem_weighted=true`  — mean distance from every tile to its NEAREST
-//     memory-capable tile. Live values enter and leave the fabric through the
-//     memory FUs, and those sit on an asymmetric subset of tiles
-//     (`tile_overrides` puts them on the left column and top row), so this
-//     variant IS orientation-sensitive and separates 8x4 from 4x8.
-static double averageHop(const neura::Architecture &arch,
-                         bool mem_weighted = false) {
-  std::vector<neura::Tile *> tiles = arch.getAllTiles();
-  if (tiles.size() < 2)
-    return 0.0;
-  // Adjacency over the real link graph.
-  llvm::DenseMap<int, SmallVector<int, 4>> adj;
-  llvm::DenseSet<int> ids;
-  for (neura::Tile *tile : tiles)
-    ids.insert(tile->getId());
-  for (neura::Link *link : arch.getAllLinks()) {
-    neura::Tile *src = link->getSrcTile(), *dst = link->getDstTile();
-    if (!src || !dst)
-      continue;
-    if (ids.contains(src->getId()) && ids.contains(dst->getId()))
-      adj[src->getId()].push_back(dst->getId());
-  }
-  // Memory-capable tiles: the sources/sinks of every live value.
-  llvm::DenseSet<int> mem_tiles;
-  if (mem_weighted) {
-    for (neura::Tile *tile : tiles)
-      if (tile->canSupportOperation(neura::ILoadIndexed) ||
-          tile->canSupportOperation(neura::IStoreIndexed) ||
-          tile->canSupportOperation(neura::ILoad) ||
-          tile->canSupportOperation(neura::IStore))
-        mem_tiles.insert(tile->getId());
-    // No memory FU anywhere (or all of them): the weighting carries no signal.
-    if (mem_tiles.empty() || mem_tiles.size() == tiles.size())
-      mem_weighted = false;
-  }
-
-  auto bfs = [&](int src, llvm::DenseMap<int, int> &dist) {
-    std::deque<int> q;
-    dist[src] = 0;
-    q.push_back(src);
-    while (!q.empty()) {
-      int u = q.front();
-      q.pop_front();
-      for (int v : adj[u])
-        if (!dist.count(v)) {
-          dist[v] = dist[u] + 1;
-          q.push_back(v);
-        }
-    }
-  };
-
-  if (mem_weighted) {
-    // Mean over tiles of the distance to the nearest memory tile.
-    long long total = 0;
-    int counted = 0;
-    for (neura::Tile *tile : tiles) {
-      llvm::DenseMap<int, int> dist;
-      bfs(tile->getId(), dist);
-      int best = INT_MAX;
-      for (int m : mem_tiles) {
-        auto it = dist.find(m);
-        if (it != dist.end())
-          best = std::min(best, it->second);
-      }
-      if (best != INT_MAX) {
-        total += best;
-        ++counted;
-      }
-    }
-    return counted ? (double)total / (double)counted : 0.0;
-  }
-
-  long long total = 0, pairs = 0;
-  for (neura::Tile *src_tile : tiles) {
-    llvm::DenseMap<int, int> dist;
-    bfs(src_tile->getId(), dist);
-    for (auto &[id, d] : dist) {
-      total += d;
-      ++pairs;
-    }
-  }
-  return pairs ? (double)total / (double)pairs : 0.0;
-}
+// It is `neura::meanHopDistance(arch, mem_weighted)`, in NeuraDialect. This
+// file used to carry its own `averageHop` with both variants; the two fed the
+// SAME objective (this one through `predictedCost`, the other through
+// route_hop -> predicted_ii) and disagreed numerically, so there is one
+// implementation now and it is the NeuraDialect one -- amoeba consumes this
+// repo as a submodule and prices shapes without linking TaskflowDialect. See
+// meanHopDistance for which semantics survived and why.
+//===----------------------------------------------------------------------===//
 
 // Mean latency of getting one message across the whole fabric: the mean
 // tile-to-tile hop distance times the per-link latency. This is the physical
@@ -308,13 +228,13 @@ static double fabricMessageLatency(const neura::Architecture &arch,
       fabric_cols > arch.getPerCgraColumns()) {
     std::unique_ptr<neura::Architecture> fabric =
         arch.cloneWithNewDimensions(fabric_rows, fabric_cols);
-    hops = averageHop(*fabric, /*mem_weighted=*/false);
+    hops = neura::meanHopDistance(*fabric, /*mem_weighted=*/false);
     std::vector<neura::Link *> links = fabric->getAllLinks();
     link_latency = meanLatency(links);
     num_links = links.size();
   } else {
     // Single-CGRA architecture: the per-CGRA mesh IS the fabric.
-    hops = averageHop(arch, /*mem_weighted=*/false);
+    hops = neura::meanHopDistance(arch, /*mem_weighted=*/false);
     std::vector<neura::Link *> links = arch.getAllLinks();
     link_latency = meanLatency(links);
     num_links = links.size();
@@ -2670,7 +2590,7 @@ public:
       llvm::errs() << "[profileTask] Phase 2 failed for kernel in "
                    << task.getTaskName() << ", extracting partial\n";
       extractMetricsFromPartialIR(phase2_module, compiled_ii, cp_depth, x_tiles,
-                                  y_tiles);
+                                  y_tiles, valid_tiles);
     }
     phase2_module.erase();
 
@@ -2772,9 +2692,9 @@ public:
       return cached->second;
     std::unique_ptr<neura::Architecture> array =
         neura::getArchitecture().cloneWithNewDimensions(key.first, key.second);
-    const double hops =
-        array ? averageHop(*array, mem_weighted_hop)
-              : averageHop(neura::getArchitecture(), mem_weighted_hop);
+    const double hops = array ? neura::meanHopDistance(*array, mem_weighted_hop)
+                              : neura::meanHopDistance(neura::getArchitecture(),
+                                                       mem_weighted_hop);
     hop_by_shape[key] = hops;
     return hops;
   }
@@ -2985,21 +2905,25 @@ private:
       // Pre-mapper pipeline failed — extract best-effort metrics from partial
       // Neura IR using ResMII/RecMII analysis with the correct multi-CGRA arch.
       extractMetricsFromPartialIR(dst_module, compiled_ii, cp_depth, x_tiles,
-                                  y_tiles);
+                                  y_tiles, valid_tiles);
       return failure();
     }
 
     // Computes ResMII/RecMII as analytical lower-bound (fallback when mapper
     // is skipped or fails).  Uses a custom arch sized to the actual tile array.
+    //
+    // `valid_tiles` matters here, not just downstream. x_tiles/y_tiles are the
+    // BOUNDING BOX of the candidate shape, so pricing a non-rectangular
+    // candidate on the bare rectangle hands it tiles it does not own -- 4
+    // CGRAs' worth for a 3-CGRA L, 6 for a 4-CGRA T -- while the mapper and the
+    // CP-SAT solver below are given the real tile set. That made every
+    // non-rectangular candidate look systematically cheaper than it is.
     {
-      std::unique_ptr<neura::Architecture> custom_arch;
-      const neura::Architecture *arch_ptr = &neura::getArchitecture();
-      if (x_tiles > 0 && y_tiles > 0) {
-        custom_arch =
-            neura::getArchitecture().cloneWithNewDimensions(y_tiles, x_tiles);
-        arch_ptr = custom_arch.get();
-      }
-      const neura::Architecture &architecture = *arch_ptr;
+      std::unique_ptr<neura::Architecture> custom_arch =
+          neura::buildShapedArchitecture(neura::getArchitecture(), x_tiles,
+                                         y_tiles, valid_tiles, "[profileTask]");
+      const neura::Architecture &architecture =
+          custom_arch ? *custom_arch : neura::getArchitecture();
 
       dst_module.walk([&](func::FuncOp fn) {
         if (!fn->hasAttr("accelerator"))
@@ -3057,7 +2981,7 @@ private:
                      << " tiles=" << architecture.getNumTiles() << "\n";
 
         if (out_avg_hop)
-          *out_avg_hop = averageHop(architecture, mem_weighted_hop);
+          *out_avg_hop = neura::meanHopDistance(architecture, mem_weighted_hop);
         if (out_rec_mii)
           *out_rec_mii = rec_mii;
         if (out_n_ops) {
@@ -3349,19 +3273,20 @@ private:
   }
 
   // Extracts ResMII/RecMII from partially-lowered IR when the full pipeline
-  // fails.  Uses custom arch sized to x_tiles × y_tiles if provided.
+  // fails.  Uses custom arch sized to x_tiles × y_tiles if provided, minus the
+  // tiles a non-rectangular `valid_tiles` shape does not own -- the failure
+  // path must price the same architecture the success path does, or a candidate
+  // gets a cheaper score for having failed to lower.
   void extractMetricsFromPartialIR(ModuleOp tmp_module, int &out_ii,
                                    int &out_cp_depth, int x_tiles = 0,
-                                   int y_tiles = 0) {
+                                   int y_tiles = 0,
+                                   const std::string &valid_tiles = "") {
     // Builds architecture: uses custom tile dimensions if provided.
-    std::unique_ptr<neura::Architecture> custom_arch;
-    const neura::Architecture *arch_ptr = &neura::getArchitecture();
-    if (x_tiles > 0 && y_tiles > 0) {
-      custom_arch =
-          neura::getArchitecture().cloneWithNewDimensions(y_tiles, x_tiles);
-      arch_ptr = custom_arch.get();
-    }
-    const neura::Architecture &architecture = *arch_ptr;
+    std::unique_ptr<neura::Architecture> custom_arch =
+        neura::buildShapedArchitecture(neura::getArchitecture(), x_tiles,
+                                       y_tiles, valid_tiles, "[profileTask]");
+    const neura::Architecture &architecture =
+        custom_arch ? *custom_arch : neura::getArchitecture();
 
     int res_mii = 1;
     int rec_mii = 1;
