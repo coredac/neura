@@ -43,7 +43,7 @@ namespace {
 // rather than empty.
 int tilesSupportingClass(const Architecture &arch,
                          const std::string &fu_class) {
-  return (int)tilesProvidingFuClass(arch, fu_class).size();
+  return static_cast<int>(tilesProvidingFuClass(arch, fu_class).size());
 }
 
 // Bit width carried by an SSA value (for routing channel demand).
@@ -160,8 +160,7 @@ IIBound calculateResMiiPerClass(Region &region, const Architecture &arch) {
 // scheduler's precedence  t[dst] >= t[src] + lat(src) + hop - omega*II  with
 // hop dropped (a lower bound, hop >= 0).
 //===----------------------------------------------------------------------===//
-IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
-  (void)arch;
+IIBound calculateRecMiiWeighted(Region &region, const Architecture &) {
   IIBound bound;
   bound.value = 1;
   bound.detail = "no recurrence";
@@ -182,54 +181,56 @@ IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
     int delay;
     int omega;
   };
-  std::vector<std::vector<Arc>> out(placed_ops.size());
+  std::vector<std::vector<Arc>> outgoing_arcs(placed_ops.size());
   long long total_delay = 0;
   for (const DependenceEdge &edge : dfg_edges) {
     // Edge delay is the producer's latency, matching the scheduler's
     // precedence constraint.
     int delay = std::max(1, getOpLatency(placed_ops[edge.src]));
-    out[edge.src].push_back({edge.dst, delay, edge.omega});
+    outgoing_arcs[edge.src].push_back({edge.dst, delay, edge.omega});
     total_delay += delay;
   }
 
-  // Max cycle ratio via binary search on r: a cycle has ratio > r iff the graph
-  // with edge weight (delay - r*omega) has a positive cycle. Every cycle uses
-  // >=1 omega=1 back-edge (forward edges form a DAG), so the ratio is finite.
-  const int num_nodes = (int)placed_ops.size();
-  auto hasPositiveCycle = [&](double r) {
-    std::vector<double> dist(num_nodes, 0.0);
-    for (int iter = 0; iter < num_nodes; ++iter) {
+  // Max cycle ratio via binary search on `ratio`: a cycle exceeds `ratio` iff
+  // the graph with edge weight (delay - ratio*omega) has a positive cycle.
+  // Every cycle uses >=1 omega=1 back-edge (forward edges form a DAG), so the
+  // ratio is finite.
+  const int num_nodes = static_cast<int>(placed_ops.size());
+  auto hasPositiveCycle = [&](double ratio) {
+    std::vector<double> longest_path(num_nodes, 0.0);
+    for (int pass = 0; pass < num_nodes; ++pass) {
       bool updated = false;
-      for (int u = 0; u < num_nodes; ++u) {
-        for (const Arc &arc : out[u]) {
-          double relaxed = dist[u] + (arc.delay - r * arc.omega);
-          if (relaxed > dist[arc.dst] + 1e-9) {
-            dist[arc.dst] = relaxed;
+      for (int node = 0; node < num_nodes; ++node) {
+        for (const Arc &arc : outgoing_arcs[node]) {
+          double relaxed = longest_path[node] + (arc.delay - ratio * arc.omega);
+          if (relaxed > longest_path[arc.dst] + 1e-9) {
+            longest_path[arc.dst] = relaxed;
             updated = true;
           }
         }
       }
       if (!updated) {
-        return false; // settled with no positive cycle
+        return false; // Settled with no positive cycle.
       }
     }
-    return true; // still relaxing after |V| passes => positive cycle
+    return true; // Still relaxing after |V| passes, so a positive cycle exists.
   };
-  double lo = 0.0, hi = (double)total_delay + 1.0;
-  if (hasPositiveCycle(0.0)) { // a recurrence exists at all
-    for (int iter = 0; iter < 100; ++iter) {
-      double mid = 0.5 * (lo + hi);
-      if (hasPositiveCycle(mid)) {
-        lo = mid;
+  double lower_ratio = 0.0;
+  double upper_ratio = static_cast<double>(total_delay) + 1.0;
+  if (hasPositiveCycle(0.0)) { // A recurrence exists at all.
+    for (int step = 0; step < 100; ++step) {
+      double mid_ratio = 0.5 * (lower_ratio + upper_ratio);
+      if (hasPositiveCycle(mid_ratio)) {
+        lower_ratio = mid_ratio;
       } else {
-        hi = mid;
+        upper_ratio = mid_ratio;
       }
     }
-    int rec_ii = std::max(1, (int)std::ceil(lo - 1e-6));
+    int rec_ii = std::max(1, static_cast<int>(std::ceil(lower_ratio - 1e-6)));
     bound.value = rec_ii;
     bound.demand = rec_ii;
     bound.capacity = 1;
-    bound.detail = "critical circuit ratio=" + std::to_string(lo);
+    bound.detail = "critical circuit ratio=" + std::to_string(lower_ratio);
   }
   return bound;
 }
@@ -388,23 +389,24 @@ double meanHopDistance(const Architecture &arch, bool mem_weighted) {
 
   // Adjacency straight off the link list, so any topology works -- mesh,
   // strip, or the irregular blocks the shape search proposes.
-  llvm::DenseSet<Tile *> present(tiles.begin(), tiles.end());
+  llvm::DenseSet<Tile *> present_tiles(tiles.begin(), tiles.end());
   llvm::DenseMap<Tile *, llvm::SmallVector<Tile *, 8>> neighbours;
   for (Link *link : arch.getAllLinks()) {
-    Tile *src = link->getSrcTile();
-    Tile *dst = link->getDstTile();
-    if (!src || !dst) {
+    Tile *src_tile = link->getSrcTile();
+    Tile *dst_tile = link->getDstTile();
+    if (!src_tile || !dst_tile) {
       continue;
     }
-    if (!present.contains(src) || !present.contains(dst)) {
+    if (!present_tiles.contains(src_tile) ||
+        !present_tiles.contains(dst_tile)) {
       continue;
     }
-    neighbours[src].push_back(dst);
+    neighbours[src_tile].push_back(dst_tile);
   }
 
   llvm::DenseMap<Tile *, int> distance;
   llvm::SmallVector<Tile *, 64> queue;
-  auto bfs = [&](Tile *source) {
+  auto runBfs = [&](Tile *source) {
     distance.clear();
     queue.clear();
     distance[source] = 0;
@@ -425,15 +427,20 @@ double meanHopDistance(const Architecture &arch, bool mem_weighted) {
   };
 
   // Memory-capable tiles: the sources/sinks of every live value.
+  //
+  // Asked through tilesProvidingFuClass, so "which tiles can do memory" has one
+  // implementation, shared with MemMII and with the mapper's tile filter. It is
+  // the same set as probing ILoad/IStore/ILoadIndexed/IStoreIndexed one by one:
+  // an FU is built from a whole kFuTypesToOperations class at once
+  // (configureSupportedOperations), so a tile supports either all of a class's
+  // kinds or none of them.
   if (mem_weighted) {
     llvm::DenseSet<Tile *> mem_tiles;
-    for (Tile *tile : tiles) {
-      if (tile->canSupportOperation(ILoadIndexed) ||
-          tile->canSupportOperation(IStoreIndexed) ||
-          tile->canSupportOperation(ILoad) ||
-          tile->canSupportOperation(IStore)) {
-        mem_tiles.insert(tile);
-      }
+    for (Tile *tile : tilesProvidingFuClass(arch, "mem")) {
+      mem_tiles.insert(tile);
+    }
+    for (Tile *tile : tilesProvidingFuClass(arch, "mem_indexed")) {
+      mem_tiles.insert(tile);
     }
     // No memory FU anywhere (or all of them): the weighting carries no signal,
     // so fall through to the plain pairwise mean rather than returning a
@@ -441,29 +448,33 @@ double meanHopDistance(const Architecture &arch, bool mem_weighted) {
     if (!mem_tiles.empty() && mem_tiles.size() != tiles.size()) {
       // Mean over tiles of the distance to the nearest memory tile. A memory
       // tile is at distance 0 from itself: it already holds what it needs.
-      long long total = 0;
-      long long counted = 0;
+      long long total_distance = 0;
+      long long counted_tiles = 0;
       for (Tile *tile : tiles) {
-        bfs(tile);
-        int best = INT_MAX;
+        runBfs(tile);
+        int nearest_mem_distance = INT_MAX;
         for (Tile *mem_tile : mem_tiles) {
           auto found = distance.find(mem_tile);
           if (found != distance.end()) {
-            best = std::min(best, found->second);
+            nearest_mem_distance =
+                std::min(nearest_mem_distance, found->second);
           }
         }
-        if (best != INT_MAX) {
-          total += best;
-          ++counted;
+        if (nearest_mem_distance != INT_MAX) {
+          total_distance += nearest_mem_distance;
+          ++counted_tiles;
         }
       }
-      return counted ? (double)total / (double)counted : 0.0;
+      return counted_tiles ? static_cast<double>(total_distance) /
+                                 static_cast<double>(counted_tiles)
+                           : 0.0;
     }
   }
 
-  long long total_hops = 0, pairs = 0;
+  long long total_hops = 0;
+  long long pairs = 0;
   for (Tile *source : tiles) {
-    bfs(source);
+    runBfs(source);
     for (auto &[tile, hops] : distance) {
       if (tile == source) {
         continue;
@@ -472,7 +483,8 @@ double meanHopDistance(const Architecture &arch, bool mem_weighted) {
       ++pairs;
     }
   }
-  return pairs ? (double)total_hops / (double)pairs : 0.0;
+  return pairs ? static_cast<double>(total_hops) / static_cast<double>(pairs)
+               : 0.0;
 }
 
 //===----------------------------------------------------------------------===//
@@ -487,9 +499,10 @@ double meanHopDistance(const Architecture &arch, bool mem_weighted) {
 // placement can beat the mean -- so it is reported separately and never folded
 // into `final_ii`.
 //===----------------------------------------------------------------------===//
-IIBound calculateRouteHopMii(Region &region, const Architecture &arch) {
-  IIBound bound = calculateRouteMii(region, arch);
-  const double mean_hops = meanHopDistance(arch);
+// The distance charge itself, factored out so computeAnalyticalII can apply it
+// to the RouteMII and the mean hop distance it has already computed instead of
+// recomputing both.
+static IIBound scaleRouteMiiByHops(IIBound bound, double mean_hops) {
   // A fabric with no links, or one where RouteMII already declined to apply,
   // has nothing to scale: keep whatever RouteMII decided rather than inventing
   // a distance for a transfer that never crosses a link.
@@ -498,13 +511,18 @@ IIBound calculateRouteHopMii(Region &region, const Architecture &arch) {
                     ", not applied)";
     return bound;
   }
-  const long long scaled_demand =
-      (long long)std::llround((double)bound.demand * mean_hops);
+  const long long scaled_demand = static_cast<long long>(
+      std::llround(static_cast<double>(bound.demand) * mean_hops));
   bound.value = std::max<int>(1, ceilDiv(scaled_demand, bound.capacity));
   bound.detail += " mean_hops=" + std::to_string(mean_hops) +
                   " hop_demand=" + std::to_string(scaled_demand);
   bound.demand = scaled_demand;
   return bound;
+}
+
+IIBound calculateRouteHopMii(Region &region, const Architecture &arch) {
+  return scaleRouteMiiByHops(calculateRouteMii(region, arch),
+                             meanHopDistance(arch));
 }
 
 //===----------------------------------------------------------------------===//
@@ -524,9 +542,9 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
   // Uses the direct SSA producer — getTopologicallySortedOps guarantees
   // producers precede consumers, and the reserve op (no operands) breaks the
   // loop-carried back-edge so this is a finite DAG traversal.
-  std::vector<Operation *> topo_ops = getTopologicallySortedOps(region);
+  std::vector<Operation *> sorted_ops = getTopologicallySortedOps(region);
   llvm::DenseMap<Operation *, int> asap_level;
-  for (Operation *op : topo_ops) {
+  for (Operation *op : sorted_ops) {
     int op_level = 0;
     for (Value operand : op->getOperands()) {
       Operation *producer = operand.getDefiningOp();
@@ -541,8 +559,8 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
   // Accumulate +1 at each value's def level and -1 at its last-use level, then
   // prefix-sum to find the peak number of simultaneously-live values.
   int max_level = 0;
-  for (auto &entry : asap_level) {
-    max_level = std::max(max_level, entry.second);
+  for (auto &[op, level] : asap_level) {
+    max_level = std::max(max_level, level);
   }
   std::vector<long long> live_delta(max_level + 2, 0);
 
@@ -711,36 +729,45 @@ AnalyticalIIBreakdown computeAnalyticalII(Region &region,
   // including the pruning proofs that rely on it not over-predicting, is
   // unaffected; a caller that wants accuracy rather than soundness reads
   // `predicted_ii`.
-  breakdown.route_hop = calculateRouteHopMii(region, arch);
+  //
+  // Scaled from the RouteMII and the mean hop distance already in `breakdown`.
+  // Calling calculateRouteHopMii here would recompute both -- a second walk of
+  // the region and a second all-pairs BFS over the fabric -- for the same
+  // numbers.
   breakdown.mean_hops = meanHopDistance(arch);
-  int predicted = std::max(breakdown.final_ii, breakdown.route_hop.value);
-  if (breakdown.max_ii > 0 && predicted > breakdown.max_ii) {
-    predicted = breakdown.max_ii;
+  breakdown.route_hop =
+      scaleRouteMiiByHops(breakdown.route, breakdown.mean_hops);
+  int predicted_ii = std::max(breakdown.final_ii, breakdown.route_hop.value);
+  if (breakdown.max_ii > 0 && predicted_ii > breakdown.max_ii) {
+    predicted_ii = breakdown.max_ii;
   }
-  breakdown.predicted_ii = std::max(1, predicted);
+  breakdown.predicted_ii = std::max(1, predicted_ii);
   return breakdown;
 }
 
-void AnalyticalIIBreakdown::print(llvm::raw_ostream &os) const {
-  os << "[cost-model-analytical]\n";
-  os << "  res_mii=" << res.value << " (" << res.detail << ")\n";
-  os << "  rec_mii=" << rec.value << " (" << rec.detail << ")\n";
-  os << "  mem_mii=" << mem.value << " (" << mem.detail << ")\n";
-  os << "  route_mii=" << route.value << " (" << route.detail << ")\n";
-  os << "  reg_mii=" << reg.value << " (" << reg.detail << ")\n";
-  os << "  issue_mii=" << issue.value << " (" << issue.detail << ")\n";
-  os << "  route_hop_mii=" << route_hop.value << " (" << route_hop.detail
-     << ")\n";
-  os << "  final_ii=" << final_ii << " (dominant=" << dominant;
+void AnalyticalIIBreakdown::print(llvm::raw_ostream &output_stream) const {
+  output_stream << "[cost-model-analytical]\n";
+  output_stream << "  res_mii=" << res.value << " (" << res.detail << ")\n";
+  output_stream << "  rec_mii=" << rec.value << " (" << rec.detail << ")\n";
+  output_stream << "  mem_mii=" << mem.value << " (" << mem.detail << ")\n";
+  output_stream << "  route_mii=" << route.value << " (" << route.detail
+                << ")\n";
+  output_stream << "  reg_mii=" << reg.value << " (" << reg.detail << ")\n";
+  output_stream << "  issue_mii=" << issue.value << " (" << issue.detail
+                << ")\n";
+  output_stream << "  route_hop_mii=" << route_hop.value << " ("
+                << route_hop.detail << ")\n";
+  output_stream << "  final_ii=" << final_ii << " (dominant=" << dominant;
   if (infeasible) {
-    os << ", INFEASIBLE: an fu class this kernel needs is provided by no tile";
+    output_stream
+        << ", INFEASIBLE: an fu class this kernel needs is provided by no tile";
   }
   if (clamped) {
-    os << ", clamped-to-max_ii=" << max_ii;
+    output_stream << ", clamped-to-max_ii=" << max_ii;
   }
-  os << ")\n";
-  os << "  predicted_ii=" << predicted_ii << " (mean_hops=" << mean_hops
-     << ")\n";
+  output_stream << ")\n";
+  output_stream << "  predicted_ii=" << predicted_ii
+                << " (mean_hops=" << mean_hops << ")\n";
 }
 
 } // namespace neura

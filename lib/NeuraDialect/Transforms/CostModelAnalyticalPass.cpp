@@ -24,9 +24,6 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/raw_ostream.h"
 
-#include <set>
-#include <utility>
-
 using namespace mlir;
 using namespace mlir::neura;
 
@@ -77,43 +74,37 @@ struct CostModelAnalyticalPass
       llvm::cl::desc("Record analytical_ii and bounds in an attribute."),
       llvm::cl::init(true)};
 
-  // Builds the target architecture, honouring x/y-tiles + valid-tiles exactly
-  // like --map-to-accelerator so predictions can be compared per CGRA shape.
-  // buildShapedArchitecture IS what --map-to-accelerator calls, so "exactly
-  // like" is now shared code rather than a duplicated parser.
-  std::unique_ptr<Architecture>
-  buildCustomArch(const Architecture &global_arch) {
-    return buildShapedArchitecture(global_arch, x_tiles.getValue(),
-                                   y_tiles.getValue(), valid_tiles.getValue(),
-                                   "[cost-model-analytical]");
-  }
-
   void writeAttr(Operation *op, const AnalyticalIIBreakdown &breakdown) {
-    MLIRContext *ctx = op->getContext();
-    auto i32 = [&](int value) {
-      return IntegerAttr::get(IntegerType::get(ctx, 32), value);
+    MLIRContext *context = op->getContext();
+    auto makeI32Attr = [&](int value) {
+      return IntegerAttr::get(IntegerType::get(context, 32), value);
     };
     SmallVector<NamedAttribute, 10> attrs;
-    auto add = [&](StringRef key, Attribute value) {
-      attrs.push_back(NamedAttribute(StringAttr::get(ctx, key), value));
+    auto addAttr = [&](StringRef key, Attribute value) {
+      attrs.push_back(NamedAttribute(StringAttr::get(context, key), value));
     };
-    add("analytical_ii", i32(breakdown.final_ii));
-    add("res_mii", i32(breakdown.res.value));
-    add("rec_mii", i32(breakdown.rec.value));
-    add("mem_mii", i32(breakdown.mem.value));
-    add("route_mii", i32(breakdown.route.value));
-    add("reg_mii", i32(breakdown.reg.value));
-    add("issue_mii", i32(breakdown.issue.value));
-    add("max_ii", i32(breakdown.max_ii));
-    add("dominant", StringAttr::get(ctx, breakdown.dominant));
-    op->setAttr(kAnalyticalAttr, DictionaryAttr::get(ctx, attrs));
+    addAttr("analytical_ii", makeI32Attr(breakdown.final_ii));
+    addAttr("res_mii", makeI32Attr(breakdown.res.value));
+    addAttr("rec_mii", makeI32Attr(breakdown.rec.value));
+    addAttr("mem_mii", makeI32Attr(breakdown.mem.value));
+    addAttr("route_mii", makeI32Attr(breakdown.route.value));
+    addAttr("reg_mii", makeI32Attr(breakdown.reg.value));
+    addAttr("issue_mii", makeI32Attr(breakdown.issue.value));
+    addAttr("max_ii", makeI32Attr(breakdown.max_ii));
+    addAttr("dominant", StringAttr::get(context, breakdown.dominant));
+    op->setAttr(kAnalyticalAttr, DictionaryAttr::get(context, attrs));
   }
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
     const Architecture &global_arch = mlir::neura::getArchitecture();
-    std::unique_ptr<Architecture> custom = buildCustomArch(global_arch);
-    const Architecture &arch = custom ? *custom : global_arch;
+    // Honours x/y-tiles + valid-tiles exactly like --map-to-accelerator, so
+    // predictions can be compared per CGRA shape: buildShapedArchitecture IS
+    // what --map-to-accelerator calls, rather than a duplicated parser.
+    std::unique_ptr<Architecture> shaped_arch = buildShapedArchitecture(
+        global_arch, x_tiles.getValue(), y_tiles.getValue(),
+        valid_tiles.getValue(), "[cost-model-analytical]");
+    const Architecture &arch = shaped_arch ? *shaped_arch : global_arch;
 
     int num_processed = 0;
     auto process = [&](Operation *op, Region &region, StringRef name) {
@@ -130,12 +121,12 @@ struct CostModelAnalyticalPass
       ++num_processed;
     };
 
-    bool any_accel = false;
+    bool has_accelerator_region = false;
     module.walk([&](neura::KernelOp kernel) {
       auto accel_attr =
           kernel->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
       if (accel_attr && accel_attr.getValue() == accel::kNeuraTarget) {
-        any_accel = true;
+        has_accelerator_region = true;
         process(kernel, kernel.getBody(), "kernel");
       }
     });
@@ -143,7 +134,7 @@ struct CostModelAnalyticalPass
       auto accel_attr =
           func->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
       if (accel_attr && accel_attr.getValue() == accel::kNeuraTarget) {
-        any_accel = true;
+        has_accelerator_region = true;
         process(func, func.getBody(), func.getName());
       }
     });
@@ -151,7 +142,7 @@ struct CostModelAnalyticalPass
     // Fallback: no op is explicitly tagged for the accelerator (e.g. a
     // hand-written regression kernel). Process every non-empty func so the
     // model is still usable standalone.
-    if (!any_accel) {
+    if (!has_accelerator_region) {
       module.walk([&](func::FuncOp func) {
         process(func, func.getBody(), func.getName());
       });

@@ -88,11 +88,10 @@ struct AnalyticalIIBreakdown {
   //   [cost-model-analytical]
   //   res_mii=..  rec_mii=..  mem_mii=..  route_mii=..  reg_mii=.. issue_mii=..
   //   final_ii=..  (dominant=..)  predicted_ii=..
-  void print(llvm::raw_ostream &os) const;
+  void print(llvm::raw_ostream &output_stream) const;
 };
 
-// ===-- Individual bounds (each independently testable) --===================
-// //
+//===-- Individual bounds (each independently testable) -------------------===//
 
 // ResMII: partitions placed ops by FU class (add/mul/mem/cmp/... per
 // kFuTypesToOperations), weights each by its execution latency, and divides by
@@ -157,6 +156,10 @@ double meanHopDistance(const Architecture &arch, bool mem_weighted = false);
 // to hold `meanHopDistance` links for its residue instead of one.
 //   RouteHopMII = ceil( demand * mean_hops / #links )
 // Shape-aware, and NOT a lower bound; see AnalyticalIIBreakdown::route_hop.
+//
+// This is calculateRouteMii's result rescaled, so it recomputes both RouteMII
+// and the mean hop distance. computeAnalyticalII needs all three and does the
+// scaling itself from the two it already has, rather than calling this.
 IIBound calculateRouteHopMii(Region &region, const Architecture &arch);
 
 // Computes all bounds and combines them into the final prediction.

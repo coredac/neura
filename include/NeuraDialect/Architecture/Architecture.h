@@ -26,13 +26,6 @@ enum class ResourceKind {
   RegisterFileCluster,
 };
 
-// Enumeration for function unit resource type.
-enum class FunctionUnitKind {
-  FixedPointAdder,
-  FixedPointMultiplier,
-  CustomizableFunctionUnit,
-};
-
 // Enumeration for supported operation types.
 enum OperationKind {
   // Integer arithmetic operations.
@@ -214,17 +207,8 @@ public:
 
   void setTile(Tile *tile);
 
-  std::set<OperationKind> getSupportedOperations() const {
-    return supported_operations;
-  }
-
   bool canSupportOperation(OperationKind operation) const {
-    for (const auto &op : supported_operations) {
-      if (op == operation) {
-        return true;
-      }
-    }
-    return false;
+    return supported_operations.count(operation) != 0;
   }
 
 protected:
@@ -297,24 +281,9 @@ public:
 
   void addRegisterFileCluster(RegisterFileCluster *register_file_cluster);
 
-  const RegisterFileCluster *getRegisterFileCluster() const;
-
   const std::vector<RegisterFile *> getRegisterFiles() const;
 
   const std::vector<Register *> getRegisters() const;
-
-  // Port management.
-  const std::vector<std::string> &getPorts() const { return ports; }
-  void setPorts(const std::vector<std::string> &new_ports) {
-    ports = new_ports;
-  }
-  bool hasPort(const std::string &port) const {
-    return std::find(ports.begin(), ports.end(), port) != ports.end();
-  }
-
-  // Memory management.
-  int getMemoryCapacity() const { return memory_capacity; }
-  void setMemoryCapacity(int capacity) { memory_capacity = capacity; }
 
 private:
   int id;
@@ -327,10 +296,6 @@ private:
       functional_unit_storage;               // Owns FUs.
   std::set<FunctionUnit *> functional_units; // Non-owning, for fast lookup.
   RegisterFileCluster *register_file_cluster = nullptr;
-
-  // Port and memory configuration.
-  std::vector<std::string> ports;
-  int memory_capacity = -1; // -1 means not configured.
 };
 
 //===----------------------------------------------------------------------===//
@@ -358,8 +323,8 @@ public:
   // Link properties.
   int getLatency() const { return latency; }
   int getBandwidth() const { return bandwidth; }
-  void setLatency(int l) { latency = l; }
-  void setBandwidth(int b) { bandwidth = b; }
+  void setLatency(int new_latency) { latency = new_latency; }
+  void setBandwidth(int new_bandwidth) { bandwidth = new_bandwidth; }
 
 private:
   int id;
@@ -426,7 +391,6 @@ public:
   void addRegister(Register *reg);
 
   const std::map<int, Register *> &getRegisters() const;
-  RegisterFileCluster *getRegisterFileCluster() const;
 
 private:
   int id;
@@ -498,7 +462,6 @@ public:
                const std::vector<LinkOverride> &link_overrides =
                    std::vector<LinkOverride>());
 
-  Tile *getTile(int id);
   Tile *getTile(int x, int y);
 
   int getMultiCgraRows() const { return multi_cgra_rows_; }
@@ -507,7 +470,6 @@ public:
   int getPerCgraColumns() const { return per_cgra_columns_; }
   int getMaxCtrlMemItems() const { return max_ctrl_mem_items_; }
 
-  Link *getLink(int id);
   Link *getLink(int src_tile_x, int src_tile_y, int dst_tile_x, int dst_tile_y);
   void removeLink(int link_id);
   void removeLink(Tile *src_tile, Tile *dst_tile);
@@ -556,7 +518,10 @@ private:
   void createRegisterFileCluster(Tile *tile, int num_registers,
                                  int &num_already_assigned_global_registers,
                                  int global_id_start = -1);
-  bool linkExists(Tile *src_tile, Tile *dst_tile);
+  // The single lookup of "the link that carries src_tile -> dst_tile", shared
+  // by getLink(), applyLinkOverrides() and removeLink(). Returns nullptr when
+  // the two tiles are not directly connected.
+  Link *findLink(Tile *src_tile, Tile *dst_tile) const;
 
   // Helper methods for creating different topology links.
   void createSingleLink(int &link_id, Tile *src_tile, Tile *dst_tile,
