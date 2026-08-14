@@ -18,13 +18,16 @@
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/SymbolTable.h"
 
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/raw_ostream.h"
 
+#include <cstdio>
 #include <map>
 #include <set>
 #include <string>
@@ -38,6 +41,60 @@ using namespace mlir::neura;
 #include "NeuraDialect/NeuraPasses.h.inc"
 
 namespace {
+
+// MLIR symbol names are near-arbitrary strings -- @"a\"b" parses -- so a name
+// pasted raw into the dump could itself produce the unparseable file this pass
+// exists to avoid. Escapes the characters JSON forbids inside a string.
+std::string escapeJsonString(StringRef s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+    case '"':
+      out += "\\\"";
+      break;
+    case '\\':
+      out += "\\\\";
+      break;
+    case '\n':
+      out += "\\n";
+      break;
+    case '\r':
+      out += "\\r";
+      break;
+    case '\t':
+      out += "\\t";
+      break;
+    default:
+      if (static_cast<unsigned char>(c) < 0x20) {
+        char buf[7];
+        snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+        out += buf;
+      } else {
+        out += c;
+      }
+    }
+  }
+  return out;
+}
+
+// A stable, human-recognizable label for one dumped region. func.func carries a
+// symbol; neura.kernel does not, so a kernel is named after the function that
+// holds it plus its walk index, which keeps two kernels in one function
+// distinguishable in the dump.
+std::string regionLabel(Operation *op, unsigned index) {
+  if (auto sym =
+          op->getAttrOfType<StringAttr>(SymbolTable::getSymbolAttrName())) {
+    return sym.getValue().str();
+  }
+  std::string label = op->getName().getStringRef().str();
+  if (Operation *parent = op->getParentOp()) {
+    if (auto parent_sym =
+            parent->getAttrOfType<StringAttr>(SymbolTable::getSymbolAttrName()))
+      label = parent_sym.getValue().str() + "/" + label;
+  }
+  return label + "#" + std::to_string(index);
+}
 
 // collectPlacedOps (the placement set, in the order --import-mapping replays),
 // buildDfgEdges (the dependence graph), fuClassOf (an op's FU class) and
@@ -100,8 +157,13 @@ struct DumpDfgJsonPass
                                    "[dump-dfg-json]");
   }
 
+  // Emits ONE region as a self-contained JSON object, with no trailing newline
+  // and no separator, so the caller decides whether this object stands alone
+  // (the single-region dump every existing consumer reads) or is one element of
+  // an array. `name` is emitted only in the multi-region case, so the
+  // single-region bytes are exactly what they were before.
   void emitRegion(Region &region, const Architecture &arch,
-                  llvm::raw_ostream &os) {
+                  llvm::raw_ostream &os, StringRef name = StringRef()) {
     // Placed ops in the order --import-mapping replays onto, and the dependence
     // edges over them (forward operand edges with omega=0, ctrl_mov/reserve
     // back edges with omega=1, de-duplicated on (src, dst, omega)).
@@ -109,7 +171,11 @@ struct DumpDfgJsonPass
     std::vector<DependenceEdge> edges = buildDfgEdges(region, placed_ops);
 
     // Architecture: per-FU-class tile support + mesh links + registers.
-    os << "{\n  \"arch\": {\n";
+    os << "{\n";
+    if (!name.empty()) {
+      os << "  \"name\": \"" << escapeJsonString(name) << "\",\n";
+    }
+    os << "  \"arch\": {\n";
     os << "    \"num_tiles\": " << arch.getNumTiles()
        << ", \"ctrl_mem_items\": " << arch.getMaxCtrlMemItems() << ",\n";
     os << "    \"tiles\": [";
@@ -166,7 +232,7 @@ struct DumpDfgJsonPass
       os << (i ? ", " : "") << "{\"s\": " << edges[i].src
          << ", \"d\": " << edges[i].dst << ", \"w\": " << edges[i].omega << "}";
     }
-    os << "]\n}\n";
+    os << "]\n}";
   }
 
   void runOnOperation() override {
@@ -174,7 +240,33 @@ struct DumpDfgJsonPass
     const Architecture &global_arch = mlir::neura::getArchitecture();
     std::unique_ptr<Architecture> custom_arch = buildCustomArch(global_arch);
     const Architecture &arch = custom_arch ? *custom_arch : global_arch;
-    bool emitted = false;
+    // Every region is collected BEFORE anything is written, because the shape
+    // of a valid document depends on how many there are: one region is a bare
+    // object (the format the exact mapper and the cost model already read), and
+    // writing a second bare object after it produces two concatenated
+    // top-level values, which is not JSON at all -- `json.load` stops at the
+    // first and raises "Extra data". A stream that has already emitted the
+    // first object cannot take that back, so the count has to be known first.
+    SmallVector<std::pair<std::string, Region *>, 4> regions;
+    unsigned walk_index = 0;
+    auto tryCollect = [&](Operation *op, Region &region) {
+      auto accel_attr = op->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
+      if (accel_attr && accel_attr.getValue() == accel::kNeuraTarget &&
+          !region.empty()) {
+        regions.emplace_back(regionLabel(op, walk_index++), &region);
+      }
+    };
+    module.walk(
+        [&](neura::KernelOp kernel) { tryCollect(kernel, kernel.getBody()); });
+    module.walk([&](func::FuncOp func) { tryCollect(func, func.getBody()); });
+    // Fallback: nothing tagged for the accelerator -> emit the first non-empty
+    // func so a hand-written kernel still works standalone.
+    if (regions.empty()) {
+      module.walk([&](func::FuncOp func) {
+        if (regions.empty() && !func.getBody().empty())
+          regions.emplace_back(regionLabel(func, 0), &func.getBody());
+      });
+    }
     std::unique_ptr<llvm::raw_fd_ostream> file_stream;
     if (!output_file.getValue().empty()) {
       std::error_code error;
@@ -189,27 +281,42 @@ struct DumpDfgJsonPass
       }
     }
     llvm::raw_ostream &os = file_stream ? *file_stream : llvm::outs();
-    auto tryEmit = [&](Operation *op, Region &region) {
-      auto accel_attr = op->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
-      if (accel_attr && accel_attr.getValue() == accel::kNeuraTarget &&
-          !region.empty()) {
-        emitRegion(region, arch, os);
-        emitted = true;
-      }
-    };
-    module.walk(
-        [&](neura::KernelOp kernel) { tryEmit(kernel, kernel.getBody()); });
-    module.walk([&](func::FuncOp func) { tryEmit(func, func.getBody()); });
-    // Fallback: nothing tagged for the accelerator -> emit the first non-empty
-    // func so a hand-written kernel still works standalone.
-    if (!emitted) {
-      module.walk([&](func::FuncOp func) {
-        if (!emitted && !func.getBody().empty()) {
-          emitRegion(func.getBody(), arch, os);
-          emitted = true;
-        }
-      });
+
+    // Nothing to dump. The output file is still created (empty), exactly as
+    // before, so a caller that opened it does not see a missing file.
+    if (regions.empty()) {
+      return;
     }
+
+    if (regions.size() == 1) {
+      // The historical, and by far the common, case: one instance, one object.
+      // Byte-for-byte what this pass emitted before, so exact_mapper_cpsat.py
+      // and every committed dump keep working unchanged.
+      emitRegion(*regions.front().second, arch, os);
+      os << "\n";
+      return;
+    }
+
+    // More than one instance. An array is the only valid JSON document that can
+    // carry them all, and each element is labelled so the reader can tell which
+    // kernel it is looking at. Announced on stderr because the exact mapper
+    // solves ONE instance and indexes the document as an object: it must not be
+    // handed an array by accident and told nothing about it.
+    llvm::errs() << "[dump-dfg-json] module has " << regions.size()
+                 << " accelerator regions (";
+    for (size_t i = 0; i < regions.size(); ++i) {
+      llvm::errs() << (i ? ", " : "") << regions[i].first;
+    }
+    llvm::errs() << "); emitting a JSON array. Single-instance consumers such "
+                    "as test/cost-model/exact_mapper_cpsat.py expect one "
+                    "object -- select a single region before dumping.\n";
+
+    os << "[\n";
+    for (size_t i = 0; i < regions.size(); ++i) {
+      emitRegion(*regions[i].second, arch, os, regions[i].first);
+      os << (i + 1 < regions.size() ? ",\n" : "\n");
+    }
+    os << "]\n";
   }
 };
 } // namespace
