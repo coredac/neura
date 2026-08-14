@@ -304,6 +304,33 @@ static SmallVector<CgraShape> getNonRectangularShapes(int cgra_count) {
   return shapes;
 }
 
+// The tile coordinates a shape actually owns, in `buildShapedArchitecture`'s
+// "x_y,x_y,..." form. Empty for a rectangle, which is exactly what that
+// function reads as "the whole bounding box" -- so a rectangle never pays for
+// an override list it does not need.
+//
+// One implementation, because there is one quantity: the tile array the mapper
+// is given and the tile array a candidate is PRICED on must be the same set, or
+// the ranking is scoring an architecture the compiler will never build.
+static std::string validTilesForShape(const CgraShape &shape,
+                                      int per_cgra_rows, int per_cgra_cols) {
+  if (shape.is_rectangular)
+    return {};
+  std::string valid_tiles;
+  llvm::raw_string_ostream os(valid_tiles);
+  for (auto &[cgra_c, cgra_r] : shape.cgra_positions) {
+    for (int tr = 0; tr < per_cgra_rows; ++tr) {
+      for (int tc = 0; tc < per_cgra_cols; ++tc) {
+        if (!os.str().empty())
+          os << ",";
+        os << (cgra_c * per_cgra_cols + tc) << "_"
+           << (cgra_r * per_cgra_rows + tr);
+      }
+    }
+  }
+  return valid_tiles;
+}
+
 // Parses a "NxM" cgra_shape attribute back into a CgraShape. Returns nullopt
 // for the non-rectangular "NxM[(c,r)...]" form and for anything whose area does
 // not match `cgra_count` (a stale attribute from an earlier cgra_count).
@@ -2624,22 +2651,11 @@ public:
     int per_cgra_rows = neura::getArchitecture().getPerCgraRows();
     int x_tiles = node->shape.cols * per_cgra_cols;
     int y_tiles = node->shape.rows * per_cgra_rows;
-    std::string valid_tiles;
-    if (!node->shape.is_rectangular) {
-      // Enumerates individual tile coordinates for non-rectangular shapes
-      // so the mapper knows exactly which tiles are valid.
-      llvm::raw_string_ostream os(valid_tiles);
-      for (auto &[cgra_c, cgra_r] : node->shape.cgra_positions) {
-        for (int tr = 0; tr < per_cgra_rows; ++tr) {
-          for (int tc = 0; tc < per_cgra_cols; ++tc) {
-            if (!os.str().empty())
-              os << ",";
-            os << (cgra_c * per_cgra_cols + tc) << "_"
-               << (cgra_r * per_cgra_rows + tr);
-          }
-        }
-      }
-    }
+    // The individual tile coordinates a non-rectangular shape owns, so the
+    // mapper knows exactly which tiles are valid. Same helper `hopForShape`
+    // prices on, so the two cannot drift apart.
+    const std::string valid_tiles =
+        validTilesForShape(node->shape, per_cgra_rows, per_cgra_cols);
 
     // Runs Neura pipeline on the kernel to get compiled_ii and steps.
     auto phase2_module = ModuleOp::create(loc);
@@ -2742,9 +2758,25 @@ public:
   // Mean hop over the tile array a shape defines, memoised.
   //
   // This is the same quantity `profileTask` reports as `avg_hop`, computed
-  // without compiling anything: the architecture is cloned to the shape's tile
-  // dimensions and walked. It depends on the shape and on nothing else, so one
+  // without compiling anything: the architecture is built for the shape's own
+  // tile set and walked. It depends on the shape and on nothing else, so one
   // entry per shape serves every task.
+  //
+  // The entry is keyed on `irAttr()` -- the occupied positions -- and NOT on the
+  // bounding box, for the same reason the profile cache above is. A bounding box
+  // does not identify a shape: the 3-CGRA L `2x2[(0,0)(1,0)(0,1)]` and the
+  // 4-CGRA rectangle `2x2` share the 8x8 tile box, and the second one to ask was
+  // handed the first one's mean hop. Measured on irregular-loop before this
+  // change: the L computed 5.333333 at key 8x8 and every subsequent `2x2` query
+  // was a cache HIT on it, so a 12-tile shape and a 16-tile shape were priced
+  // identically.
+  //
+  // And the walk is over `buildShapedArchitecture`, not a bare rectangle. The
+  // rectangle is the bounding box, so a non-rectangular candidate's mean hop was
+  // averaged over tiles it does not own -- 4 CGRAs' worth of fabric for a 3-CGRA
+  // L, 6 for a 4-CGRA T -- which is the same under-pricing `profileTask` and
+  // `extractMetricsFromPartialIR` were already fixed for. The tile set comes
+  // from `validTilesForShape`, the one the mapper is given.
   //
   // On a fabric whose tiles are uniform it cannot separate two shapes of equal
   // area: the mean distance over an R x C mesh is symmetric in R and C, so 4x8
@@ -2753,16 +2785,21 @@ public:
   // cannot, because `tile_defaults` gives every tile `mem` and `mem_indexed`
   // and no override takes it away. Measured: both settings yield the same two
   // distinct values across every shape this benchmark set reaches.
-  mutable std::map<std::pair<int, int>, double> hop_by_shape;
+  //
+  // std::map, not DenseMap: LLVM ships no DenseMapInfo for std::string. Only
+  // ever looked up, never iterated, so its ordering reaches no decision.
+  mutable std::map<std::string, double> hop_by_shape;
 
   double hopForShape(const CgraShape &shape) const {
-    const auto key = std::make_pair(shape.rows * per_cgra_rows,
-                                    shape.cols * per_cgra_cols);
+    const std::string key = shape.irAttr();
     auto cached = hop_by_shape.find(key);
     if (cached != hop_by_shape.end())
       return cached->second;
-    std::unique_ptr<neura::Architecture> array =
-        neura::getArchitecture().cloneWithNewDimensions(key.first, key.second);
+    std::unique_ptr<neura::Architecture> array = neura::buildShapedArchitecture(
+        neura::getArchitecture(), shape.cols * per_cgra_cols,
+        shape.rows * per_cgra_rows,
+        validTilesForShape(shape, per_cgra_rows, per_cgra_cols),
+        "[hopForShape]");
     const double hops = array ? neura::meanHopDistance(*array, mem_weighted_hop)
                               : neura::meanHopDistance(neura::getArchitecture(),
                                                        mem_weighted_hop);
