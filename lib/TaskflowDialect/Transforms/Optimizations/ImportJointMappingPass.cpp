@@ -62,6 +62,7 @@
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/raw_ostream.h"
@@ -314,7 +315,86 @@ struct ImportJointMappingPass
   // v2: fuse-then-place replay
   //===--------------------------------------------------------------------===//
 
+  // Checks that the imported groups COVER the function's tasks, BEFORE any of
+  // them is rewritten. The groups must partition the task set: every existing
+  // task is named by exactly one group, and every name a group carries exists.
+  //
+  // This replaces a check that could not fail. The old one ran after the
+  // replay and asked whether each surviving task carried a "cgra_shape"
+  // attribute -- but cgra_shape is precisely what
+  // ResourceAwareTaskOptimizationPass writes, and this pass is documented to
+  // run on that output ("overrides resource-aware's shape choice with the
+  // imported one"). Every task therefore already carried the attribute before
+  // the import started, so the walk saw "covered" for tasks no group had
+  // mentioned; an import covering NOTHING ("groups": []) was reported as a
+  // success with not one placement written. Coverage is now decided by the
+  // imported names themselves, which no earlier pass can pre-satisfy.
+  //
+  // Validating up front also means an incomplete decision is REFUSED rather
+  // than half-applied: the pass replays an external solver's joint decision so
+  // its cost can be measured, and a decision that is only partly replayed is
+  // not the decision that was solved for. Checking first keeps the IR from
+  // being fused/annotated on the way to the error.
+  //
+  // The partition property is what later lets coverage be re-checked by op
+  // identity: groups with disjoint task names fuse disjoint sets of ops, so no
+  // group can consume the task another group already placed.
+  bool validateGroupCoverage(func::FuncOp func,
+                             const SmallVector<ImportedGroup> &groups) {
+    bool valid = true;
+
+    // 1. No task may be claimed by two groups (that would be two different
+    //    fusion/placement decisions for one task).
+    llvm::StringSet<> imported_names;
+    for (const ImportedGroup &grp : groups) {
+      for (const std::string &name : grp.tasks) {
+        if (!imported_names.insert(name).second) {
+          func.emitError() << "[import-joint-mapping] task \"" << name
+                           << "\" appears in more than one imported group";
+          valid = false;
+        }
+      }
+    }
+
+    // 2. Every task the function actually has must be named by some group.
+    llvm::StringSet<> tasks_in_ir;
+    func.walk([&](TaskflowTaskOp task) {
+      tasks_in_ir.insert(task.getTaskName());
+      if (!imported_names.contains(task.getTaskName())) {
+        task.emitError() << "[import-joint-mapping] task \""
+                         << task.getTaskName()
+                         << "\" is not covered by any imported group";
+        valid = false;
+      }
+    });
+
+    // 3. Every name a group carries must exist (a typo, or a JSON produced from
+    //    different IR, otherwise silently drops that task's decision). Walked in
+    //    group order so the diagnostics are deterministic.
+    for (const ImportedGroup &grp : groups) {
+      for (const std::string &name : grp.tasks) {
+        if (!tasks_in_ir.contains(name)) {
+          func.emitError() << "[import-joint-mapping] imported group names "
+                              "task \""
+                           << name
+                           << "\", which does not exist in this function";
+          valid = false;
+        }
+      }
+    }
+    return valid;
+  }
+
   void runV2(func::FuncOp func, const SmallVector<ImportedGroup> &groups) {
+    if (!validateGroupCoverage(func, groups)) {
+      signalPassFailure();
+      return;
+    }
+
+    // Tasks the replay actually placed, tracked by identity so the post-check
+    // below cannot be satisfied by an attribute an earlier pass left behind.
+    llvm::DenseSet<Operation *> placed_tasks;
+
     for (const ImportedGroup &grp : groups) {
       TaskflowTaskOp target;
 
@@ -348,17 +428,22 @@ struct ImportJointMappingPass
       }
 
       applyMapping(target, grp.mapping);
+      placed_tasks.insert(target.getOperation());
     }
 
-    // Validation: every remaining taskflow.task must belong to some group
-    // (i.e. must have received the placement attributes). This mirrors v1's
-    // "no imported mapping for task" error.
+    // Post-check: every task LEFT IN THE IR was placed by this replay. The
+    // pre-check above already proved the imported names cover the tasks that
+    // existed on entry; this catches a task the rewriting itself produced or
+    // left behind (e.g. a group whose fusion did not consume every member), and
+    // it asks by op identity, not by an attribute any earlier pass may have
+    // written.
     bool all_covered = true;
     func.walk([&](TaskflowTaskOp task) {
-      if (!task->hasAttr("cgra_shape")) {
+      if (!placed_tasks.contains(task.getOperation())) {
         task.emitError() << "[import-joint-mapping] task \""
                          << task.getTaskName()
-                         << "\" is not covered by any imported group";
+                         << "\" survived the import without a placement (not "
+                            "covered by any imported group)";
         all_covered = false;
       }
     });

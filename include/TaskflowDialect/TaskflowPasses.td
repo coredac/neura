@@ -127,6 +127,57 @@ def OrchestrateTasksOnAccelerators : Pass<"orchestrate-tasks-on-accelerators", "
   let constructor = "taskflow::createOrchestrateTasksOnAcceleratorsPass()";
 }
 
+// NOTE: this def was dropped by accident when PR #338's
+// AnalyzeTaskPipelineInterval was vendored (bc5d08e overwrote this block), which
+// left ImportJointMappingPass.cpp compiled but NEVER REGISTERED: the object was
+// not even pulled out of the archive, so --import-joint-mapping (which the
+// mlir-neura-opt driver still rewrites to =file=) died with "Unknown command
+// line argument". Restored verbatim.
+def ImportJointMapping : Pass<"import-joint-mapping", "func::FuncOp"> {
+  let summary = "Replays an externally-computed joint multi-task mapping onto "
+                "Taskflow tasks (bypasses the greedy orchestrator).";
+  let description = [{
+    Joint-mapping analogue of MapToAcceleratorPass's --import-mapping option.
+    Instead of running the internal placer/scheduler
+    (orchestrate-tasks-on-accelerators), this pass reads a JSON decision file
+    and writes exactly the IR attributes the real orchestrate pass writes, so
+    downstream codegen is unchanged -- but the placement/shape decision comes
+    from the file, not the greedy scheduler.
+
+    SCOPE v1 ("tasks" schema): the JSON assigns, per existing taskflow.task, a
+    placement + shape decision, and task bodies are left untouched.
+    SCOPE v2 ("groups" schema): the JSON additionally carries a task-FUSION
+    decision; a group of >1 task is merged before the attributes are written.
+    The groups must COVER every task exactly once -- an import that leaves a
+    task out is rejected, since a partially-replayed decision is not the
+    decision that was solved for.
+
+    JSON schema: a top-level object with a "tasks" array (a bare top-level array
+    of entries is also accepted). Each entry has the fields "task", "cgra_count",
+    "cgra_shape", "row", "col" and "context_id", e.g.
+    task="Task_0", cgra_count=1, cgra_shape="1x1", row=0, col=0, context_id=0.
+    Only "task", "row" and "col" are required; "cgra_count" (default 1),
+    "cgra_shape" (default "1x1") and "context_id" (default 0) are optional.
+
+    For each taskflow.task @Name the pass:
+      1. sets cgra_count (i32) and cgra_shape (string) on the task op,
+         overriding resource-aware-task-optimization's shape choice;
+      2. sets task_orchestration_info with a cgra_positions array holding one
+         row/col/context_id record, replacing
+         orchestrate-tasks-on-accelerators's placement + temporal context
+         assignment;
+      3. leaves the task body untouched (v1) or fuses the group first (v2).
+
+    The mlir-neura-opt driver accepts the shorthand
+    --import-joint-mapping=<file.json> and rewrites it to
+    --import-joint-mapping=file=<file.json> before the pass option parser runs.
+  }];
+  let options = [Option<
+      "mappingFile", "file", "std::string", /*default=*/"\"\"",
+      "Path to the JSON joint-mapping decision file.">];
+  let constructor = "taskflow::createImportJointMappingPass()";
+}
+
 def AnalyzeTaskPipelineInterval
     : Pass<"analyze-task-pipeline-interval", "func::FuncOp"> {
   let summary =
