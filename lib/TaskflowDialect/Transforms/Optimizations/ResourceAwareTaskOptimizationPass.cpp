@@ -4232,6 +4232,26 @@ public:
             // two measured IIs: both bodies now issue on one array, so their
             // demands add. Taking the max of the two keeps the fusion axis on
             // the same footing as the rest of the pool.
+            //
+            // PROFILING the fused body to anchor this the way the shape axis is
+            // anchored was tried, and measured, and it is not worth its cost.
+            // The obvious suspicion is that summing the two op counts
+            // under-counts, because fusing two nests onto one array introduces
+            // data movement neither nest had. It does not. A `cloneAndFuse` per
+            // legal pair, profiled through `profileTask` with the mapper and
+            // cached on the pair, was run against this arithmetic over 127
+            // pair-scorings of transformer_static_affine: the profiled op count
+            // differed from the sum by at most ONE op (8->9, 13->14, 15->14),
+            // the profiled recurrence equalled the max every time, and the
+            // profiled fused II came back at 1 to 3 cycles against an interval
+            // of 1.3 million -- so no form of it can move `graph.objective()`.
+            // It cost 7 extra lowerings on that program and made the ranking
+            // slightly MORE optimistic, not less: fusion candidates scoring
+            // better than their centre went from 8 of 25 to 12 of 25, because
+            // the profiled II is smaller than `ii_keep + ii_drop`. The optimism
+            // commit 3df7613 measured was not in this arithmetic; see
+            // `measureFusedPair`, where the candidate was being measured on a
+            // program that had lost every loop cut in the allocation.
             const int64_t fused_floor =
                 fused_ops > 0
                     ? std::max<int64_t>(
@@ -6839,6 +6859,51 @@ struct ResourceAwareTaskOptimizationPass
             cloneAndFuse(bottleneck_idx, partner_idx, /*whole_module=*/true);
         if (!fused->fused)
           return -1;
+        // Every OTHER task keeps the centre's allocation, copied across rather
+        // than reconstructed.
+        //
+        // `cloneAndFuse` rebuilds the graph from the cloned function, and
+        // `TaskDependencyGraph::build` restores a task's decisions from its
+        // attributes. Two of them do not survive that trip.
+        // `writeDecisionAttributes` publishes `cgra_count`, `replicas`,
+        // `trip_count`, `est_latency` and `cgra_shape` -- not `tiling`; and the
+        // II `build` puts back is the analytical one it profiles in place, not
+        // the verified one the balancer is holding. So a fusion candidate was
+        // measured on a program with every loop cut in the allocation removed
+        // and every task's II reset to its floor.
+        //
+        // That is not a small correction. Measured on transformer_static_affine
+        // at the round the pool scores a fusion at 1305289 against a centre of
+        // 1583826: the centre holds cuts of 4 on Task_12/23/26 and 2 on
+        // Task_3/6/9, the rebuilt clone comes back with all six at 1, and its
+        // objective reads 3790204 -- 2.4x, none of it the fusion's doing, and
+        // it lands on the measurement as if it were. `pendingCutsOf` then reads
+        // the same flattened graph, so the program actually lowered has the
+        // cuts missing too.
+        //
+        // Copied by NAME, because the two fused tasks become one and the
+        // positions no longer line up; a name is what survives cloning, for the
+        // reason `ProfileCache` gives.
+        {
+          llvm::StringMap<TaskGraphNode *> centre_nodes;
+          for (auto &n : graph.nodes)
+            centre_nodes[n->op.getTaskName()] = n.get();
+          for (auto &n : fused->graph.nodes) {
+            if (n.get() == fused->fused)
+              continue;
+            auto found = centre_nodes.find(n->op.getTaskName());
+            if (found == centre_nodes.end())
+              continue;
+            const TaskGraphNode *src = found->second;
+            n->cgra_count = src->cgra_count;
+            n->replicas = src->replicas;
+            n->tiling = src->tiling;
+            n->shape = src->shape;
+            n->ii = src->ii;
+            n->steps = src->steps;
+            n->trip_count = src->trip_count;
+          }
+        }
         fused->fused->cgra_count = cgra_count;
         fused->fused->shape = shape;
         fused->fused->replicas = 1;
