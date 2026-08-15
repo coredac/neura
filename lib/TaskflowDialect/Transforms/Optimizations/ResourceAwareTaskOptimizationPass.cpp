@@ -1074,6 +1074,25 @@ struct TaskGraphNode {
   // shuffle all-to-all.
   int tile_dim = -1;
 
+  // Read the objective as if this node were not in the graph.
+  //
+  // This is fusion's `tile_group`. Every other axis can be scored by mutating
+  // the node in place -- a different cgra_count, a different shape, a pending
+  // cut -- and the objective then reads the graph the decision would produce.
+  // Fusion cannot: it produces a graph with one node FEWER, and building that
+  // graph means cloning the module and rewriting the IR, which is exactly what
+  // a ranking may not do. So the pool gives the surviving node the fused body's
+  // facts and marks its partner suppressed for the duration of one
+  // `graph.objective()` call: the partner keeps its storage and its edges, and
+  // every term of the objective -- the two floors, the cell assignment, the
+  // communication proxy -- steps over it.
+  //
+  // Scoring-time only, and never left set: `jointBalanceImpl` clears it before
+  // the next candidate is scored, and no path that materialises anything ever
+  // sees it true. A node that is suppressed on entry to a measurement would be
+  // a task the emitted program still has and the score does not.
+  bool suppressed = false;
+
   // Facts about the task BODY, which no shape changes: the operation count and
   // the recurrence bound. One profile yields them, and every candidate shape's
   // lower bound then follows in closed form as
@@ -1532,8 +1551,15 @@ public:
     };
     llvm::DenseSet<std::pair<const void *, const void *>> counted;
     double total = 0.0;
-    for (auto &n : nodes)
+    for (auto &n : nodes) {
+      if (n->suppressed)
+        continue;
       for (auto *succ : n->successors) {
+        // A suppressed node is not in the graph being scored, so neither is
+        // any edge that touches it. The pool redirects the partner's edges
+        // onto the survivor before scoring, which is where those messages go.
+        if (succ->suppressed)
+          continue;
         const void *kp = groupKey(n.get()), *ks = groupKey(succ);
         if (kp == ks) {
           // Intra-group: an ordered chain still pays per link, a parallel one
@@ -1545,6 +1571,7 @@ public:
           continue;
         total += edgeCost(n.get(), succ);
       }
+    }
     return total;
   }
 
@@ -1632,6 +1659,8 @@ public:
     SmallVector<ScheduleItem> items;
     DenseMap<const TaskGraphNode *, SmallVector<unsigned, 4>> node_items;
     for (auto &n : nodes) {
+      if (n->suppressed)
+        continue; // Not in the graph being scored; see TaskGraphNode.
       int copies = std::max(1, n->tiling);
       for (int t = 0; t < copies; ++t) {
         node_items[n.get()].push_back(items.size());
@@ -1651,7 +1680,7 @@ public:
     // consumer and they could be ordered after it.
     DenseMap<int, SmallVector<const TaskGraphNode *, 4>> group_members;
     for (auto &n : nodes)
-      if (n->tile_group >= 0 && n->tile_parallel)
+      if (!n->suppressed && n->tile_group >= 0 && n->tile_parallel)
         group_members[n->tile_group].push_back(n.get());
     auto expand = [&](const TaskGraphNode *n) {
       SmallVector<const TaskGraphNode *, 4> out;
@@ -1666,7 +1695,11 @@ public:
       return out;
     };
     for (auto &n : nodes) {
+      if (n->suppressed)
+        continue;
       for (auto *s : n->successors) {
+        if (s->suppressed)
+          continue;
         if (n->tile_group >= 0 && n->tile_group == s->tile_group &&
             n->tile_parallel)
           continue;
@@ -1774,6 +1807,8 @@ public:
   void explainPipelineInterval(llvm::raw_ostream &os, StringRef tag) const {
     int64_t task_floor = 0, area_time = 0;
     for (auto &n : nodes) {
+      if (n->suppressed)
+        continue;
       task_floor = std::max(task_floor, n->scheduledLatency());
       area_time += n->estimatedLatency() *
                    (int64_t)std::max(1, n->footprintCgras());
@@ -1800,7 +1835,8 @@ public:
   int64_t taskFloor() const {
     int64_t floor = 0;
     for (auto &n : nodes)
-      floor = std::max(floor, n->scheduledLatency());
+      if (!n->suppressed)
+        floor = std::max(floor, n->scheduledLatency());
     return floor;
   }
 
@@ -1813,6 +1849,8 @@ public:
     // are indistinguishable.
     int64_t task_floor = 0, area_time = 0;
     for (auto &n : nodes) {
+      if (n->suppressed)
+        continue; // Not in the graph being scored; see TaskGraphNode.
       task_floor = std::max(task_floor, n->scheduledLatency());
       area_time += n->estimatedLatency() *
                    (int64_t)std::max(1, n->footprintCgras());
@@ -1877,6 +1915,12 @@ public:
     // tiles cannot overlap and it costs latency.
     DenseSet<const TaskGraphNode *> ordered_cut;
     for (auto &n : nodes) {
+      // A suppressed node gets no items, so it occupies no cell and appears on
+      // no path. This is the half of the suppression that matters most: the
+      // cycle is set by which tasks SHARE a cell, and a fusion candidate's
+      // whole claim is that two tasks became one.
+      if (n->suppressed)
+        continue;
       const int64_t lat = n->estimatedLatency();
       const int area = std::min(std::max(1, n->allocatedCgras()), kTotalCGRAs);
       const int tiling = std::max(1, n->tiling);
@@ -1913,7 +1957,11 @@ public:
       }
     }
     for (auto &n : nodes) {
+      if (n->suppressed)
+        continue;
       for (const TaskGraphNode *successor : n->successors) {
+        if (successor->suppressed)
+          continue;
         if (n->tile_group >= 0 && n->tile_group == successor->tile_group &&
             n->tile_parallel)
           continue;
@@ -2061,7 +2109,8 @@ public:
         cell_items[c].push_back(i);
     int64_t worst = 0;
     for (auto &n : nodes)
-      worst = std::max(worst, n->scheduledLatency());
+      if (!n->suppressed)
+        worst = std::max(worst, n->scheduledLatency());
     for (int c = 0; c < kTotalCGRAs; ++c) {
       auto &on_cell = cell_items[c];
       if (on_cell.empty())
@@ -2111,10 +2160,14 @@ public:
         succ;
     DenseSet<std::pair<const void *, const void *>> seen;
     for (auto &n : nodes) {
+      if (n->suppressed)
+        continue;
       const void *node_key = key(n.get());
       int64_t &node_weight = weight[node_key];
       node_weight = std::max(node_weight, n->scheduledLatency());
       for (const TaskGraphNode *succ_key_of : n->successors) {
+        if (succ_key_of->suppressed)
+          continue;
         const void *succ_key = key(succ_key_of);
         if (succ_key == node_key)
           continue;
@@ -2193,7 +2246,8 @@ public:
       return makespan();
     int64_t interval = 0;
     for (auto &n : nodes)
-      interval = std::max(interval, n->serialTiledLatency());
+      if (!n->suppressed)
+        interval = std::max(interval, n->serialTiledLatency());
     double value = (double)interval + comm_weight * commCost();
     return (int64_t)std::llround(value * (double)wavesNeeded());
   }
@@ -2383,6 +2437,8 @@ public:
   int getTotalAllocatedCGRAs() const {
     int total = 0;
     for (auto &node : nodes) {
+      if (node->suppressed)
+        continue;
       total += node->footprintCgras();
     }
     return total;
@@ -3648,6 +3704,48 @@ public:
   using PublishFn = std::function<void(TaskDependencyGraph &)>;
   PublishFn publish_fn;
 
+  //===--------------------------------------------------------------------===//
+  // Fusion as a candidate axis (`joint-fusion`)
+  //===--------------------------------------------------------------------===//
+  //
+  // Fusion is the one decision this pass took OUTSIDE the objective. The outer
+  // `global-fusion` loop ranks pairs with its own closed form, verifies the top
+  // few by fusing and balancing a clone, commits the best, and only then does
+  // the joint search run its rounds over cgra_count / shape / replicas /
+  // tiling. Two greedy stages, and nothing spanning them: on
+  // transformer_static_affine, k=4 wins the first fusion iteration (1095033
+  // against k=1's 1369480) and converges to a better fusion (935093 against
+  // 1081375), and the two runs then FINISH the other way round (1445735 against
+  // 1409066). A better fusion handed the allocator a different task graph and
+  // the allocator did worse on it.
+  //
+  // These three hooks put a fusion candidate into the same pool as every other
+  // candidate. All empty by default, which is what makes the option a no-op:
+  // with no partner supplier the pool is exactly the one this pass shipped.
+  //
+  // `fusion_partners_fn` lists the nodes the bottleneck may legally fuse with
+  // (`UtilizationFuser::canFuse`, which lives after this class, so it arrives
+  // as a callback rather than as a dependency).
+  std::function<SmallVector<int>(TaskDependencyGraph &, TaskGraphNode *)>
+      fusion_partners_fn;
+  // `fusion_measure_fn(bottleneck_id, partner_id)` measures the FUSED PROGRAM
+  // through the same downstream pipeline `real_interval_fn` uses, so a fusion
+  // candidate and a shape candidate come back on one instrument. -1 when the
+  // fused program could not be produced or measured.
+  std::function<int64_t(int, int)> fusion_measure_fn;
+  // The pair a round adopted, for the CALLER to apply.
+  //
+  // Not applied here, and that is deliberate. Fusing erases two task ops and
+  // creates a third, so every pointer this class holds -- and the positional
+  // snapshots the caller's strategy portfolio restores allocations from --
+  // would refer to tasks that no longer exist. The round loop therefore records
+  // the pair and stops; the caller fuses, rebuilds the graph, and the next
+  // outer iteration starts a fresh joint search on the fused program. That is
+  // what "apply the fusion before the next round" means once the rounds live
+  // inside a strategy that is itself run more than once.
+  std::optional<std::pair<int, int>> adopted_fusion;
+  int64_t adopted_fusion_measured = INT64_MAX;
+
   // Enables the two data-level-parallelism moves on top of the classic
   // add-a-CGRA move. Both are gated on the task's `dlp_replicable` tag.
   bool enable_replicas = false;
@@ -3927,6 +4025,14 @@ public:
         int cgra_count, replicas, tiling;
         CgraShape shape;
         int64_t score;
+        // >= 0 for a fusion candidate: the pair is (`fuse_keep`, `fuse_with`),
+        // `fuse_keep` being the task whose tile array the fused body is scored
+        // on. The other axis fields hold that task's allocation, not the
+        // bottleneck's -- a fusion candidate need not involve the bottleneck at
+        // all, which is the whole reason the axis is enumerated over pairs. See
+        // the fusion pool below.
+        int fuse_with = -1;
+        int fuse_keep = -1;
       };
       // NOTHING in this loop compiles anything. That is the claim the design
       // rests on: the pool is ranked in closed form, and a lowering is spent
@@ -4016,6 +4122,172 @@ public:
           }
         }
       }
+
+      // Fusion, in the same pool, scored by the same `graph.objective()`.
+      //
+      // A fusion candidate is a legal PAIR. Not "the bottleneck with partner
+      // P": that was the first form of this axis and it is empty exactly when
+      // it is needed. On transformer_static_affine the bottleneck (Task_23,
+      // then Task_19) has zero legal partners in every outer iteration, while
+      // the graph as a whole has 15 legal pairs -- because what fusion buys is
+      // AREA for the bottleneck, and the tasks it can be bought from are the
+      // ones the bottleneck does not depend on. A fusion axis that only ever
+      // proposes fusing the bottleneck therefore proposes nothing, and turning
+      // the outer loop off in favour of it just removes fusion.
+      //
+      // Scoring needs the objective evaluated on the graph fusion would
+      // produce, and producing that graph means rewriting the IR -- which this
+      // loop may not do. So the graph is READ as if the fusion had happened.
+      // One of the pair (`keep`, the one with the larger tile array, which is
+      // the array `rankFusion` also charges the fused body to) takes the fused
+      // facts; the other is suppressed:
+      //
+      //   * op counts add -- both bodies land on one tile array. The recurrence
+      //     and the pipeline depth are properties each body keeps, so those
+      //     take the max; the fused task runs until the longer of the two nests
+      //     is done, so the trip count takes the max. The II then follows from
+      //     the survivor's own tile count in exactly the closed form the shape
+      //     axis above uses, ii = max(ceil(n_ops / tiles), rec_mii).
+      //
+      //     These are the same quantities `rankFusion` computes in the outer
+      //     `global-fusion` loop -- `fused_ii = lhs->ii + rhs->ii`, `max` of
+      //     the steps and of the trip counts, `max` of the two cell counts.
+      //     Summing the two IIs and recomputing one II from the summed op count
+      //     agree whenever both bodies are ResMII-bound on the same array
+      //     (ceil(a/T) + ceil(b/T) against ceil((a+b)/T)); this form is used
+      //     because it is the one the rest of the pool is scored with, so a
+      //     fusion candidate and a shape candidate are not priced by two
+      //     different arithmetics.
+      //
+      //   * the partner is SUPPRESSED (see `TaskGraphNode::suppressed`) and its
+      //     edges are redirected onto the survivor, because a fused task
+      //     inherits both tasks' producers and consumers. Dropping them instead
+      //     would hand every fusion candidate a graph with fewer precedence
+      //     constraints than the one fusion actually produces, which is a
+      //     systematic discount in fusion's favour -- and this pool exists to
+      //     compare fusion against the other axes, so a thumb on that scale is
+      //     the one error that would invalidate the whole comparison.
+      //
+      // The candidate carries the survivor's cgra_count and shape and
+      // replicas = tiling = 1: the fused body is two loop nests side by side,
+      // so a cut or a replica split decided for one of the tasks that went into
+      // it is not a decision about it. A later round is free to buy them back.
+      //
+      // Still nothing here compiles: one `graph.objective()` per legal pair,
+      // over the same pair enumeration `global-fusion` already runs once per
+      // outer iteration.
+      if (fusion_partners_fn && fusion_measure_fn) {
+        // Saved by hand: `JointConfig` carries the four decision axes plus
+        // ii/steps, and a fusion candidate also rewrites the body facts and the
+        // adjacency, which no other candidate touches.
+        SmallVector<std::tuple<int64_t, int64_t, int64_t>> saved_body;
+        SmallVector<SmallVector<TaskGraphNode *>> saved_succ, saved_pred;
+        for (auto &n : graph.nodes) {
+          saved_body.emplace_back(n->n_ops, n->rec_mii, n->trip_count);
+          saved_succ.push_back(n->successors);
+          saved_pred.push_back(n->predecessors);
+        }
+        unsigned pairs = 0;
+        for (auto &lhs : graph.nodes) {
+          SmallVector<int> partners = fusion_partners_fn(graph, lhs.get());
+          for (int partner_id : partners) {
+            if (partner_id < 0 || partner_id >= (int)graph.nodes.size())
+              continue;
+            // Each unordered pair once. `canFuse` is symmetric, so the second
+            // visit would only re-score the same fusion.
+            if (partner_id <= (int)lhs->id)
+              continue;
+            TaskGraphNode *other = graph.nodes[partner_id].get();
+            // The fused body runs on ONE tile array, and the bigger of the two
+            // is the one that can hold it.
+            TaskGraphNode *keep = lhs.get(), *drop = other;
+            if (other->allocatedCgras() > keep->allocatedCgras())
+              std::swap(keep, drop);
+            ++pairs;
+            const int64_t tiles = (int64_t)keep->shape.rows *
+                                  graph.per_cgra_rows *
+                                  (int64_t)keep->shape.cols *
+                                  graph.per_cgra_cols;
+            const int64_t fused_ops = keep->n_ops + drop->n_ops;
+            keep->n_ops = fused_ops;
+            keep->rec_mii = std::max(keep->rec_mii, drop->rec_mii);
+            keep->steps = std::max(keep->steps, drop->steps);
+            keep->trip_count = std::max(keep->trip_count, drop->trip_count);
+            keep->replicas = 1;
+            keep->tiling = 1;
+            // Two forms of the same quantity, and the fused II is the max.
+            //
+            // `ceil(n_ops / tiles)` is the pool's closed form, and it is a
+            // FLOOR: it is what the shape axis uses, where it is anchored by a
+            // profile of the very body it describes. A fused body has never
+            // been profiled, so for a fusion candidate the floor is all it is
+            // -- and when both bodies are recurrence-bound it says fusing is
+            // free. Measured on transformer_static_affine with the floor alone,
+            // the shortlist filled up with fusion candidates scored at 1272523
+            // against a centre of 1583826 that then MEASURED 3892613 against
+            // the centre's 1616597: a bound no profile supported, ranked ahead
+            // of candidates whose scores were anchored.
+            //
+            // `ii_keep + ii_drop` is `rankFusion`'s form, and it is anchored on
+            // two measured IIs: both bodies now issue on one array, so their
+            // demands add. Taking the max of the two keeps the fusion axis on
+            // the same footing as the rest of the pool.
+            const int64_t fused_floor =
+                fused_ops > 0
+                    ? std::max<int64_t>(
+                          llvm::divideCeil(fused_ops,
+                                           std::max<int64_t>(1, tiles)),
+                          keep->rec_mii)
+                    : centre.ii[keep->id];
+            keep->ii = std::max<int64_t>(
+                fused_floor, centre.ii[keep->id] + centre.ii[drop->id]);
+            // The fused task's edges are the union of the two tasks'.
+            auto redirect = [&](SmallVector<TaskGraphNode *> &list) {
+              for (TaskGraphNode *&entry : list)
+                if (entry == drop)
+                  entry = keep;
+              // A task that touched BOTH now touches the fused task once, not
+              // twice. Erasing instead of deduplicating here would delete the
+              // edge it already had to the survivor along with the redirected
+              // one, and a candidate that quietly loses a dependence is a
+              // candidate scored on a graph the program does not have.
+              SmallVector<TaskGraphNode *> unique;
+              for (TaskGraphNode *entry : list)
+                if (!llvm::is_contained(unique, entry))
+                  unique.push_back(entry);
+              list = std::move(unique);
+            };
+            for (auto &n : graph.nodes) {
+              if (n.get() == keep || n.get() == drop)
+                continue;
+              redirect(n->successors);
+              redirect(n->predecessors);
+            }
+            for (TaskGraphNode *succ : drop->successors)
+              if (succ != keep && !llvm::is_contained(keep->successors, succ))
+                keep->successors.push_back(succ);
+            for (TaskGraphNode *pred : drop->predecessors)
+              if (pred != keep && !llvm::is_contained(keep->predecessors, pred))
+                keep->predecessors.push_back(pred);
+            drop->suppressed = true;
+            pool.push_back({keep->cgra_count, 1, 1, keep->shape,
+                            graph.objective(), (int)drop->id, (int)keep->id});
+            drop->suppressed = false;
+            restoreConfig(graph, centre);
+            for (auto [i, n] : llvm::enumerate(graph.nodes)) {
+              std::tie(n->n_ops, n->rec_mii, n->trip_count) = saved_body[i];
+              n->successors = saved_succ[i];
+              n->predecessors = saved_pred[i];
+            }
+          }
+        }
+        // Reported even when it is zero, because zero is a result: it says the
+        // program has no legal fusion left, so the axis is empty for a reason
+        // rather than by accident.
+        llvm::errs() << "[Joint]   fusion: " << pairs
+                     << " legal pairs scored into the pool\n";
+      }
+
       if (pool.empty())
         break;
 
@@ -4050,7 +4322,9 @@ public:
       for (const Scored &candidate : pool) {
         bool repeat = false;
         for (const Scored &kept : distinct)
-          repeat |= kept.cgra_count == candidate.cgra_count &&
+          repeat |= kept.fuse_with == candidate.fuse_with &&
+                    kept.fuse_keep == candidate.fuse_keep &&
+                    kept.cgra_count == candidate.cgra_count &&
                     kept.replicas == candidate.replicas &&
                     kept.tiling == candidate.tiling &&
                     kept.shape.irAttr() == candidate.shape.irAttr();
@@ -4109,19 +4383,41 @@ public:
       const Scored *winner = nullptr;
       for (unsigned i = 0; i < keep; ++i) {
         const Scored &candidate = pool[i];
-        bottleneck->cgra_count = candidate.cgra_count;
-        bottleneck->shape = candidate.shape;
-        bottleneck->replicas = candidate.replicas;
-        bottleneck->tiling = candidate.tiling;
-        verify(bottleneck, bottleneck->op);
-        publish_fn(graph);
-        const int64_t measured = measure();
-        llvm::errs() << "[Joint]   cand " << i << " cgras="
-                     << candidate.cgra_count << " shape="
-                     << candidate.shape.describe(candidate.cgra_count)
-                     << " replicas=" << candidate.replicas << " tiling="
-                     << candidate.tiling << " scored=" << candidate.score
-                     << " measured=" << measured << "\n";
+        int64_t measured;
+        if (candidate.fuse_with >= 0) {
+          // The same lesson as `PendingCut`: a candidate that PROMISES a change
+          // is not that change until it is materialised, and measuring the
+          // promise instead of the program is the bug commit f21bdfb fixed for
+          // tiling. So a fusion candidate is measured with the fusion applied.
+          // `fusion_measure_fn` clones the module, fuses the pair on the clone,
+          // installs this candidate's allocation on the task that results,
+          // profiles it and runs the same downstream pipeline `measure()` runs
+          // -- one instrument for the whole shortlist. The centre must be on
+          // the IR first, because the clone reads its allocation from there.
+          restoreConfig(graph, centre);
+          publish_fn(graph);
+          measured = fusion_measure_fn(candidate.fuse_keep, candidate.fuse_with);
+          llvm::errs() << "[Joint]   cand " << i << " FUSE "
+                       << graph.nodes[candidate.fuse_keep]->op.getTaskName()
+                       << " + "
+                       << graph.nodes[candidate.fuse_with]->op.getTaskName()
+                       << " on " << candidate.cgra_count << " cgras scored="
+                       << candidate.score << " measured=" << measured << "\n";
+        } else {
+          bottleneck->cgra_count = candidate.cgra_count;
+          bottleneck->shape = candidate.shape;
+          bottleneck->replicas = candidate.replicas;
+          bottleneck->tiling = candidate.tiling;
+          verify(bottleneck, bottleneck->op);
+          publish_fn(graph);
+          measured = measure();
+          llvm::errs() << "[Joint]   cand " << i << " cgras="
+                       << candidate.cgra_count << " shape="
+                       << candidate.shape.describe(candidate.cgra_count)
+                       << " replicas=" << candidate.replicas << " tiling="
+                       << candidate.tiling << " scored=" << candidate.score
+                       << " measured=" << measured << "\n";
+        }
         if (measured > 0 && measured < best_measured) {
           best_measured = measured;
           winner = &candidate;
@@ -4142,6 +4438,22 @@ public:
         llvm::errs() << "[Joint]   centre measured " << centre_measured
                      << " <= best candidate " << best_measured
                      << "; converged\n";
+        break;
+      }
+      if (winner->fuse_with >= 0) {
+        // The graph stays as it is and the caller fuses; see `adopted_fusion`
+        // for why the rewrite may not happen from inside this loop. The rounds
+        // stop here because every fact this round's successors would be built
+        // on -- the bottleneck, its body, the pool -- belongs to the unfused
+        // program.
+        adopted_fusion = std::make_pair(winner->fuse_keep, winner->fuse_with);
+        adopted_fusion_measured = best_measured;
+        changed = true;
+        llvm::errs() << "[Joint]   adopted FUSE " << winner->fuse_keep << "+"
+                     << winner->fuse_with << ", measured " << best_measured
+                     << " (was " << centre_measured
+                     << "); the caller applies it and the next outer iteration "
+                     << "searches the fused program\n";
         break;
       }
       bottleneck->cgra_count = winner->cgra_count;
@@ -5384,6 +5696,26 @@ struct ResourceAwareTaskOptimizationPass
                      "if it beats not fusing (default false)."),
       llvm::cl::init(false)};
 
+  // Fusion as a candidate axis of the joint pool instead of an outer loop.
+  //
+  // `global-fusion` is a stage: it ranks pairs with its own closed form
+  // (`rankFusion`, which is not `graph.objective()`), verifies the top few by
+  // fusing and balancing a clone, commits the best, and only then does the
+  // joint search run its rounds over the other axes. With this option the pool
+  // carries one member per legal partner, scored by `graph.objective()` exactly
+  // like every other member and ranked against them in one list.
+  //
+  // Off by default: with it off nothing here is reachable and the pass behaves
+  // exactly as it shipped. On, it REPLACES the outer loop -- see the warning in
+  // `runOnOperation` and the fusion chain below it.
+  Option<bool> jointFusion{
+      *this, "joint-fusion",
+      llvm::cl::desc("Offer fusion as a candidate inside the joint pool, "
+                     "scored by the same objective as the shape/replica/tiling "
+                     "candidates and verified on the fused program. Overrides "
+                     "global-fusion; needs joint-rounds > 0 (default false)."),
+      llvm::cl::init(false)};
+
   // One shortlist depth for every place this pass ranks cheaply and verifies
   // for real: fusion pairs and complete allocations. Both enumerate a space too
   // large to evaluate exactly -- O(V^2) pairs, and one allocation per (rule,
@@ -6175,6 +6507,21 @@ struct ResourceAwareTaskOptimizationPass
                             "in the given groups will still be fused";
     if (globalFusion.getValue() && costGuidedFusion.getValue())
       func.emitWarning() << "global-fusion overrides cost-guided-fusion";
+    // joint-fusion sits above global-fusion in the same chain, for the reason
+    // the joint search replaces the one-axis climb rather than following it: a
+    // pair committed by the outer loop is a decision the pool never got to
+    // weigh against the other axes, so running both would leave the staged
+    // greedy in place and only add candidates to what it had already narrowed.
+    if (jointFusion.getValue() && globalFusion.getValue())
+      func.emitWarning() << "joint-fusion overrides global-fusion; the outer "
+                            "fusion loop does not run";
+    // The pool is where joint-fusion's candidates live, and `joint-rounds=0`
+    // means the pool is never built. Silently that is "no fusion at all",
+    // which is a third fusion policy nobody asked for.
+    if (jointFusion.getValue() && jointRounds.getValue() <= 0)
+      func.emitWarning() << "joint-fusion needs joint-rounds > 0; with the "
+                            "joint pool switched off no fusion candidate is "
+                            "ever scored and nothing will be fused";
 
     llvm::errs() << "=== ResourceAwareTaskOptimization on " << func.getName()
                  << " (estimation-mode=" << estimationMode.getValue()
@@ -6363,44 +6710,99 @@ struct ResourceAwareTaskOptimizationPass
         tmp_mod.erase();
         return interval;
       };
-      // Speculatively fuses the SPECIFIC pair (i,j) of the current graph on a
-      // clone, balances, and returns the resulting interval (-1 if illegal).
-      // Node order is deterministic across graph.build, so the index pair
-      // identifies the same tasks in the clone as in the real graph.
+      // Clone the program, fuse the SPECIFIC pair (i,j) on the clone, rebuild
+      // the graph on it. Node order is deterministic across graph.build, so the
+      // index pair identifies the same tasks in the clone as in the real graph.
+      //
+      // Both users of fusion-on-a-clone go through here -- `global-fusion`'s
+      // analytical lookahead below, and the joint pool's verification of a
+      // fusion candidate -- so there is one path that knows how to produce a
+      // fused program and the two differ only in what they then measure.
+      struct FusedClone {
+        OwningOpRef<ModuleOp> module;
+        func::FuncOp func;
+        TaskDependencyGraph graph;
+        // The task the two became, or null when the fusion did not happen.
+        TaskGraphNode *fused = nullptr;
+      };
+      // `whole_module` clones the enclosing module instead of the function
+      // alone. The analytical path does not need it and keeps the cheaper
+      // function-only clone it has always used; a path that runs the REAL
+      // downstream pipeline does, because a func that reads a weight through
+      // `memref.get_global` refers to a symbol declared at module scope and the
+      // clone would not verify without it. Same reason as
+      // `realPipelineIntervalOf`.
+      auto cloneAndFuse =
+          [&](int first_task_idx, int second_task_idx,
+              bool whole_module) -> std::unique_ptr<FusedClone> {
+        auto out = std::make_unique<FusedClone>();
+        if (whole_module) {
+          auto parent = func->getParentOfType<ModuleOp>();
+          if (!parent)
+            return out;
+          out->module = OwningOpRef<ModuleOp>(parent.clone());
+          StringRef name = func.getName();
+          out->module->walk([&](func::FuncOp candidate) {
+            if (candidate.getName() == name)
+              out->func = candidate;
+          });
+          if (!out->func)
+            return out;
+        } else {
+          out->module = OwningOpRef<ModuleOp>(ModuleOp::create(func.getLoc()));
+          OpBuilder tmp_builder(out->module->getBodyRegion());
+          out->func = cast<func::FuncOp>(tmp_builder.clone(*func.getOperation()));
+        }
+        configureGraph(out->graph, /*top_k_override=*/0);
+        out->graph.build(out->func, use_analytical);
+        const int node_count = (int)out->graph.nodes.size();
+        if (first_task_idx >= node_count || second_task_idx >= node_count ||
+            first_task_idx < 0 || second_task_idx < 0)
+          return out;
+        TaskGraphNode *first_node = out->graph.nodes[first_task_idx].get();
+        TaskGraphNode *second_node = out->graph.nodes[second_task_idx].get();
+        UtilizationFuser clone_fuser;
+        if (!clone_fuser.canFuse(first_node, second_node, out->graph))
+          return out;
+        // The name the fused task will carry, so it can be found again in the
+        // rebuilt graph. `performFusion` swaps the two if the IR order is the
+        // other way round, and builds the name from the earlier one first.
+        // Asked only after `canFuse`, which is what establishes that the two
+        // ops are in the same block -- `isBeforeInBlock` asserts otherwise.
+        const bool swapped = !first_node->op.getOperation()->isBeforeInBlock(
+            second_node->op.getOperation());
+        std::string fused_name =
+            (swapped ? second_node->op.getTaskName().str() + "_" +
+                           first_node->op.getTaskName().str()
+                     : first_node->op.getTaskName().str() + "_" +
+                           second_node->op.getTaskName().str()) +
+            "_utilfused";
+        auto fusion_profile_fn = [&out, use_analytical](TaskGraphNode *node,
+                                                        TaskflowTaskOp task) {
+          out->graph.profileTask(node, task, /*skip_mapper=*/use_analytical);
+        };
+        if (!clone_fuser.fuseNodes(out->func, first_node, second_node,
+                                   out->graph, fusion_profile_fn))
+          return out;
+        out->graph = TaskDependencyGraph();
+        configureGraph(out->graph, /*top_k_override=*/0);
+        out->graph.build(out->func, use_analytical);
+        for (auto &node : out->graph.nodes)
+          if (node->op.getTaskName() == fused_name)
+            out->fused = node.get();
+        return out;
+      };
+      // Speculatively fuses the pair, balances, and returns the resulting
+      // interval (-1 if illegal). `global-fusion`'s lookahead.
       auto speculatePair = [&](int first_task_idx,
                                int second_task_idx) -> int64_t {
-        auto tmp_mod = ModuleOp::create(func.getLoc());
-        OpBuilder tmp_builder(tmp_mod.getBodyRegion());
-        auto tmp_func =
-            cast<func::FuncOp>(tmp_builder.clone(*func.getOperation()));
-        TaskDependencyGraph speculative_graph;
-        configureGraph(speculative_graph, /*top_k_override=*/0);
-        speculative_graph.build(tmp_func, use_analytical);
-        const int node_count = (int)speculative_graph.nodes.size();
-        if (first_task_idx >= node_count || second_task_idx >= node_count) {
-          tmp_mod.erase();
+        std::unique_ptr<FusedClone> fused =
+            cloneAndFuse(first_task_idx, second_task_idx,
+                         /*whole_module=*/false);
+        if (!fused->fused)
           return -1;
-        }
-        TaskGraphNode *first_node =
-            speculative_graph.nodes[first_task_idx].get();
-        TaskGraphNode *second_node =
-            speculative_graph.nodes[second_task_idx].get();
-        UtilizationFuser fuser;
-        if (!fuser.canFuse(first_node, second_node, speculative_graph)) {
-          tmp_mod.erase();
-          return -1;
-        }
-        auto fusion_profile_fn = [&speculative_graph, use_analytical](
-                                     TaskGraphNode *node, TaskflowTaskOp task) {
-          speculative_graph.profileTask(node, task,
-                                        /*skip_mapper=*/use_analytical);
-        };
-        fuser.fuseNodes(tmp_func, first_node, second_node, speculative_graph,
-                        fusion_profile_fn);
-        speculative_graph = TaskDependencyGraph();
-        configureGraph(speculative_graph, /*top_k_override=*/0);
-        speculative_graph.build(tmp_func, use_analytical);
         // `profileWithBestShape` for the same reason as in `speculate` above.
+        TaskDependencyGraph &speculative_graph = fused->graph;
         auto speculative_profile_fn = [&speculative_graph](
                                           TaskGraphNode *node,
                                           TaskflowTaskOp task) {
@@ -6410,9 +6812,63 @@ struct ResourceAwareTaskOptimizationPass
         PipelineBalancer balancer;
         configureBalancer(balancer, /*top_k_override=*/0);
         balancer.balance(speculative_graph, speculative_profile_fn);
-        int64_t interval = scoreClone(speculative_graph, tmp_func);
-        tmp_mod.erase();
-        return interval;
+        return scoreClone(speculative_graph, fused->func);
+      };
+      // What a fusion candidate in the joint pool is MEASURED with.
+      //
+      // The pool's other candidates are measured by publishing the allocation
+      // and running `orchestrate-tasks-on-accelerators` +
+      // `analyze-task-pipeline-interval` on a clone. A fusion candidate is
+      // measured the same way, on a clone in which the fusion HAS happened --
+      // measuring the two tasks still separate would be scoring the promise
+      // rather than the program, which is the error commit f21bdfb fixed for
+      // tiling.
+      //
+      // The fused task is given the allocation the candidate was SCORED with:
+      // the bottleneck's tile array, one replica, no cut. It is then profiled
+      // with the shortlist's own profiler (the real mapper, or the exact solver
+      // when one is configured), so its II is a measurement and not the closed
+      // form that ranked it. Nothing is re-balanced -- no other candidate is
+      // either, and re-allocating only this one would decide the round on which
+      // candidate got an extra search rather than on which is better. The
+      // re-balance comes on the next outer iteration, once the fusion is real.
+      auto measureFusedPair = [&](int bottleneck_idx, int partner_idx,
+                                  int cgra_count, const CgraShape &shape,
+                                  bool verify_with_mapper) -> int64_t {
+        std::unique_ptr<FusedClone> fused =
+            cloneAndFuse(bottleneck_idx, partner_idx, /*whole_module=*/true);
+        if (!fused->fused)
+          return -1;
+        fused->fused->cgra_count = cgra_count;
+        fused->fused->shape = shape;
+        fused->fused->replicas = 1;
+        fused->fused->tiling = 1;
+        fused->graph.profileTask(fused->fused, fused->fused->op,
+                                 /*skip_mapper=*/!verify_with_mapper);
+        // NOT balanced before it is measured, unlike `speculatePair`.
+        //
+        // `speculatePair` has to balance: it is `global-fusion`'s own
+        // yardstick, and both sides of that comparison get a balance. Here the
+        // pool's other candidates do not, so balancing this one would decide
+        // the round on which candidate was given an extra search. It was tried,
+        // and it does exactly that: on transformer_static_affine the balanced
+        // reading made fusion candidates win rounds whose adoption then
+        // measured 4593025, against 1512830 for the same search with this
+        // symmetric reading and 1445735 for the shipped staged pipeline.
+        //
+        // The cost of the symmetry is real and is stated here rather than
+        // hidden: what a fusion buys is AREA, and the cells it frees are worth
+        // nothing until something spends them, so this reading shows fusion's
+        // cost immediately and its benefit only on the next outer iteration,
+        // once the fusion is real and the whole graph is re-balanced.
+        writeDecisionAttributes(fused->graph);
+        const int64_t reported = realPipelineIntervalOf(
+            fused->func, pendingCutsOf(fused->graph));
+        // Same floor as `measure()` in the joint loop, for the same reason: a
+        // cut the tiler refuses leaves an un-cut task behind a divided
+        // `est_latency`, and the floor is valid for any schedule of the graph.
+        return reported > 0 ? std::max(reported, fused->graph.taskFloor())
+                            : reported;
       };
       // --force-partition parsing: original task index -> target group id.
       llvm::DenseMap<int, int> forceGroup;
@@ -6487,6 +6943,12 @@ struct ResourceAwareTaskOptimizationPass
                                          profile_fn);
       } else if (disableFusion.getValue()) {
         // balance-only ablation: never fuse.
+      } else if (jointFusion.getValue()) {
+        // Nothing here on purpose. Fusion is a candidate in the joint pool
+        // below, so this phase has no decision left to make; running any of the
+        // policies underneath would commit a pair before the pool ever scored
+        // one. When a pool round adopts a fusion, it is applied after the
+        // balance, where the graph can be rebuilt safely.
       } else if (globalFusion.getValue()) {
         // Rank every candidate pair cheaply, then verify only the top few.
         //
@@ -6950,6 +7412,38 @@ struct ResourceAwareTaskOptimizationPass
       // complete lowering per candidate would cost more than the lookahead it
       // informs.
       balancer.verify_profile_fn = balance_verify_fn;
+      // Fusion joins the pool, on the committing balancer only. The two
+      // speculative call sites configure themselves with `top_k_override=0` and
+      // get neither this nor `real_interval_fn`: a lookahead clone that could
+      // itself propose fusions would clone and lower a program per candidate
+      // per candidate, and it is informing a decision that costs one.
+      if (jointFusion.getValue()) {
+        balancer.fusion_partners_fn =
+            [&fuser](TaskDependencyGraph &g,
+                     TaskGraphNode *node) -> SmallVector<int> {
+          SmallVector<int> partners;
+          // `canFuse` is the whole legality question -- independence,
+          // single-block bodies, and the dominance-safety guard from 41f2367.
+          // The pool asks nothing else, so a pair it offers is a pair
+          // `fuseNodes` will accept.
+          for (auto &other : g.nodes)
+            if (other.get() != node && fuser.canFuse(node, other.get(), g))
+              partners.push_back((int)other->id);
+          return partners;
+        };
+        // `keep_idx` is the half of the pair whose tile array the candidate was
+        // SCORED on, and the graph is back at the centre when this is called,
+        // so reading its allocation here gives the fused task exactly the
+        // allocation the score assumed.
+        balancer.fusion_measure_fn = [&](int keep_idx,
+                                         int partner_idx) -> int64_t {
+          if (keep_idx < 0 || keep_idx >= (int)graph.nodes.size())
+            return -1;
+          TaskGraphNode *node = graph.nodes[keep_idx].get();
+          return measureFusedPair(keep_idx, partner_idx, node->cgra_count,
+                                  node->shape, /*verify_with_mapper=*/true);
+        };
+      }
       bool balance_changed = false;
       if (!importAllocation.getValue().empty()) {
         balance_changed =
@@ -7083,6 +7577,47 @@ struct ResourceAwareTaskOptimizationPass
 
         restore(best);
         balance_changed = (best != initial);
+      }
+
+      // A fusion candidate won a joint round: apply it now, on the real graph.
+      //
+      // Here rather than inside the balancer because the strategy portfolio
+      // above restores allocations BY POSITION, and fusing erases two task ops
+      // and creates a third: a graph that changed shape mid-portfolio would
+      // have its allocations restored onto the wrong tasks. The balancer
+      // therefore records the pair and stops its rounds, this applies it, and
+      // the outer loop rebuilds and runs a fresh joint search on the fused
+      // program -- so the next round does see the fused graph, which is the
+      // property that matters.
+      //
+      // `canFuse` is re-checked because the pair was cleared before the
+      // portfolio ran, and the indices are re-derived against the current node
+      // count for the same reason.
+      if (jointFusion.getValue() && balancer.adopted_fusion) {
+        const auto [first, second] = *balancer.adopted_fusion;
+        const int node_count = (int)graph.nodes.size();
+        if (first >= 0 && second >= 0 && first < node_count &&
+            second < node_count &&
+            fuser.canFuse(graph.nodes[first].get(), graph.nodes[second].get(),
+                          graph)) {
+          llvm::errs() << "[Joint] applying the adopted fusion: "
+                       << graph.nodes[first]->op.getTaskName() << " + "
+                       << graph.nodes[second]->op.getTaskName()
+                       << " (measured " << balancer.adopted_fusion_measured
+                       << ")\n";
+          if (fuser.fuseNodes(func, graph.nodes[first].get(),
+                              graph.nodes[second].get(), graph, profile_fn)) {
+            fuse_changed = true;
+            // The two nodes' ops are erased, so every pointer into the graph is
+            // stale until it is rebuilt.
+            graph = TaskDependencyGraph();
+            configureGraph(graph);
+            graph.build(func, use_analytical);
+          }
+        } else {
+          llvm::errs() << "[Joint] the adopted fusion is no longer legal; "
+                       << "leaving the program unfused\n";
+        }
       }
 
       // Record this round's allocation if it is the best the search has seen,
