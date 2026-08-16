@@ -18,9 +18,13 @@ constexpr llvm::StringLiteral kMappingMode = "mapping_mode";
 
 constexpr llvm::StringLiteral kMappingStrategy = "mapping_strategy";
 constexpr llvm::StringLiteral kBacktrackConfig = "backtrack_config";
-constexpr llvm::StringLiteral kDumpMappingTable = "dump_mapping_table";
 
-// Identification & Results
+// Keys for the template mapping input constraints.
+constexpr llvm::StringLiteral kPlacement = "placement";
+constexpr llvm::StringLiteral kX = "x";
+constexpr llvm::StringLiteral kY = "y";
+
+// Identification & Results.
 constexpr llvm::StringLiteral kDfgId = "dfg_id";
 constexpr llvm::StringLiteral kMappingInfo = "mapping_info";
 constexpr llvm::StringLiteral kXTiles = "x_tiles";
@@ -29,7 +33,7 @@ constexpr llvm::StringLiteral kCompiledII = "compiled_ii";
 constexpr llvm::StringLiteral kRecMII = "rec_mii";
 constexpr llvm::StringLiteral kResMII = "res_mii";
 
-// Values & Constants Keys
+// Values & Constants Keys.
 constexpr llvm::StringLiteral kValue = "value";
 constexpr llvm::StringLiteral kConstantValue = "constant_value";
 constexpr llvm::StringLiteral kRhsValue = "rhs_value";
@@ -40,7 +44,7 @@ namespace val {
 // Strategy & Mode
 constexpr llvm::StringLiteral kSpatialOnly = "spatial-only";
 constexpr llvm::StringLiteral kSpatialTemporal = "spatial-temporal";
-constexpr llvm::StringLiteral kTemporal = "temporal";
+constexpr llvm::StringLiteral kTemplate = "template";
 constexpr llvm::StringLiteral kHeuristic = "heuristic";
 constexpr llvm::StringLiteral kCustomized = "customized";
 constexpr llvm::StringLiteral kSimple = "simple";

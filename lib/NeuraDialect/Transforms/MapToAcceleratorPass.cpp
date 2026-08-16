@@ -6,6 +6,7 @@
 #include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/HeuristicMapping/HeuristicMapping.h"
 #include "NeuraDialect/Mapping/MappingState.h"
+#include "NeuraDialect/Mapping/TemplateMapping/TemplateMapping.h"
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraAttributes.h"
 #include "NeuraDialect/NeuraDialect.h"
@@ -57,7 +58,7 @@ struct MapToAcceleratorPass
   Option<std::string> mappingStrategy{
       *this, "mapping-strategy",
       llvm::cl::desc("Mapping strategy to use for mapping operations to the "
-                     "accelerator. Options: heuristic (default)."),
+                     "accelerator. Options: heuristic (default) and template."),
       llvm::cl::init(attr::val::kHeuristic.str())};
   Option<std::string> mappingMode{
       *this, "mapping-mode",
@@ -120,6 +121,22 @@ struct MapToAcceleratorPass
     if (mapping_strategy_str.empty()) {
       mapping_strategy_str = attr::val::kHeuristic;
     }
+
+    // The template strategy uses the placement written by a spatial template.
+    // It currently supports spatial-only mapping because every materialized
+    // operation is assigned to a dedicated hardware tile.
+    if (mapping_strategy_str == attr::val::kTemplate) {
+      if (!is_spatial_only) {
+        llvm::errs() << "[MapToAcceleratorPass] Template mapping requires "
+                        "spatial-only mapping mode.\n";
+        return false;
+      }
+
+      mapping_strategy = std::make_unique<TemplateMapping>();
+      resolved_mapping_strategy = attr::val::kTemplate.str();
+      return true;
+    }
+
     StringRef backtrack_str = backtrack_config_opt;
     if (mapping_strategy_str.empty() ||
         mapping_strategy_str == attr::val::kHeuristic) {
