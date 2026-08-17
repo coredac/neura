@@ -10,7 +10,6 @@ from neura_mlir.ir import (
     Location,
     Module,
     StringAttr,
-    Type,
 )
 
 
@@ -30,9 +29,6 @@ def build_module():
         module = Module.create()
         i32 = IntegerType.get_signless(32)
 
-        # Temporary until the custom Python binding for PredicatedValue exists.
-        data_i32 = Type.parse("!neura.data<i32, i1>")
-
         with InsertionPoint(module.body):
             function = func.FuncOp("add_constant", ([], []))
             entry_block = function.add_entry_block()
@@ -49,19 +45,19 @@ def build_module():
 
         with InsertionPoint(kernel_block):
             lhs = neura.ConstantOp(
-                data_i32,
+                i32,
                 IntegerAttr.get(i32, 1),
             )
             lhs.operation.attributes["placement"] = build_placement(0, 0, i32)
 
             rhs = neura.ConstantOp(
-                data_i32,
+                i32,
                 IntegerAttr.get(i32, 2),
             )
             rhs.operation.attributes["placement"] = build_placement(2, 0, i32)
 
             result = neura.AddOp(
-                data_i32,
+                i32,
                 lhs.result,
                 rhs=rhs.result,
             )
@@ -73,18 +69,16 @@ def build_module():
         return module
 
 
-# CHECK-LABEL: module {
-# CHECK: func.func @add_constant()
-# CHECK: neura.kernel attributes {accelerator = "neura"}
-# CHECK: %[[LHS:.*]] = "neura.constant"()
-# CHECK-SAME: value = 1 : i32
-# CHECK-SAME: placement = {x = 0 : i32, y = 0 : i32}
-# CHECK: %[[RHS:.*]] = "neura.constant"()
-# CHECK-SAME: value = 2 : i32
-# CHECK-SAME: placement = {x = 2 : i32, y = 0 : i32}
-# CHECK: "neura.add"(%[[LHS]], %[[RHS]])
-# CHECK-SAME: placement = {x = 1 : i32, y = 0 : i32}
-# CHECK: neura.yield
-# CHECK: return
+# CHECK:     module {
+# CHECK-NEXT:  func.func @add_constant() {
+# CHECK-NEXT:    neura.kernel attributes {accelerator = "neura"} {
+# CHECK-NEXT:      %0 = "neura.constant"() <{value = 1 : i32}> {placement = {x = 0 : i32, y = 0 : i32}} : () -> i32
+# CHECK-NEXT:      %1 = "neura.constant"() <{value = 2 : i32}> {placement = {x = 2 : i32, y = 0 : i32}} : () -> i32
+# CHECK-NEXT:      %2 = "neura.add"(%0, %1) {placement = {x = 1 : i32, y = 0 : i32}} : (i32, i32) -> i32
+# CHECK-NEXT:      neura.yield
+# CHECK-NEXT:    }
+# CHECK-NEXT:    return
+# CHECK-NEXT:  }
+# CHECK-NEXT:}
 
 print(build_module())
