@@ -10,10 +10,87 @@ set(CMAKE_CXX_STANDARD_REQUIRED YES)
 
 add_compile_options(-g)
 
-# set(MLIR_DIR /home/lucas/llvm-project/build/lib/cmake/mlir)
-# set(LLVM_DIR /home/lucas/llvm-project/build/lib/cmake/llvm)
-# set(MLIR_SRC_DIR /home/lucas/llvm-project/mlir)
-# set(MLIR_BINARY_DIR /home/lucas/llvm-project/build)
+if(CMAKE_SOURCE_DIR STREQUAL PROJECT_SOURCE_DIR)
+  if(NOT DEFINED ENV{LLVM_BUILD_DIR})
+    message(FATAL_ERROR
+      "LLVM_BUILD_DIR is not set. "
+      "Set it to /path/to/llvm-project/build."
+    )
+  endif()
+
+  set(
+    NEURA_LLVM_BUILD_DIR
+    "$ENV{LLVM_BUILD_DIR}"
+    CACHE PATH
+    "LLVM build directory used by Neura"
+  )
+
+  get_filename_component(
+    NEURA_LLVM_SOURCE_DIR
+    "${NEURA_LLVM_BUILD_DIR}"
+    DIRECTORY
+  )
+
+  set(
+    LLVM_DIR
+    "${NEURA_LLVM_BUILD_DIR}/lib/cmake/llvm"
+    CACHE PATH
+    "LLVM CMake package directory"
+  )
+
+  set(
+    MLIR_DIR
+    "${NEURA_LLVM_BUILD_DIR}/lib/cmake/mlir"
+    CACHE PATH
+    "MLIR CMake package directory"
+  )
+
+  set(
+    MLIR_SOURCE_DIR
+    "${NEURA_LLVM_SOURCE_DIR}/mlir"
+    CACHE PATH
+    "MLIR source directory"
+  )
+
+  set(
+    MLIR_BINARY_DIR
+    "${NEURA_LLVM_BUILD_DIR}"
+    CACHE PATH
+    "MLIR build directory"
+  )
+
+  # Prefer the Python interpreter from the active Conda environment.
+  if(DEFINED ENV{CONDA_PREFIX})
+    set(
+      Python3_EXECUTABLE
+      "$ENV{CONDA_PREFIX}/bin/python"
+      CACHE FILEPATH
+      "Python3 interpreter used by Neura"
+    )
+
+    set(
+      Python_EXECUTABLE
+      "$ENV{CONDA_PREFIX}/bin/python"
+      CACHE FILEPATH
+      "Python interpreter used by Neura"
+    )
+
+    set(
+      Python3_ROOT_DIR
+      "$ENV{CONDA_PREFIX}"
+      CACHE PATH
+      "Python3 environment root"
+    )
+
+    set(
+      Python_ROOT_DIR
+      "$ENV{CONDA_PREFIX}"
+      CACHE PATH
+      "Python environment root"
+    )
+  endif()
+endif()
+
 message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
@@ -21,6 +98,23 @@ find_package(MLIR REQUIRED CONFIG)
 find_package(LLVM REQUIRED CONFIG)
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+
+# Configure the same Python development dependencies used by upstream MLIR.
+include(MLIRDetectPythonEnv)
+mlir_configure_python_dev_packages()
+
+if(NOT TARGET MLIRPythonSources.Core)
+  message(FATAL_ERROR
+    "Neura requires MLIR Python bindings. "
+    "Rebuild LLVM/MLIR with "
+    "-DMLIR_ENABLE_BINDINGS_PYTHON=ON."
+  )
+endif()
+
+set(
+  NEURA_PYTHON_PACKAGE_ROOT
+  "${CMAKE_BINARY_DIR}/python_packages/neura_core"
+)
 
 include_directories(${LLVM_INCLUDE_DIRS} ${MLIR_INCLUDE_DIRS})
 
@@ -35,6 +129,7 @@ include_directories(BEFORE ${PROJECT_BINARY_DIR}/include)
 add_subdirectory(include)
 add_subdirectory(lib)
 add_subdirectory(tools)
+add_subdirectory(python)
 
 # ===--------------------------------------------------------------------===#
 # LIT test setup
@@ -62,7 +157,10 @@ configure_file(
 # Adds a custom target for running lit tests
 add_custom_target(check-neura
   COMMAND ${LLVM_EXTERNAL_LIT} -sv ${CMAKE_BINARY_DIR}/test
-  DEPENDS mlir-neura-opt
+  DEPENDS
+  mlir-neura-opt
+  NeuraPythonModules
+
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
   COMMENT "Running Sora Dialect Tests with lit"
 )
