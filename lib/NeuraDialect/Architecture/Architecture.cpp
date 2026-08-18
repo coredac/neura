@@ -371,18 +371,17 @@ void Architecture::createLinks(const LinkDefaults &link_defaults,
   switch (base_topology) {
   case BaseTopology::MESH:
     createMeshLinks(link_id, link_defaults);
-    break;
+    return;
   case BaseTopology::KING_MESH:
     createKingMeshLinks(link_id, link_defaults);
-    break;
+    return;
   case BaseTopology::RING:
     createRingLinks(link_id, link_defaults);
-    break;
-  default:
-    // Defaults to mesh if unknown topology.
-    createMeshLinks(link_id, link_defaults);
-    break;
+    return;
   }
+
+  // Preserve the existing mesh fallback for unknown topology values.
+  createMeshLinks(link_id, link_defaults);
 }
 
 // Checks if a tile is on the boundary of the architecture.

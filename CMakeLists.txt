@@ -1,5 +1,22 @@
 cmake_minimum_required(VERSION 3.13.4)
+
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+  if(NOT DEFINED CMAKE_C_COMPILER AND NOT DEFINED ENV{CC})
+    set(CMAKE_C_COMPILER clang CACHE FILEPATH "Default C compiler")
+  endif()
+  if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT DEFINED ENV{CXX})
+    set(CMAKE_CXX_COMPILER clang++ CACHE FILEPATH "Default C++ compiler")
+  endif()
+endif()
+
 project(NeuraMLIRProject VERSION 0.1.0)
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  # The pinned MLIR revision triggers a known false positive when a
+  # captureless lambda is assigned to llvm::function_ref.
+  # See https://github.com/llvm/llvm-project/issues/126600.
+  # Remove this workaround after updating LLVM past the upstream fix.
+  add_compile_options(-Wno-dangling-assignment-gsl)
+endif()
 
 # Avoid cmake generate unknown warnings
 cmake_policy(SET CMP0116 NEW)

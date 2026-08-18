@@ -224,13 +224,6 @@ bool HardwareTemplate::try_accommodate(const HardwarePattern &pat,
 
   // Calculate cost increase: count how many new FUs we need to add
   double old_cost = compute_cost(cm);
-  int new_fus_needed = 0;
-
-  for (size_t i = 0; i < mapping.size(); ++i) {
-    if (mapping[i] < 0) {
-      new_fus_needed++;
-    }
-  }
 
   // Convert negative indices to actual new FU IDs
   std::vector<int> final_mapping;
