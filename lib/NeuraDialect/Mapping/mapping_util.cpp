@@ -135,6 +135,71 @@ bool is_non_materialized(Operation *op) {
                    neura::YieldOp>(op);
 }
 
+// Returns true if the op occupies a tile/FU (i.e. must be placed), as opposed
+// to a routing/structural op or a fused-region interior op. This is the single
+// source of truth for "which ops the exact mapper places": --dump-dfg-json
+// emits exactly these (in walk order) and --import-mapping replays onto exactly
+// these, so op index i lines up on both sides. Keep them sharing this one
+// definition -- if the two ever diverge, placements bind to the wrong ops.
+//
+// This is STRICTER than !is_non_materialized: that predicate only screens the
+// four routing/placeholder mov ops, whereas occupiesFU additionally rejects
+// container ops (func/module/kernel) and fused-region interior ops. So the two
+// are deliberately NOT logical complements -- do not replace calls with a
+// negation of is_non_materialized.
+bool occupiesFU(Operation *op) {
+  if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(op)) {
+    return false;
+  }
+  if (is_non_materialized(op)) { // reserve / data_mov / ctrl_mov / yield
+    return false;
+  }
+  if (Operation *parent = op->getParentOp()) {
+    if (isa<neura::FusedOp>(parent)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::vector<Operation *> collectPlacedOps(Region &region) {
+  std::vector<Operation *> placed_ops;
+  region.walk([&](Operation *operation) {
+    if (occupiesFU(operation)) {
+      placed_ops.push_back(operation);
+    }
+  });
+  return placed_ops;
+}
+
+// Inverse of Architecture's kFuTypesToOperations: OperationKind -> FU class
+// name. Built once, lazily.
+static const std::map<OperationKind, std::string> &kindToFuClassTable() {
+  static const std::map<OperationKind, std::string> table = [] {
+    std::map<OperationKind, std::string> inverse;
+    for (const auto &[fu_class_name, kinds] : kFuTypesToOperations) {
+      for (OperationKind kind : kinds) {
+        inverse[kind] = fu_class_name;
+      }
+    }
+    return inverse;
+  }();
+  return table;
+}
+
+std::string fuClassOf(Operation *op) {
+  // A fused op is placed as its whole pattern, so its class is the pattern
+  // name.
+  if (isa<neura::FusedOp>(op)) {
+    if (auto pattern_name = op->getAttrOfType<StringAttr>("pattern_name")) {
+      return pattern_name.getValue().str();
+    }
+    return "fused";
+  }
+  auto found = kindToFuClassTable().find(getOperationKindFromMlirOp(op));
+  return found == kindToFuClassTable().end() ? "other" : found->second;
+}
+
 } // namespace neura
 } // namespace mlir
 
@@ -227,8 +292,8 @@ mlir::neura::collectRecurrenceCycles(Region &region) {
   return recurrence_cycles;
 }
 
-int mlir::neura::calculateResMii(Region &region,
-                                 const Architecture &architecture) {
+int mlir::neura::calculateResourceMii(Region &region,
+                                      const Architecture &architecture) {
   int num_ops = 0;
 
   // Count all "compute" operations (non-terminators, non-block ops).
@@ -246,7 +311,8 @@ int mlir::neura::calculateResMii(Region &region,
     ++num_ops;
   });
 
-  llvm::errs() << "[calculateResMii] Total operations: " << num_ops << "\n";
+  llvm::errs() << "[calculateResourceMii] Total operations: " << num_ops
+               << "\n";
 
   // Avoid divide-by-zero
   int num_tiles = std::max(1, architecture.getNumTiles());

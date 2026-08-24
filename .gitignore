@@ -11,6 +11,7 @@ build/
 !architecture_with_counter.yaml
 /test/**/*.asm
 /test/**/*.json
+!/test/e2e/**/*.exact-mapping.json
 /test/**/*.dot
 /test/**/*.png
 .lit_test_times.txt

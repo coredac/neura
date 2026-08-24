@@ -18,7 +18,9 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/YAMLParser.h"
@@ -90,6 +92,16 @@ struct MapToAcceleratorPass
       *this, "valid-tiles",
       llvm::cl::desc("Comma separated list of valid tile coords x_y,x_y to "
                      "support non-rectangular shapes."),
+      llvm::cl::init("")};
+  Option<std::string> importMapping{
+      *this, "import-mapping",
+      llvm::cl::desc(
+          "Path to an exact-mapper placement JSON (op index -> tile "
+          "+ time_step, produced by exact_mapper_cpsat.py --emit). "
+          "When set, the search is skipped: each materialized op is "
+          "placed at its given tile/time and the existing router "
+          "wires the operands, reproducing the exact optimal II. The "
+          "op order must match --dump-dfg-json (same lowered IR)."),
       llvm::cl::init("")};
 
   // Configures mapping strategy and mode based on command-line options.
@@ -195,6 +207,331 @@ struct MapToAcceleratorPass
                  << " dfg_id(s) in total\n";
   }
 
+  // A single op placement read from an exact-mapper emit: which tile the op
+  // sits on and at which (absolute) time step.
+  struct ImportedPlace {
+    int tile_id;
+    int time_step;
+  };
+
+  // One hop of a value's concrete route: the tile it occupies and the cycle.
+  struct RouteHop {
+    int tile;
+    int cycle;
+  };
+  // Concrete routes keyed by (producer op index, consumer op index). Each is
+  // the ordered tile/cycle path the value travels (producer tile first).
+  // Present only when the emit carries exact routes; then the importer replays
+  // them instead of greedily re-routing.
+  using RouteMap = std::map<std::pair<int, int>, std::vector<RouteHop>>;
+
+  // Parses an exact-mapper emit (compiled_ii + placements[{id,tile,time_step}]
+  // and optional routes[{s,d,path}]).
+  static bool parseImportedMapping(StringRef path, int &imported_ii,
+                                   std::vector<ImportedPlace> &places,
+                                   RouteMap &routes, std::string &err) {
+    auto buffer = llvm::MemoryBuffer::getFile(path);
+    if (!buffer) {
+      err = "cannot open " + path.str();
+      return false;
+    }
+    llvm::Expected<llvm::json::Value> parsed =
+        llvm::json::parse((*buffer)->getBuffer());
+    if (!parsed) {
+      err = "invalid JSON: " + llvm::toString(parsed.takeError());
+      return false;
+    }
+    llvm::json::Object *root = parsed->getAsObject();
+    if (!root) {
+      err = "top-level JSON is not an object";
+      return false;
+    }
+    std::optional<int64_t> ii = root->getInteger("compiled_ii");
+    llvm::json::Array *placements = root->getArray("placements");
+    if (!ii || !placements) {
+      err = "missing compiled_ii or placements";
+      return false;
+    }
+    imported_ii = static_cast<int>(*ii);
+    // placements are indexed by their "id"; store them in id order so index i
+    // lines up with the i-th materialized op.
+    places.assign(placements->size(), ImportedPlace{-1, -1});
+    for (llvm::json::Value &entry : *placements) {
+      llvm::json::Object *record = entry.getAsObject();
+      if (!record) {
+        err = "placement entry is not an object";
+        return false;
+      }
+      std::optional<int64_t> id = record->getInteger("id");
+      std::optional<int64_t> tile = record->getInteger("tile");
+      std::optional<int64_t> time_step = record->getInteger("time_step");
+      if (!id || !tile || !time_step) {
+        err = "placement entry missing id/tile/time_step";
+        return false;
+      }
+      if (*id < 0 || *id >= static_cast<int64_t>(places.size())) {
+        err = "placement id out of range";
+        return false;
+      }
+      places[*id] =
+          ImportedPlace{static_cast<int>(*tile), static_cast<int>(*time_step)};
+    }
+    // Optional exact routes.
+    if (llvm::json::Array *route_arr = root->getArray("routes")) {
+      for (llvm::json::Value &entry : *route_arr) {
+        llvm::json::Object *record = entry.getAsObject();
+        if (!record) {
+          continue;
+        }
+        std::optional<int64_t> src_idx = record->getInteger("s");
+        std::optional<int64_t> dst_idx = record->getInteger("d");
+        llvm::json::Array *path = record->getArray("path");
+        if (!src_idx || !dst_idx || !path) {
+          continue;
+        }
+        std::vector<RouteHop> hops;
+        for (llvm::json::Value &node : *path) {
+          llvm::json::Array *hop_pair = node.getAsArray();
+          if (!hop_pair || hop_pair->size() != 2) {
+            continue;
+          }
+          std::optional<int64_t> hop_tile = (*hop_pair)[0].getAsInteger();
+          std::optional<int64_t> hop_cycle = (*hop_pair)[1].getAsInteger();
+          if (hop_tile && hop_cycle) {
+            hops.push_back(RouteHop{static_cast<int>(*hop_tile),
+                                    static_cast<int>(*hop_cycle)});
+          }
+        }
+        routes[{static_cast<int>(*src_idx), static_cast<int>(*dst_idx)}] =
+            std::move(hops);
+      }
+    }
+    return true;
+  }
+
+  // Placement-only fallback: bind every op at its imported tile/time and let
+  // the existing greedy router (placeAndRoute) wire the operands.
+  //
+  // NOTE: currently unexercised. It runs only when the imported JSON has NO
+  // "routes" array, but the exact mapper always emits routes with --emit (and
+  // its II+1 fallback guarantees a routable solution is found), so the normal
+  // flow always takes placeImportedExact instead. Kept as a safety net for a
+  // hypothetical placement-only emit -- and because greedy re-routing can fail
+  // on large kernels where the joint solver would not, which is exactly why the
+  // exact-route path exists.
+  //
+  // The IR must be the same lowered form --dump-dfg-json consumed, so op i <->
+  // placements[i]. Returns false (leaving diagnostics) if the op count
+  // disagrees or any op fails to place/route.
+  bool placeImportedSolution(Region &region, const Architecture &architecture,
+                             const std::vector<ImportedPlace> &places,
+                             MappingState &mapping_state) {
+    std::vector<Operation *> materialized = collectPlacedOps(region);
+    if (materialized.size() != places.size()) {
+      llvm::errs()
+          << "[MapToAcceleratorPass] import-mapping op-count mismatch: "
+          << materialized.size() << " materialized ops vs " << places.size()
+          << " placements. The JSON must come from "
+          << "--dump-dfg-json on this exact lowered IR.\n";
+      return false;
+    }
+    // tile id -> tile resource, so an imported tile id becomes a MappingLoc.
+    llvm::DenseMap<int, Tile *> tile_by_id;
+    for (Tile *tile : architecture.getAllTiles()) {
+      tile_by_id[tile->getId()] = tile;
+    }
+
+    for (size_t i = 0; i < materialized.size(); ++i) {
+      Operation *op = materialized[i];
+      auto found = tile_by_id.find(places[i].tile_id);
+      if (found == tile_by_id.end()) {
+        llvm::errs() << "[MapToAcceleratorPass] imported tile id "
+                     << places[i].tile_id << " not in architecture\n";
+        return false;
+      }
+      MappingLoc loc{found->second, places[i].time_step};
+      if (!placeAndRoute(op, loc, mapping_state)) {
+        llvm::errs() << "[MapToAcceleratorPass] imported placement failed to "
+                        "route op #"
+                     << i << " (" << op->getName() << ") at tile "
+                     << places[i].tile_id << " t=" << places[i].time_step
+                     << "\n";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  // Turns one emitted route (ordered tile/cycle hops) into a MappingLoc path of
+  // links and registers, the form MappingState::reserveRoute expects. Same-tile
+  // runs become a register hold (one register for the whole run); a tile change
+  // becomes the link between the two tiles. Returns false if a link/register
+  // the route needs is unavailable (should not happen -- the solver already
+  // proved the routing feasible under the same resource limits).
+  bool buildRoutePath(const std::vector<RouteHop> &hops,
+                      llvm::DenseMap<int, Tile *> &tile_by_id,
+                      MappingState &mapping_state, neura::DataMovOp mov_op,
+                      std::vector<MappingLoc> &out_path) {
+    size_t hop_idx = 0;
+    while (hop_idx + 1 < hops.size()) {
+      if (hops[hop_idx].tile == hops[hop_idx + 1].tile) {
+        // Maximal same-tile run -> a single register holds the value across it.
+        size_t run_end = hop_idx;
+        while (run_end + 1 < hops.size() &&
+               hops[run_end + 1].tile == hops[hop_idx].tile) {
+          ++run_end;
+        }
+        auto tile_it = tile_by_id.find(hops[hop_idx].tile);
+        if (tile_it == tile_by_id.end()) {
+          llvm::errs() << "[MapToAcceleratorPass] route references tile "
+                       << hops[hop_idx].tile << " not in architecture\n";
+          return false;
+        }
+        Tile *tile = tile_it->second;
+        int cycle_begin = hops[hop_idx].cycle,
+            cycle_end = hops[run_end].cycle; // exclusive
+        Register *reg = getAvailableRegister(mapping_state, tile, cycle_begin,
+                                             cycle_end, mov_op);
+        if (!reg) {
+          llvm::errs() << "[MapToAcceleratorPass] no free register on tile "
+                       << hops[hop_idx].tile << " for [" << cycle_begin << ","
+                       << cycle_end << ")\n";
+          return false;
+        }
+        for (int cycle = cycle_begin; cycle < cycle_end; ++cycle) {
+          out_path.push_back(MappingLoc{reg, cycle});
+        }
+        hop_idx = run_end;
+      } else {
+        // Tile change -> the link between the two tiles at this cycle.
+        auto src_it = tile_by_id.find(hops[hop_idx].tile);
+        if (src_it == tile_by_id.end()) {
+          llvm::errs() << "[MapToAcceleratorPass] route references tile "
+                       << hops[hop_idx].tile << " not in architecture\n";
+          return false;
+        }
+        Tile *src = src_it->second;
+        Link *link = nullptr;
+        for (Link *candidate : src->getOutLinks()) {
+          if (candidate->getDstTile()->getId() == hops[hop_idx + 1].tile) {
+            link = candidate;
+            break;
+          }
+        }
+        if (!link) {
+          llvm::errs() << "[MapToAcceleratorPass] no link "
+                       << hops[hop_idx].tile << "->" << hops[hop_idx + 1].tile
+                       << "\n";
+          return false;
+        }
+        out_path.push_back(MappingLoc{link, hops[hop_idx].cycle});
+        ++hop_idx;
+      }
+    }
+    return true;
+  }
+
+  // Exact-route import: bind every op at its tile/time, then reserve the
+  // SOLVER'S route for every value move (instead of greedily re-routing).
+  // Because the routes are the joint solution, this reproduces the optimal
+  // mapping even on large kernels where greedy per-net routing gets stuck.
+  // Binding is done in a first pass so every producer location exists before
+  // routes are reserved.
+  bool placeImportedExact(Region &region, const Architecture &architecture,
+                          const std::vector<ImportedPlace> &places,
+                          const RouteMap &routes, MappingState &mapping_state) {
+    std::vector<Operation *> materialized = collectPlacedOps(region);
+    if (materialized.size() != places.size()) {
+      llvm::errs()
+          << "[MapToAcceleratorPass] import-mapping op-count mismatch: "
+          << materialized.size() << " vs " << places.size() << "\n";
+      return false;
+    }
+    llvm::DenseMap<int, Tile *> tile_by_id;
+    for (Tile *tile : architecture.getAllTiles()) {
+      tile_by_id[tile->getId()] = tile;
+    }
+    llvm::DenseMap<Operation *, int> op_index;
+    for (size_t i = 0; i < materialized.size(); ++i) {
+      op_index[materialized[i]] = (int)i;
+    }
+
+    // Pass 1: bind every op at its imported tile/time.
+    for (size_t i = 0; i < materialized.size(); ++i) {
+      Operation *op = materialized[i];
+      auto found = tile_by_id.find(places[i].tile_id);
+      if (found == tile_by_id.end()) {
+        llvm::errs() << "[MapToAcceleratorPass] imported tile id "
+                     << places[i].tile_id << " not in architecture\n";
+        return false;
+      }
+      MappingLoc loc{found->second, places[i].time_step};
+      int latency = getOpLatency(op);
+      bool ok = latency > 1 ? mapping_state.bindMultiCycleOp(
+                                  loc.resource, loc.time_step, latency, op)
+                            : mapping_state.bindOp(loc, op);
+      if (!ok) {
+        llvm::errs() << "[MapToAcceleratorPass] failed to bind op #" << i
+                     << " at tile " << places[i].tile_id << "\n";
+        return false;
+      }
+    }
+
+    // Pass 2: reserve the exact route of every value move.
+    auto reserve = [&](Operation *mov, int producer_idx, int consumer_idx) {
+      auto route_it = routes.find({producer_idx, consumer_idx});
+      if (route_it == routes.end()) {
+        llvm::errs() << "[MapToAcceleratorPass] missing route " << producer_idx
+                     << "->" << consumer_idx << "\n";
+        return false;
+      }
+      std::vector<MappingLoc> path;
+      if (!buildRoutePath(route_it->second, tile_by_id, mapping_state,
+                          dyn_cast<neura::DataMovOp>(mov), path)) {
+        return false;
+      }
+      if (!path.empty()) {
+        mapping_state.reserveRoute(mov, path);
+      }
+      return true;
+    };
+    for (size_t i = 0; i < materialized.size(); ++i) {
+      Operation *op = materialized[i];
+      // Forward operand moves.
+      for (Value operand : op->getOperands()) {
+        Operation *def = operand.getDefiningOp();
+        if (!def || isa<neura::ReserveOp>(def)) {
+          continue; // loop-carried placeholder handled via ctrl_mov below.
+        }
+        if (!isa<neura::DataMovOp>(def)) {
+          continue;
+        }
+        Operation *producer = getMaterializedProducer(operand);
+        if (!producer || !op_index.count(producer)) {
+          continue;
+        }
+        if (!reserve(def, op_index[producer], (int)i)) {
+          return false;
+        }
+      }
+      // Backward (loop-carried) moves: op -> phi/reserve via ctrl_mov.
+      for (Operation *user : getCtrlMovUsers(op)) {
+        auto ctrl_mov = dyn_cast<neura::CtrlMovOp>(user);
+        if (!ctrl_mov) {
+          continue;
+        }
+        Operation *backward = getMaterializedBackwardUser(ctrl_mov);
+        if (!backward || !op_index.count(backward)) {
+          continue;
+        }
+        if (!reserve(ctrl_mov, (int)i, op_index[backward])) {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
   // Generic mapping function works for both function and kernel mapping.
   template <typename OpType>
   bool mapRegion(OpType op, Region &region, const Architecture &architecture,
@@ -246,7 +583,7 @@ struct MapToAcceleratorPass
     llvm::errs() << "[MapToAcceleratorPass] Calculated Recurrence MII: "
                  << rec_mii << "\n";
 
-    int res_mii = calculateResMii(region, architecture);
+    int res_mii = calculateResourceMii(region, architecture);
 
     const int possible_min_ii = std::max(rec_mii, res_mii);
     const int max_ii = architecture.getMaxCtrlMemItems();
@@ -301,7 +638,87 @@ struct MapToAcceleratorPass
       llvm::outs() << "[MapToAcceleratorPass] ALAP sorted op: " << *op
                    << " (ALAP level: " << level << ")\n";
     }
-    // assert(false);
+    // Records a successful mapping (encode + dfg ids + mapping_info) for a
+    // given II. Shared by the heuristic search and the imported-solution path.
+    auto finalizeMapping = [&](MappingState &mapping_state, int ii,
+                               StringRef strategy_label) {
+      if (dumpMappingTable) {
+        // Logs to stderr.
+        mapping_state.dumpOpToLocs();
+      }
+      mapping_state.encodeMappingState();
+
+      // Assigns unique dfg_id to all operations in SSA topological order.
+      int next_id = 0;
+      assignDfgIdsInRegion(region, next_id);
+
+      // Sets the mapping_info attribute on the function.
+      auto ctx = op->getContext();
+      SmallVector<NamedAttribute, 8> mapping_attrs;
+      mapping_attrs.push_back(
+          NamedAttribute(StringAttr::get(ctx, attr::kXTiles),
+                         IntegerAttr::get(IntegerType::get(ctx, 32),
+                                          architecture.getPerCgraColumns())));
+      mapping_attrs.push_back(
+          NamedAttribute(StringAttr::get(ctx, attr::kYTiles),
+                         IntegerAttr::get(IntegerType::get(ctx, 32),
+                                          architecture.getPerCgraRows())));
+      mapping_attrs.push_back(
+          NamedAttribute(StringAttr::get(ctx, attr::kMappingStrategy),
+                         StringAttr::get(ctx, strategy_label)));
+      mapping_attrs.push_back(
+          NamedAttribute(StringAttr::get(ctx, attr::kMappingMode),
+                         StringAttr::get(ctx, resolved_mapping_mode)));
+      mapping_attrs.push_back(
+          NamedAttribute(StringAttr::get(ctx, attr::kCompiledII),
+                         IntegerAttr::get(IntegerType::get(ctx, 32), ii)));
+      mapping_attrs.push_back(
+          NamedAttribute(StringAttr::get(ctx, attr::kRecMII),
+                         IntegerAttr::get(IntegerType::get(ctx, 32), rec_mii)));
+      mapping_attrs.push_back(
+          NamedAttribute(StringAttr::get(ctx, attr::kResMII),
+                         IntegerAttr::get(IntegerType::get(ctx, 32), res_mii)));
+      op->setAttr(attr::kMappingInfo, DictionaryAttr::get(ctx, mapping_attrs));
+    };
+
+    // Imported exact solution: skip the search, place each materialized op at
+    // its given tile/time, and let the existing router wire the operands. This
+    // reproduces the exact-optimal II that a search-based mapper could not
+    // reach (e.g. the CP-SAT mapper's provably optimal placement).
+    if (!importMapping.getValue().empty()) {
+      int imported_ii = 0;
+      std::vector<ImportedPlace> places;
+      RouteMap routes;
+      std::string parse_err;
+      if (!parseImportedMapping(importMapping.getValue(), imported_ii, places,
+                                routes, parse_err)) {
+        llvm::errs() << "[MapToAcceleratorPass] import-mapping error: "
+                     << parse_err << "\n";
+        return false;
+      }
+      llvm::errs() << "[MapToAcceleratorPass] Importing exact mapping ("
+                   << places.size() << " ops, " << routes.size()
+                   << " routes, II=" << imported_ii << ") from "
+                   << importMapping.getValue() << "\n";
+      MappingState mapping_state(architecture, imported_ii, is_spatial_only);
+      // With exact routes, replay them (reproduces the solver's joint routing).
+      // The routes.empty() branch is the placement-only fallback and is not hit
+      // by the current emit, which always carries routes (see
+      // placeImportedSolution).
+      bool placed = routes.empty()
+                        ? placeImportedSolution(region, architecture, places,
+                                                mapping_state)
+                        : placeImportedExact(region, architecture, places,
+                                             routes, mapping_state);
+      if (placed) {
+        finalizeMapping(mapping_state, imported_ii, "exact-cpsat");
+        return true;
+      }
+      llvm::errs() << "[MapToAcceleratorPass] Imported solution did not "
+                      "place/route; no mapping produced.\n";
+      return false;
+    }
+
     for (int ii = possible_min_ii; ii <= max_ii; ++ii) {
       llvm::errs() << "[MapToAcceleratorPass] Start mapping with target II of "
                    << ii << "\n";
@@ -309,46 +726,7 @@ struct MapToAcceleratorPass
       MappingState mapping_state(architecture, ii, is_spatial_only);
       if (mapping_strategy->map(sorted_ops_with_alap_levels, critical_ops,
                                 architecture, mapping_state)) {
-        // Success.
-        if (dumpMappingTable) {
-          // Logs to stderr.
-          mapping_state.dumpOpToLocs();
-        }
-        mapping_state.encodeMappingState();
-
-        // Assigns unique dfg_id to all operations in SSA topological order.
-        int next_id = 0;
-        assignDfgIdsInRegion(region, next_id);
-
-        // Sets the mapping_info attribute on the function.
-        auto ctx = op->getContext();
-        SmallVector<NamedAttribute, 8> mapping_attrs;
-        mapping_attrs.push_back(
-            NamedAttribute(StringAttr::get(ctx, attr::kXTiles),
-                           IntegerAttr::get(IntegerType::get(ctx, 32),
-                                            architecture.getPerCgraColumns())));
-        mapping_attrs.push_back(
-            NamedAttribute(StringAttr::get(ctx, attr::kYTiles),
-                           IntegerAttr::get(IntegerType::get(ctx, 32),
-                                            architecture.getPerCgraRows())));
-        mapping_attrs.push_back(
-            NamedAttribute(StringAttr::get(ctx, attr::kMappingStrategy),
-                           StringAttr::get(ctx, resolved_mapping_strategy)));
-        mapping_attrs.push_back(
-            NamedAttribute(StringAttr::get(ctx, attr::kMappingMode),
-                           StringAttr::get(ctx, resolved_mapping_mode)));
-        mapping_attrs.push_back(
-            NamedAttribute(StringAttr::get(ctx, attr::kCompiledII),
-                           IntegerAttr::get(IntegerType::get(ctx, 32), ii)));
-        mapping_attrs.push_back(NamedAttribute(
-            StringAttr::get(ctx, attr::kRecMII),
-            IntegerAttr::get(IntegerType::get(ctx, 32), rec_mii)));
-        mapping_attrs.push_back(NamedAttribute(
-            StringAttr::get(ctx, attr::kResMII),
-            IntegerAttr::get(IntegerType::get(ctx, 32), res_mii)));
-        DictionaryAttr mapping_info = DictionaryAttr::get(ctx, mapping_attrs);
-
-        op->setAttr(attr::kMappingInfo, mapping_info);
+        finalizeMapping(mapping_state, ii, resolved_mapping_strategy);
         return true;
       }
       llvm::errs() << "[MapToAcceleratorPass] Mapping failed for target II of "
@@ -388,25 +766,25 @@ struct MapToAcceleratorPass
         // provided.
         for (int y = 0; y < y_tiles.getValue(); ++y) {
           for (int x = 0; x < x_tiles.getValue(); ++x) {
-            TileOverride to;
-            to.tile_x = x;
-            to.tile_y = y;
-            to.existence = false;
-            additional_overrides.push_back(to);
+            TileOverride tile_override;
+            tile_override.tile_x = x;
+            tile_override.tile_y = y;
+            tile_override.existence = false;
+            additional_overrides.push_back(tile_override);
           }
         }
 
         // Then mark the valid ones as existent.
         for (llvm::StringRef coord : coords) {
-          auto pair = coord.split('_');
+          auto coord_pair = coord.split('_');
           int x, y;
-          if (!pair.first.getAsInteger(10, x) &&
-              !pair.second.getAsInteger(10, y)) {
-            TileOverride to;
-            to.tile_x = x;
-            to.tile_y = y;
-            to.existence = true;
-            additional_overrides.push_back(to);
+          if (!coord_pair.first.getAsInteger(10, x) &&
+              !coord_pair.second.getAsInteger(10, y)) {
+            TileOverride tile_override;
+            tile_override.tile_x = x;
+            tile_override.tile_y = y;
+            tile_override.existence = true;
+            additional_overrides.push_back(tile_override);
           }
         }
       }

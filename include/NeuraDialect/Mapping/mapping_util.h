@@ -12,6 +12,26 @@ OperationKind getOperationKindFromMlirOp(Operation *op);
 // Returns true if the operation does not need CGRA tile placement.
 bool is_non_materialized(Operation *op);
 
+// Returns true if the op occupies a tile/FU and must be placed by the mapper
+// (not a routing/structural op or a fused-region interior). NOTE: this is a
+// STRICTER predicate than !is_non_materialized -- besides the routing movs it
+// also excludes container ops (func/module/kernel) and fused-region interior
+// ops, so do not substitute a negation of is_non_materialized for it. Shared by
+// DumpDfgJsonPass (which emits these ops in walk order) and
+// MapToAcceleratorPass's import-mapping (which replays onto them), so their op
+// indices stay aligned.
+bool occupiesFU(Operation *op);
+
+// The operations placed by the mapper, in deterministic region-walk order.
+// This ordering is shared by DFG export and exact-mapping import.
+std::vector<Operation *> collectPlacedOps(Region &region);
+
+// FU class name an op maps to (the inverse of Architecture's
+// kFuTypesToOperations). A fused op reports its pattern_name (or "fused" if it
+// carries none); an op with no known class reports "other". Shared by the
+// analytical cost model and --dump-dfg-json so both bucket ops identically.
+std::string fuClassOf(Operation *op);
+
 // Returns true if the operation is a steering-mode operation that doesn't
 // require DataMovOp wrapping (e.g., constants, carry, invariant, etc.).
 bool is_steering_unwrapped_op(Operation *op);
@@ -32,8 +52,8 @@ struct RecurrenceCycle {
 // Collects recurrence cycles rooted at reserve and closed by ctrl_mov.
 SmallVector<RecurrenceCycle, 4> collectRecurrenceCycles(Region &region);
 
-// Calculates ResMII: ceil(#ops / #tiles).
-int calculateResMii(Region &region, const Architecture &architecture);
+// Calculates ResourceMII: ceil(#ops / #tiles).
+int calculateResourceMii(Region &region, const Architecture &architecture);
 
 // Returns topologically sorted operations in region.
 std::vector<Operation *> getTopologicallySortedOps(Region &region);
