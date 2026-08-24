@@ -13,4 +13,5 @@ add_mlir_conversion_library(MLIRNeuraMemrefCopyExpandPass
     MLIRTransforms
     MLIRAffineDialect
     MLIRMemRefDialect
+    MLIRArithDialect
 )
