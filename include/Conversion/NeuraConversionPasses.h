@@ -20,6 +20,7 @@ std::unique_ptr<mlir::Pass> createLowerMemRefToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerBuiltinToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerTorchToNeuraPass();
 std::unique_ptr<mlir::Pass> createLowerAffineToNeuraPass();
+std::unique_ptr<mlir::Pass> createExpandMemrefCopyPass();
 
 #define GEN_PASS_REGISTRATION
 #include "Conversion/NeuraConversionPasses.h.inc"
