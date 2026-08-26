@@ -21,7 +21,8 @@
 // RUN:       --insert-data-mov \
 // RUN:       --map-to-accelerator="mapping-strategy=heuristic" \
 // RUN:       --architecture-spec=%S/../../arch_spec/architecture.yaml \
-// RUN:   | FileCheck %s
+// RUN:   -o %t-mapped.mlir
+// RUN: FileCheck %s --input-file=%t-mapped.mlir
 
 func.func @matmul(%a: tensor<4x4xf32>, %b: tensor<4x4xf32>) -> tensor<4x4xf32> {
   %cst = arith.constant 0.0 : f32
