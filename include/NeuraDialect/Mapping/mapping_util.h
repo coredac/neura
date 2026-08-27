@@ -3,6 +3,10 @@
 #include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/MappingState.h"
 #include "mlir/IR/Operation.h"
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/raw_ostream.h"
+
+#include <memory>
 
 namespace mlir {
 namespace neura {
@@ -26,9 +30,40 @@ bool occupiesFU(Operation *op);
 // This ordering is shared by DFG export and exact-mapping import.
 std::vector<Operation *> collectPlacedOps(Region &region);
 
+// Finds the placed operation that produces value. DataMovOp is unwrapped;
+// ReserveOp is a loop-carried placeholder and therefore has no placed producer.
+Operation *getPlacedProducer(Value value);
+
+// One DFG dependence over collectPlacedOps indices. omega is the iteration
+// distance: zero for an intra-iteration operand and one for ctrl_mov/reserve.
+struct ExactMapperDfgEdge {
+  int source;
+  int destination;
+  int omega;
+};
+
+// Builds the DFG dependence set shared by JSON export and exact-route import.
+// Repeated uses of the same producer by one consumer are one dependence net.
+std::vector<ExactMapperDfgEdge>
+buildExactMapperDfgEdges(Region &region,
+                         const std::vector<Operation *> &placed_ops);
+
+// Clones global_arch for a requested tile shape. x_tiles and y_tiles must
+// either both be zero (use global_arch) or both be positive. valid_tiles uses
+// x_y coordinates and is validated against the requested rectangle.
+std::unique_ptr<Architecture>
+buildArchitectureForShape(const Architecture &global_arch, int x_tiles,
+                          int y_tiles, llvm::StringRef valid_tiles);
+
+// Serializes the exact-mapper input. DumpDfgJsonPass and the in-process
+// analytical CP-SAT path use this single contract.
+void emitExactMapperJson(Region &region, const Architecture &architecture,
+                         llvm::raw_ostream &os);
+
 // FU class name an op maps to (the inverse of Architecture's
 // kFuTypesToOperations). A fused op reports its pattern_name (or "fused" if it
-// carries none); an op with no known class reports "other". Shared by the
+// carries none); an op with no known class reports "other" so callers that
+// require a concrete architecture class can reject it explicitly. Shared by the
 // analytical cost model and --dump-dfg-json so both bucket ops identically.
 std::string fuClassOf(Operation *op);
 
@@ -51,6 +86,11 @@ struct RecurrenceCycle {
 
 // Collects recurrence cycles rooted at reserve and closed by ctrl_mov.
 SmallVector<RecurrenceCycle, 4> collectRecurrenceCycles(Region &region);
+
+// Calculates RecMII as the longest recurrence reported by
+// collectRecurrenceCycles.
+int calculateRecMii(Region &region);
+int calculateResMiiDemand(Region &region);
 
 // Calculates ResMII: ceil(#ops / #tiles).
 int calculateResMii(Region &region, const Architecture &architecture);

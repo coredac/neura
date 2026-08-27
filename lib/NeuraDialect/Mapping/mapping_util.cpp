@@ -1,6 +1,10 @@
 #include <deque>
+#include <algorithm>
 #include <queue>
+#include <set>
+#include <tuple>
 
+#include "NeuraDialect/Architecture/ArchitectureSpec.h"
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -9,6 +13,7 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
 
@@ -28,6 +33,34 @@ constexpr int kWeakCongestionPenalty = 15;   // used for low fan-in ops
 namespace mlir {
 namespace neura {
 OperationKind getOperationKindFromMlirOp(Operation *op) {
+  // Some e2e inputs deliberately preserve operations in generic MLIR form.
+  // Class-based isa does not recognize that representation, so retain the
+  // lowering's explicit resource contract by name rather than silently
+  // treating every unknown operation as IAdd.
+  llvm::StringRef operation_name = op->getName().getStringRef();
+  if (operation_name == "neura.grant_predicate")
+    return IGrantPredicate;
+  if (operation_name == "neura.grant_once")
+    return IGrantOnce;
+  if (operation_name == "neura.grant_always")
+    return IGrantAlways;
+  if (operation_name == "neura.phi_start")
+    return IPhi;
+  if (operation_name == "neura.return_void" ||
+      operation_name == "neura.return_value")
+    return IReturn;
+  if (operation_name == "neura.cond_br" || operation_name == "neura.br")
+    return ILoopControl;
+  // The architecture has no distinct AGU/vector/memset FU. These lowering
+  // conventions deliberately consume the corresponding scalar resource.
+  if (operation_name == "neura.gep" || operation_name == "neura.vadd" ||
+      operation_name == "neura.vector.reduce.add")
+    return IAdd;
+  if (operation_name == "neura.vmul")
+    return IMul;
+  if (operation_name == "neura.memset")
+    return IStore;
+
   // Integer arithmetic operations
   if (isa<neura::AddOp>(op))
     return IAdd;
@@ -65,6 +98,8 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   // Logical operations
   if (isa<neura::OrOp>(op))
     return IOr;
+  if (isa<neura::AndOp>(op))
+    return IAnd;
   if (isa<neura::NotOp>(op))
     return INot;
   if (isa<neura::ICmpOp>(op))
@@ -124,8 +159,9 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   if (isa<neura::ConstantOp>(op))
     return IConstant;
 
-  // Default fallback
-  return IAdd;
+  llvm::report_fatal_error(
+      llvm::Twine("unknown MLIR operation has no Neura OperationKind: ") +
+      operation_name);
 }
 
 // Returns true if the operation does not need CGRA tile placement.
@@ -172,6 +208,167 @@ std::vector<Operation *> collectPlacedOps(Region &region) {
   return placed_ops;
 }
 
+Operation *getPlacedProducer(Value value) {
+  Operation *producer = value.getDefiningOp();
+  if (!producer || isa<neura::ReserveOp>(producer)) {
+    return nullptr;
+  }
+  if (auto move = dyn_cast<neura::DataMovOp>(producer)) {
+    Operation *inner_producer = move.getOperand().getDefiningOp();
+    return inner_producer && !isa<neura::ReserveOp>(inner_producer)
+               ? inner_producer
+               : nullptr;
+  }
+  return producer;
+}
+
+std::vector<ExactMapperDfgEdge>
+buildExactMapperDfgEdges(Region &region,
+                         const std::vector<Operation *> &placed_ops) {
+  llvm::DenseMap<Operation *, int> op_id;
+  for (int i = 0; i < static_cast<int>(placed_ops.size()); ++i) {
+    op_id[placed_ops[i]] = i;
+  }
+
+  std::vector<ExactMapperDfgEdge> edges;
+  std::set<std::tuple<int, int, int>> seen;
+  auto add_edge = [&](int source, int destination, int omega) {
+    if (seen.insert({source, destination, omega}).second) {
+      edges.push_back({source, destination, omega});
+    }
+  };
+
+  for (Operation *consumer : placed_ops) {
+    for (Value operand : consumer->getOperands()) {
+      Operation *producer = getPlacedProducer(operand);
+      if (producer && op_id.count(producer)) {
+        add_edge(op_id[producer], op_id[consumer], 0);
+      }
+    }
+  }
+
+  region.walk([&](neura::CtrlMovOp ctrl_mov) {
+    Operation *producer = getPlacedProducer(ctrl_mov.getValue());
+    auto reserve = ctrl_mov.getTarget().getDefiningOp<neura::ReserveOp>();
+    if (!producer || !op_id.count(producer) || !reserve) {
+      return;
+    }
+    for (Operation *user : reserve.getResult().getUsers()) {
+      Operation *placed_user = user;
+      if (is_non_materialized(user)) {
+        for (Operation *router_user : user->getUsers()) {
+          if (op_id.count(router_user)) {
+            placed_user = router_user;
+          }
+        }
+      }
+      if (op_id.count(placed_user)) {
+        add_edge(op_id[producer], op_id[placed_user], 1);
+      }
+    }
+  });
+  return edges;
+}
+
+std::unique_ptr<Architecture>
+buildArchitectureForShape(const Architecture &global_arch, int x_tiles,
+                          int y_tiles, llvm::StringRef valid_tiles) {
+  assert((x_tiles == 0) == (y_tiles == 0) &&
+         "x-tiles and y-tiles must be specified together");
+  if (x_tiles == 0) {
+    return nullptr;
+  }
+  assert(x_tiles > 0 && y_tiles > 0 && "tile dimensions must be positive");
+
+  std::vector<TileOverride> overrides;
+  if (!valid_tiles.empty()) {
+    std::set<std::pair<int, int>> valid_coordinates;
+    llvm::SmallVector<llvm::StringRef, 4> coordinates;
+    valid_tiles.split(coordinates, ',');
+    for (llvm::StringRef coordinate : coordinates) {
+      coordinate = coordinate.trim();
+      assert(!coordinate.empty() && "valid-tiles contains an empty coordinate");
+      auto parts = coordinate.split('_');
+      int x = 0;
+      int y = 0;
+      assert(!parts.first.trim().getAsInteger(10, x) &&
+             !parts.second.trim().getAsInteger(10, y) &&
+             "valid-tiles entries must have the form x_y");
+      assert(x >= 0 && x < x_tiles && y >= 0 && y < y_tiles &&
+             "valid-tiles coordinate is outside the requested rectangle");
+      valid_coordinates.insert({x, y});
+    }
+    assert(!valid_coordinates.empty() && "valid-tiles must select a tile");
+    for (int y = 0; y < y_tiles; ++y) {
+      for (int x = 0; x < x_tiles; ++x) {
+        if (!valid_coordinates.count({x, y})) {
+          TileOverride override;
+          override.tile_x = x;
+          override.tile_y = y;
+          override.existence = false;
+          overrides.push_back(override);
+        }
+      }
+    }
+  }
+  return global_arch.cloneWithNewDimensions(y_tiles, x_tiles, overrides);
+}
+
+void emitExactMapperJson(Region &region, const Architecture &arch,
+                         llvm::raw_ostream &os) {
+  std::vector<Operation *> placed_ops = collectPlacedOps(region);
+  std::vector<ExactMapperDfgEdge> edges =
+      buildExactMapperDfgEdges(region, placed_ops);
+
+  os << "{\n  \"arch\": {\n";
+  os << "    \"num_tiles\": " << arch.getNumTiles()
+     << ", \"ctrl_mem_items\": " << arch.getMaxCtrlMemItems() << ",\n";
+  os << "    \"tiles\": [";
+  auto tiles = arch.getAllTiles();
+  for (size_t i = 0; i < tiles.size(); ++i) {
+    Tile *tile = tiles[i];
+    os << (i ? ", " : "") << "{\"id\": " << tile->getId()
+       << ", \"x\": " << tile->getX() << ", \"y\": " << tile->getY()
+       << ", \"regs\": " << tile->getRegisters().size()
+       << ", \"regfiles\": " << tile->getRegisterFiles().size() << "}";
+  }
+  os << "],\n    \"fu_class_tiles\": {";
+  bool first_class = true;
+  for (const auto &[fu_class_name, kinds] : kFuTypesToOperations) {
+    assert(!kinds.empty() && "FU class must name at least one operation");
+    std::string tile_id_list;
+    for (Tile *tile : tiles) {
+      if (tile->canSupportOperation(kinds.front())) {
+        tile_id_list += (tile_id_list.empty() ? "" : ", ") +
+                        std::to_string(tile->getId());
+      }
+    }
+    os << (first_class ? "" : ", ") << "\"" << fu_class_name << "\": ["
+       << tile_id_list << "]";
+    first_class = false;
+  }
+  os << "},\n    \"links\": [";
+  auto links = arch.getAllLinks();
+  for (size_t i = 0; i < links.size(); ++i) {
+    Link *link = links[i];
+    os << (i ? ", " : "") << "[" << link->getSrcTile()->getId() << ", "
+       << link->getDstTile()->getId() << ", " << link->getLatency() << "]";
+  }
+  os << "]\n  },\n  \"ops\": [";
+  for (size_t i = 0; i < placed_ops.size(); ++i) {
+    os << (i ? ", " : "") << "{\"id\": " << i << ", \"class\": \""
+       << fuClassOf(placed_ops[i]) << "\", \"latency\": "
+       << std::max(1, getOpLatency(placed_ops[i])) << "}";
+  }
+  os << "],\n  \"edges\": [";
+  for (size_t i = 0; i < edges.size(); ++i) {
+    os << (i ? ", " : "") << "{\"s\": " << edges[i].source
+       << ", \"d\": " << edges[i].destination << ", \"w\": "
+       << edges[i].omega << "}";
+  }
+  os << "]\n}\n";
+}
+
 // Inverse of Architecture's kFuTypesToOperations: OperationKind -> FU class
 // name. Built once, lazily.
 static const std::map<OperationKind, std::string> &kindToFuClassTable() {
@@ -187,6 +384,9 @@ static const std::map<OperationKind, std::string> &kindToFuClassTable() {
   return table;
 }
 
+// FU-class naming is DFG metadata, rather than a heuristic-mapper detail:
+// analytical bounds and the CP-SAT JSON must classify each placed operation
+// exactly as Architecture::kFuTypesToOperations does.
 std::string fuClassOf(Operation *op) {
   // A fused op is placed as its whole pattern, so its class is the pattern
   // name.
@@ -292,8 +492,15 @@ mlir::neura::collectRecurrenceCycles(Region &region) {
   return recurrence_cycles;
 }
 
-int mlir::neura::calculateResMii(Region &region,
-                                 const Architecture &architecture) {
+int mlir::neura::calculateRecMii(Region &region) {
+  int rec_mii = 1;
+  for (const RecurrenceCycle &cycle : collectRecurrenceCycles(region)) {
+    rec_mii = std::max(rec_mii, cycle.length);
+  }
+  return rec_mii;
+}
+
+int mlir::neura::calculateResMiiDemand(Region &region) {
   int num_ops = 0;
 
   // Count all "compute" operations (non-terminators, non-block ops).
@@ -311,10 +518,17 @@ int mlir::neura::calculateResMii(Region &region,
     ++num_ops;
   });
 
+  return num_ops;
+}
+
+int mlir::neura::calculateResMii(Region &region,
+                                 const Architecture &architecture) {
+  int num_ops = calculateResMiiDemand(region);
+
   llvm::errs() << "[calculateResMii] Total operations: " << num_ops << "\n";
 
-  // Avoid divide-by-zero
-  int num_tiles = std::max(1, architecture.getNumTiles());
+  int num_tiles = architecture.getNumTiles();
+  assert(num_tiles > 0 && "ResMII requires at least one architecture tile");
 
   return llvm::divideCeil(num_ops, num_tiles);
 }

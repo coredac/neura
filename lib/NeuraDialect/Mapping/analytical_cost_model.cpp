@@ -12,6 +12,8 @@
 #include "NeuraDialect/NeuraTypes.h"
 
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"
+#include "mlir/Interfaces/DataLayoutInterfaces.h"
 #include "mlir/IR/BuiltinOps.h"
 
 #include "llvm/ADT/DenseMap.h"
@@ -27,18 +29,12 @@ using namespace mlir::neura;
 
 namespace {
 
-// occupiesFU (which ops need a tile/FU) and fuClassOf (an op's FU class) both
-// live in mapping_util.h -- the single source of truth shared with the mapper.
-// Reusing them keeps the cost model's op set and FU bucketing identical to the
-// mapper's; do not re-define either here.
-
 // Number of tiles that physically provide a given FU class.
 int tilesSupportingClass(const Architecture &arch,
                          const std::string &fu_class) {
   auto found = kFuTypesToOperations.find(fu_class);
-  if (found == kFuTypesToOperations.end() || found->second.empty()) {
-    return arch.getNumTiles(); // unknown class: don't over-constrain.
-  }
+  assert(found != kFuTypesToOperations.end() && !found->second.empty() &&
+         "every placed operation must have an Architecture FU class");
   OperationKind probe_kind = found->second.front();
   int supporting_tiles = 0;
   for (Tile *tile : arch.getAllTiles()) {
@@ -49,22 +45,42 @@ int tilesSupportingClass(const Architecture &arch,
   return supporting_tiles;
 }
 
-// Bit width carried by an SSA value (for routing channel demand).
+// Bit width carried by an SSA value. PredicatedValue is unwrapped because the
+// predicate controls whether a payload is valid; it is not additional data on
+// the routed payload channel.
 int valueBitWidth(Value value) {
   Type type = value.getType();
   if (auto predicated_value = dyn_cast<neura::PredicatedValue>(type)) {
     type = predicated_value.getValueType();
   }
-  if (type.isIntOrFloat()) {
-    return static_cast<int>(type.getIntOrFloatBitWidth());
+  if (auto vector = dyn_cast<VectorType>(type)) {
+    Type element = vector.getElementType();
+    assert(element.isIntOrFloat() &&
+           "only integer/float vector payloads are routable");
+    assert(!vector.isScalable() &&
+           "scalable vectors have no compile-time routing width");
+    return static_cast<int>(vector.getNumElements() *
+                            element.getIntOrFloatBitWidth());
   }
-  return 32; // Opaque types: conservative single-channel default.
+  if (isa<IndexType, LLVM::LLVMPointerType>(type)) {
+    // Pointer width is a target/data-layout property, not a guessed 32/64-bit
+    // fallback. The data layout nearest the producing operation is therefore
+    // the single authority for address payload channels.
+    Operation *producer = value.getDefiningOp();
+    assert(producer && "routed pointer/index value must have a defining op");
+    llvm::TypeSize bit_width =
+        DataLayout::closest(producer).getTypeSizeInBits(type);
+    assert(!bit_width.isScalable() &&
+           "routed pointer/index width must be statically known");
+    return static_cast<int>(bit_width.getFixedValue());
+  }
+  assert(type.isIntOrFloat() &&
+         "only scalar integer/float payloads are routable");
+  return static_cast<int>(type.getIntOrFloatBitWidth());
 }
 
 int ceilDiv(long long numerator, long long denominator) {
-  if (denominator <= 0) {
-    denominator = 1;
-  }
+  assert(denominator > 0 && "ceilDiv requires a positive denominator");
   return static_cast<int>((numerator + denominator - 1) / denominator);
 }
 
@@ -99,7 +115,8 @@ IIBound calculateComputeMiiPerClass(Region &region, const Architecture &arch) {
   IIBound bound;
   bound.value = 1;
   for (const auto &[fu_class, class_work] : work_by_class) {
-    int fu_count = std::max(1, tilesSupportingClass(arch, fu_class));
+    int fu_count = tilesSupportingClass(arch, fu_class);
+    assert(fu_count > 0 && "placed FU class has no supporting tile");
     int class_ii = ceilDiv(class_work, fu_count);
     if (class_ii > bound.value) {
       bound.value = class_ii;
@@ -112,27 +129,6 @@ IIBound calculateComputeMiiPerClass(Region &region, const Architecture &arch) {
   }
   if (bound.detail.empty()) {
     bound.detail = "no placed ops";
-  }
-  return bound;
-}
-
-//===----------------------------------------------------------------------===//
-// RecMII — the longest recurrence collected by the mapper's shared helper.
-//===----------------------------------------------------------------------===//
-IIBound calculateRecMiiBound(Region &region, const Architecture &arch) {
-  (void)arch;
-  IIBound bound;
-  bound.value = 1;
-  bound.detail = "no recurrence";
-
-  for (const RecurrenceCycle &cycle : collectRecurrenceCycles(region)) {
-    if (cycle.length > bound.value) {
-      bound.value = cycle.length;
-      bound.demand = cycle.length;
-      bound.capacity = 1;
-      bound.detail =
-          "longest recurrence length=" + std::to_string(cycle.length);
-    }
   }
   return bound;
 }
@@ -160,8 +156,10 @@ IIBound calculateMemMii(Region &region, const Architecture &arch) {
     }
   });
 
-  int mem_tiles = std::max(1, tilesSupportingClass(arch, "mem"));
-  int indexed_tiles = std::max(1, tilesSupportingClass(arch, "mem_indexed"));
+  int mem_tiles = tilesSupportingClass(arch, "mem");
+  int indexed_tiles = tilesSupportingClass(arch, "mem_indexed");
+  assert(mem_tiles > 0 && indexed_tiles > 0 &&
+         "memory FU classes must be provided by the architecture");
   int mem_ii = ceilDiv(num_mem_ops, mem_tiles);
   int indexed_ii = ceilDiv(num_indexed_ops, indexed_tiles);
 
@@ -193,14 +191,14 @@ IIBound calculateMemMii(Region &region, const Architecture &arch) {
 // data_mov per consumer). This is an aggregate link-throughput bound; it
 // ignores placement, so it under-predicts when routing is topologically
 // constrained.
-//===----------------------------------------------------------------------===//
 IIBound calculateRouteMii(Region &region, const Architecture &arch) {
   auto links = arch.getAllLinks();
   long long total_links = static_cast<long long>(links.size());
 
   // A single-tile / link-less arch needs no inter-tile routing, so RouteMII
   // does not bind — dividing intra-tile moves by a phantom link would fabricate
-  // a bound. Returning 1 keeps it a valid (non-over-predicting) lower bound.
+  // a bound. Returning 1 is an architectural special case, not a guessed
+  // capacity fallback.
   if (total_links <= 0) {
     IIBound bound;
     bound.value = 1;
@@ -218,15 +216,8 @@ IIBound calculateRouteMii(Region &region, const Architecture &arch) {
   for (Link *link : links) {
     link_bandwidth = std::max(link_bandwidth, link->getBandwidth());
   }
-  if (link_bandwidth <= 0) {
-    // The arch specifies no usable link bandwidth; rather than invent one,
-    // treat routing bandwidth as unmodeled so RouteMII does not bind (safe for
-    // a LB).
-    IIBound bound;
-    bound.value = 1;
-    bound.detail = "no link bandwidth in arch spec; RouteMII not applied";
-    return bound;
-  }
+  assert(link_bandwidth > 0 &&
+         "an architecture with links must define positive link bandwidth");
 
   // Each neura.data_mov is one physical move; fanout is already expanded into
   // one data_mov per real consumer, so replicated traffic is counted here.
@@ -378,11 +369,19 @@ AnalyticalIIBreakdown computeAnalyticalII(Region &region,
                                           const Architecture &arch) {
   AnalyticalIIBreakdown breakdown;
   breakdown.compute = calculateComputeMiiPerClass(region, arch);
-  breakdown.rec = calculateRecMiiBound(region, arch);
+  breakdown.rec.value = calculateRecMii(region);
+  breakdown.rec.demand = breakdown.rec.value;
+  breakdown.rec.capacity = 1;
+  breakdown.rec.detail = breakdown.rec.value == 1
+                             ? "no recurrence"
+                             : "longest recurrence from calculateRecMii=" +
+                                   std::to_string(breakdown.rec.value);
   breakdown.mem = calculateMemMii(region, arch);
   breakdown.route = calculateRouteMii(region, arch);
   breakdown.reg = calculateRegMii(region, arch);
   breakdown.resource.value = calculateResMii(region, arch);
+  breakdown.resource.demand = calculateResMiiDemand(region);
+  breakdown.resource.capacity = arch.getNumTiles();
   breakdown.resource.detail = "calculated by calculateResMii";
 
   struct NamedBound {

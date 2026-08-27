@@ -13,15 +13,20 @@
 #include "NeuraDialect/NeuraPasses.h"
 #include "NeuraDialect/NeuraTypes.h"
 #include "NeuraDialect/Util/NeuraYamlKeys.h"
+#include "mlir/Dialect/DLTI/DLTI.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallString.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/Support/Program.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/YAMLParser.h"
 #include "llvm/Support/raw_ostream.h"
@@ -33,7 +38,35 @@ using namespace mlir::neura::yamlkeys;
 #define GEN_PASS_DEF_MAPTOACCELERATOR
 #include "NeuraDialect/NeuraPasses.h.inc"
 
+#ifndef NEURA_EXACT_MAPPER_CPSAT_SCRIPT
+#error "CMake must define the packaged CP-SAT script path"
+#endif
+#ifndef NEURA_EXACT_MAPPER_CPSAT_INSTALL_SCRIPT
+#error "CMake must define the installed CP-SAT script path"
+#endif
+
 namespace {
+void canonicalizeDataLayoutSpec(ModuleOp module) {
+  auto spec = module->getAttrOfType<DataLayoutSpecAttr>("dlti.dl_spec");
+  if (!spec) {
+    return;
+  }
+  SmallVector<DataLayoutEntryInterface> entries(spec.getEntries().begin(),
+                                                spec.getEntries().end());
+  auto printed = [](DataLayoutEntryInterface entry) {
+    std::string text;
+    llvm::raw_string_ostream os(text);
+    entry.print(os);
+    return os.str();
+  };
+  llvm::sort(entries, [&](DataLayoutEntryInterface lhs,
+                          DataLayoutEntryInterface rhs) {
+    return printed(lhs) < printed(rhs);
+  });
+  module->setAttr("dlti.dl_spec",
+                  DataLayoutSpecAttr::get(module.getContext(), entries));
+}
+
 struct MapToAcceleratorPass
     : public PassWrapper<MapToAcceleratorPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MapToAcceleratorPass)
@@ -59,7 +92,8 @@ struct MapToAcceleratorPass
   Option<std::string> mappingStrategy{
       *this, "mapping-strategy",
       llvm::cl::desc("Mapping strategy to use for mapping operations to the "
-                     "accelerator. Options: heuristic (default)."),
+                     "accelerator. Options: heuristic (default), analytical "
+                     "(run exact_mapper_cpsat.py and replay its joint result)."),
       llvm::cl::init(attr::val::kHeuristic.str())};
   Option<std::string> mappingMode{
       *this, "mapping-mode",
@@ -96,13 +130,22 @@ struct MapToAcceleratorPass
   Option<std::string> importMapping{
       *this, "import-mapping",
       llvm::cl::desc(
-          "Path to an exact-mapper placement JSON (op index -> tile "
+          "Path to an exact-mapper witness JSON (op index -> tile "
           "+ time_step, produced by exact_mapper_cpsat.py --emit). "
           "When set, the search is skipped: each materialized op is "
-          "placed at its given tile/time and the existing router "
-          "wires the operands, reproducing the exact optimal II. The "
+          "placed at its given tile/time and every emitted route is "
+          "replayed, reproducing the exact mapping witness. The "
           "op order must match --dump-dfg-json (same lowered IR)."),
       llvm::cl::init("")};
+  Option<std::string> cpSatScript{
+      *this, "cpsat-script",
+      llvm::cl::desc("Path to exact_mapper_cpsat.py for mapping-strategy=analytical. "
+                     "Defaults to the CMake-packaged build-tree resource."),
+      llvm::cl::init(NEURA_EXACT_MAPPER_CPSAT_SCRIPT)};
+  Option<std::string> pythonExecutable{
+      *this, "python-executable",
+      llvm::cl::desc("Python executable used by mapping-strategy=analytical."),
+      llvm::cl::init("python3")};
 
   // Configures mapping strategy and mode based on command-line options.
   bool configureMappingStrategy(StringRef mapping_strategy_opt,
@@ -179,6 +222,8 @@ struct MapToAcceleratorPass
         return false;
       }
       resolved_mapping_strategy = mapping_strategy_str.str();
+    } else if (mapping_strategy_str == "analytical") {
+      resolved_mapping_strategy = "exact-cpsat";
     } else {
       llvm::errs() << "[MapToAcceleratorPass] Unsupported mapping strategy: "
                    << mapping_strategy_str << "\n";
@@ -225,8 +270,9 @@ struct MapToAcceleratorPass
   // them instead of greedily re-routing.
   using RouteMap = std::map<std::pair<int, int>, std::vector<RouteHop>>;
 
-  // Parses an exact-mapper emit (compiled_ii + placements[{id,tile,time_step}]
-  // and optional routes[{s,d,path}]).
+  // Parses an exact-mapper witness. A witness is useful only with its complete
+  // route set: replaying placement alone would silently replace CP-SAT's
+  // routing proof with the heuristic router.
   static bool parseImportedMapping(StringRef path, int &imported_ii,
                                    std::vector<ImportedPlace> &places,
                                    RouteMap &routes, std::string &err) {
@@ -248,8 +294,9 @@ struct MapToAcceleratorPass
     }
     std::optional<int64_t> ii = root->getInteger("compiled_ii");
     llvm::json::Array *placements = root->getArray("placements");
-    if (!ii || !placements) {
-      err = "missing compiled_ii or placements";
+    llvm::json::Array *route_arr = root->getArray("routes");
+    if (!ii || !placements || !route_arr) {
+      err = "missing compiled_ii, placements, or mandatory routes";
       return false;
     }
     imported_ii = static_cast<int>(*ii);
@@ -276,89 +323,120 @@ struct MapToAcceleratorPass
       places[*id] =
           ImportedPlace{static_cast<int>(*tile), static_cast<int>(*time_step)};
     }
-    // Optional exact routes.
-    if (llvm::json::Array *route_arr = root->getArray("routes")) {
-      for (llvm::json::Value &entry : *route_arr) {
-        llvm::json::Object *record = entry.getAsObject();
-        if (!record) {
-          continue;
+    for (llvm::json::Value &entry : *route_arr) {
+      llvm::json::Object *record = entry.getAsObject();
+      if (!record) {
+        err = "route entry is not an object";
+        return false;
+      }
+      std::optional<int64_t> src_idx = record->getInteger("s");
+      std::optional<int64_t> dst_idx = record->getInteger("d");
+      llvm::json::Array *path = record->getArray("path");
+      if (!src_idx || !dst_idx || !path || path->empty()) {
+        err = "route entry missing s/d/non-empty path";
+        return false;
+      }
+      std::vector<RouteHop> hops;
+      for (llvm::json::Value &node : *path) {
+        llvm::json::Array *hop_pair = node.getAsArray();
+        if (!hop_pair || hop_pair->size() != 2) {
+          err = "route hop must be [tile, cycle]";
+          return false;
         }
-        std::optional<int64_t> src_idx = record->getInteger("s");
-        std::optional<int64_t> dst_idx = record->getInteger("d");
-        llvm::json::Array *path = record->getArray("path");
-        if (!src_idx || !dst_idx || !path) {
-          continue;
+        std::optional<int64_t> hop_tile = (*hop_pair)[0].getAsInteger();
+        std::optional<int64_t> hop_cycle = (*hop_pair)[1].getAsInteger();
+        if (!hop_tile || !hop_cycle) {
+          err = "route hop tile/cycle must be integers";
+          return false;
         }
-        std::vector<RouteHop> hops;
-        for (llvm::json::Value &node : *path) {
-          llvm::json::Array *hop_pair = node.getAsArray();
-          if (!hop_pair || hop_pair->size() != 2) {
-            continue;
-          }
-          std::optional<int64_t> hop_tile = (*hop_pair)[0].getAsInteger();
-          std::optional<int64_t> hop_cycle = (*hop_pair)[1].getAsInteger();
-          if (hop_tile && hop_cycle) {
-            hops.push_back(RouteHop{static_cast<int>(*hop_tile),
-                                    static_cast<int>(*hop_cycle)});
-          }
-        }
-        routes[{static_cast<int>(*src_idx), static_cast<int>(*dst_idx)}] =
-            std::move(hops);
+        hops.push_back(RouteHop{static_cast<int>(*hop_tile),
+                                static_cast<int>(*hop_cycle)});
+      }
+      auto inserted = routes.emplace(
+          std::make_pair(static_cast<int>(*src_idx), static_cast<int>(*dst_idx)),
+          std::move(hops));
+      if (!inserted.second) {
+        err = "duplicate route for one producer/consumer pair";
+        return false;
       }
     }
     return true;
   }
 
-  // Placement-only fallback: bind every op at its imported tile/time and let
-  // the existing greedy router (placeAndRoute) wire the operands.
-  //
-  // NOTE: currently unexercised. It runs only when the imported JSON has NO
-  // "routes" array, but the exact mapper always emits routes with --emit (and
-  // its II+1 fallback guarantees a routable solution is found), so the normal
-  // flow always takes placeImportedExact instead. Kept as a safety net for a
-  // hypothetical placement-only emit -- and because greedy re-routing can fail
-  // on large kernels where the joint solver would not, which is exactly why the
-  // exact-route path exists.
-  //
-  // The IR must be the same lowered form --dump-dfg-json consumed, so op i <->
-  // placements[i]. Returns false (leaving diagnostics) if the op count
-  // disagrees or any op fails to place/route.
-  bool placeImportedSolution(Region &region, const Architecture &architecture,
-                             const std::vector<ImportedPlace> &places,
-                             MappingState &mapping_state) {
-    std::vector<Operation *> materialized = collectPlacedOps(region);
-    if (materialized.size() != places.size()) {
-      llvm::errs()
-          << "[MapToAcceleratorPass] import-mapping op-count mismatch: "
-          << materialized.size() << " materialized ops vs " << places.size()
-          << " placements. The JSON must come from "
-          << "--dump-dfg-json on this exact lowered IR.\n";
+  // Runs the exact mapper for this exact Region/Architecture pair. The JSON is
+  // produced in-process with emitExactMapperJson, then the emitted witness is
+  // replayed below; no hand-maintained dump/import ordering is involved.
+  bool createAnalyticalWitness(Region &region, const Architecture &architecture,
+                               int min_ii, int max_ii,
+                               std::string &witness_path) {
+    llvm::SmallString<128> input_path;
+    int input_fd = -1;
+    std::error_code ec = llvm::sys::fs::createTemporaryFile(
+        "neura-cpsat-input", "json", input_fd, input_path);
+    if (ec) {
+      llvm::errs() << "[MapToAcceleratorPass] cannot create CP-SAT input: "
+                   << ec.message() << "\n";
       return false;
     }
-    // tile id -> tile resource, so an imported tile id becomes a MappingLoc.
-    llvm::DenseMap<int, Tile *> tile_by_id;
-    for (Tile *tile : architecture.getAllTiles()) {
-      tile_by_id[tile->getId()] = tile;
+    {
+      llvm::raw_fd_ostream input(input_fd, /*shouldClose=*/true);
+      emitExactMapperJson(region, architecture, input);
     }
 
-    for (size_t i = 0; i < materialized.size(); ++i) {
-      Operation *op = materialized[i];
-      auto found = tile_by_id.find(places[i].tile_id);
-      if (found == tile_by_id.end()) {
-        llvm::errs() << "[MapToAcceleratorPass] imported tile id "
-                     << places[i].tile_id << " not in architecture\n";
-        return false;
-      }
-      MappingLoc loc{found->second, places[i].time_step};
-      if (!placeAndRoute(op, loc, mapping_state)) {
-        llvm::errs() << "[MapToAcceleratorPass] imported placement failed to "
-                        "route op #"
-                     << i << " (" << op->getName() << ") at tile "
-                     << places[i].tile_id << " t=" << places[i].time_step
-                     << "\n";
-        return false;
-      }
+    llvm::SmallString<128> output_path;
+    int output_fd = -1;
+    ec = llvm::sys::fs::createTemporaryFile("neura-cpsat-witness", "json",
+                                             output_fd, output_path);
+    if (ec) {
+      llvm::sys::fs::remove(input_path);
+      llvm::errs() << "[MapToAcceleratorPass] cannot create CP-SAT output: "
+                   << ec.message() << "\n";
+      return false;
     }
+    { llvm::raw_fd_ostream output(output_fd, /*shouldClose=*/true); }
+
+    std::string min_ii_arg = std::to_string(min_ii);
+    std::string max_ii_arg = std::to_string(max_ii);
+    std::string script = cpSatScript.getValue();
+    // The default names the build-tree copy; an installed binary resolves the
+    // corresponding installed resource if that copy is absent.  An explicitly
+    // requested path never falls through to another script.
+    if (cpSatScript.getNumOccurrences() == 0 &&
+        !llvm::sys::fs::exists(script)) {
+      script = NEURA_EXACT_MAPPER_CPSAT_INSTALL_SCRIPT;
+    }
+    if (!llvm::sys::fs::exists(script)) {
+      llvm::sys::fs::remove(input_path);
+      llvm::sys::fs::remove(output_path);
+      llvm::errs() << "[MapToAcceleratorPass] cannot find CP-SAT script: "
+                   << script << "\n";
+      return false;
+    }
+    auto python_path = llvm::sys::findProgramByName(pythonExecutable.getValue());
+    if (!python_path) {
+      llvm::sys::fs::remove(input_path);
+      llvm::sys::fs::remove(output_path);
+      llvm::errs() << "[MapToAcceleratorPass] cannot find Python executable "
+                   << pythonExecutable.getValue() << "\n";
+      return false;
+    }
+    std::string program = python_path.get();
+    llvm::SmallVector<llvm::StringRef, 10> args = {
+        program, script, input_path,
+        "--min-ii", min_ii_arg, "--max-ii", max_ii_arg,
+        "--emit", output_path};
+    std::string execution_error;
+    int exit_code = llvm::sys::ExecuteAndWait(program, args,
+                                              std::nullopt, {}, 0, 0,
+                                              &execution_error);
+    llvm::sys::fs::remove(input_path);
+    if (exit_code != 0) {
+      llvm::sys::fs::remove(output_path);
+      llvm::errs() << "[MapToAcceleratorPass] CP-SAT failed (exit "
+                   << exit_code << "): " << execution_error << "\n";
+      return false;
+    }
+    witness_path = output_path.str().str();
     return true;
   }
 
@@ -589,7 +667,6 @@ struct MapToAcceleratorPass
     auto recurrence_cycles = collectRecurrenceCycles(region);
     std::set<Operation *> critical_ops;
     RecurrenceCycle *longest = nullptr;
-    int rec_mii = 1;
     for (auto &cycle : recurrence_cycles) {
       llvm::outs() << "[DEBUG] Recurrence cycle (length " << cycle.length
                    << "):\n";
@@ -608,10 +685,9 @@ struct MapToAcceleratorPass
       for (Operation *op : longest->operations) {
         op->print(llvm::outs()), llvm::outs() << "\n";
       }
-      rec_mii = longest->length;
-    } else if (!longest) {
-      rec_mii = 1; // No recurrence cycles found, set MII to 1.
     }
+
+    const int rec_mii = calculateRecMii(region);
 
     llvm::errs() << "[MapToAcceleratorPass] Calculated Recurrence MII: "
                  << rec_mii << "\n";
@@ -714,17 +790,33 @@ struct MapToAcceleratorPass
       op->setAttr(attr::kMappingInfo, DictionaryAttr::get(ctx, mapping_attrs));
     };
 
-    // Imported exact solution: skip the search, place each materialized op at
-    // its given tile/time, and let the existing router wire the operands. This
-    // reproduces the exact-optimal II that a search-based mapper could not
-    // reach (e.g. the CP-SAT mapper's provably optimal placement).
-    if (!importMapping.getValue().empty()) {
+    // Imported exact solution: skip the search and replay every materialized
+    // op placement plus every solver-proven route. No heuristic router is
+    // consulted, so the imported witness remains the CP-SAT result.
+    const bool analytical_mode = mappingStrategy.getValue() == "analytical";
+    if (analytical_mode || !importMapping.getValue().empty()) {
+      if (analytical_mode && !importMapping.getValue().empty()) {
+        llvm::errs() << "[MapToAcceleratorPass] analytical mode and "
+                        "import-mapping are mutually exclusive\n";
+        return false;
+      }
+      std::string generated_witness;
+      StringRef mapping_path = importMapping.getValue();
+      if (analytical_mode) {
+        if (!createAnalyticalWitness(region, architecture, possible_min_ii,
+                                     max_ii, generated_witness)) {
+          return false;
+        }
+        mapping_path = generated_witness;
+      }
       int imported_ii = 0;
       std::vector<ImportedPlace> places;
       RouteMap routes;
       std::string parse_err;
-      if (!parseImportedMapping(importMapping.getValue(), imported_ii, places,
+      if (!parseImportedMapping(mapping_path, imported_ii, places,
                                 routes, parse_err)) {
+        if (analytical_mode)
+          llvm::sys::fs::remove(mapping_path);
         llvm::errs() << "[MapToAcceleratorPass] import-mapping error: "
                      << parse_err << "\n";
         return false;
@@ -732,17 +824,12 @@ struct MapToAcceleratorPass
       llvm::errs() << "[MapToAcceleratorPass] Importing exact mapping ("
                    << places.size() << " ops, " << routes.size()
                    << " routes, II=" << imported_ii << ") from "
-                   << importMapping.getValue() << "\n";
+                   << mapping_path << "\n";
       MappingState mapping_state(architecture, imported_ii, is_spatial_only);
-      // With exact routes, replay them (reproduces the solver's joint routing).
-      // The routes.empty() branch is the placement-only fallback and is not hit
-      // by the current emit, which always carries routes (see
-      // placeImportedSolution).
-      bool placed = routes.empty()
-                        ? placeImportedSolution(region, architecture, places,
-                                                mapping_state)
-                        : placeImportedExact(region, architecture, places,
-                                             routes, mapping_state);
+      bool placed = placeImportedExact(region, architecture, places, routes,
+                                       mapping_state);
+      if (analytical_mode)
+        llvm::sys::fs::remove(mapping_path);
       if (placed) {
         finalizeMapping(mapping_state, imported_ii, "exact-cpsat");
         return true;
@@ -786,55 +873,11 @@ struct MapToAcceleratorPass
     }
 
     const Architecture &global_arch = mlir::neura::getArchitecture();
-    std::unique_ptr<Architecture> custom_arch;
-    const Architecture *target_arch = &global_arch;
-
-    if (x_tiles.getValue() > 0 && y_tiles.getValue() > 0) {
-      std::vector<TileOverride> additional_overrides;
-      if (!valid_tiles.getValue().empty()) {
-        llvm::SmallVector<llvm::StringRef, 4> coords;
-        llvm::StringRef(valid_tiles.getValue()).split(coords, ',');
-
-        // Default: mark all tiles as non-existent first if valid_tiles
-        // provided.
-        for (int y = 0; y < y_tiles.getValue(); ++y) {
-          for (int x = 0; x < x_tiles.getValue(); ++x) {
-            TileOverride tile_override;
-            tile_override.tile_x = x;
-            tile_override.tile_y = y;
-            tile_override.existence = false;
-            additional_overrides.push_back(tile_override);
-          }
-        }
-
-        // Then mark the valid ones as existent.
-        for (llvm::StringRef coord : coords) {
-          auto coord_pair = coord.split('_');
-          int x, y;
-          if (!coord_pair.first.getAsInteger(10, x) &&
-              !coord_pair.second.getAsInteger(10, y)) {
-            TileOverride tile_override;
-            tile_override.tile_x = x;
-            tile_override.tile_y = y;
-            tile_override.existence = true;
-            additional_overrides.push_back(tile_override);
-          }
-        }
-      }
-
-      // Builds a custom architecture with the requested tile dimensions.
-      // For non-rectangular shapes, tiles marked existence=false are removed
-      // before inter-tile links are created, so no boundary links connect to
-      // absent tiles.
-      custom_arch = global_arch.cloneWithNewDimensions(
-          y_tiles.getValue(), x_tiles.getValue(), additional_overrides);
-      target_arch = custom_arch.get();
-      llvm::errs()
-          << "[MapToAcceleratorPass] Overriding architecture dimensions to "
-          << y_tiles.getValue() << "x" << x_tiles.getValue() << " tiles.\n";
-    }
-
-    const Architecture &architecture = *target_arch;
+    // Shape parsing is centralized with the analytical and JSON passes: an
+    // invalid coordinate is rejected instead of silently changing hardware.
+    std::unique_ptr<Architecture> custom_arch = buildArchitectureForShape(
+        global_arch, x_tiles.getValue(), y_tiles.getValue(), valid_tiles);
+    const Architecture &architecture = custom_arch ? *custom_arch : global_arch;
 
     // Maps kernels.
     module.walk([&](neura::KernelOp kernel_op) {
@@ -870,6 +913,7 @@ struct MapToAcceleratorPass
         signalPassFailure();
       }
     });
+    canonicalizeDataLayoutSpec(module);
   }
 };
 

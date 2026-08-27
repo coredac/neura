@@ -36,4 +36,11 @@ add_mlir_library(
       LLVMSupport
 )
 
+# add_mlir_library builds sources through this object target; place the
+# build-tree resource path on the compilation target, not merely its wrapper.
+target_compile_definitions(obj.MLIRNeuraTransforms PRIVATE
+  NEURA_EXACT_MAPPER_CPSAT_SCRIPT="${NEURA_CPSAT_SCRIPT_BUILD}"
+  NEURA_EXACT_MAPPER_CPSAT_INSTALL_SCRIPT="${CMAKE_INSTALL_FULL_DATADIR}/neura/exact_mapper_cpsat.py"
+)
+
 add_subdirectory(Optimizations)

@@ -69,10 +69,6 @@ struct AnalyticalIIBreakdown {
 //   )
 IIBound calculateComputeMiiPerClass(Region &region, const Architecture &arch);
 
-// RecMII: the maximum recurrence length reported by the mapper's shared
-// collectRecurrenceCycles helper.
-IIBound calculateRecMiiBound(Region &region, const Architecture &arch);
-
 // MemMII: load/store demand against the tiles that provide memory FUs.
 //   MemMII = max( ceil(mem_ops / #mem_tiles),
 //                 ceil(indexed_mem_ops / #mem_indexed_tiles) )

@@ -98,6 +98,41 @@ def test_direct_same_tile_route_rejects_zero_register_capacity():
     assert status == mapper.INFEASIBLE
 
 
+def test_joint_solver_emits_a_route_witness():
+    mapper = load_mapper()
+    data = make_data([{"class": "pipe", "latency": 1},
+                      {"class": "pipe", "latency": 1}],
+                     edges=[{"s": 0, "d": 1, "w": 0}])
+    feasible, sched, routes, status = mapper.joint_solve(
+        data, 2, 100.0, want_routes=True)
+    assert feasible
+    assert status == "feasible"
+    assert routes[(0, 1)][0][0] == sched[0][0]
+    assert routes[(0, 1)][-1][0] == sched[1][0]
+
+
+def test_joint_solver_shares_one_producer_fanout_register_slot():
+    mapper = load_mapper()
+    arch = make_arch(regs=1, regfiles=1, fu_classes={"pipe": [0]})
+    data = make_data(
+        [{"class": "pipe", "latency": 1} for _ in range(3)],
+        edges=[{"s": 0, "d": 1, "w": 0},
+               {"s": 0, "d": 2, "w": 0}],
+        arch=arch)
+    feasible, _, routes, status = mapper.joint_solve(
+        data, 3, 100.0, want_routes=True)
+    assert feasible
+    assert status == "feasible"
+    assert routes[(0, 1)][0] == routes[(0, 2)][0]
+
+
+def test_joint_solver_rejects_an_unclassified_fu_without_tile_fallback():
+    mapper = load_mapper()
+    data = make_data([{"class": "unknown", "latency": 1}])
+    with pytest.raises(AssertionError, match="no FU-class definition"):
+        mapper.joint_solve(data, 1, 1.0)
+
+
 def test_independent_multi_cycle_holds_share_storage_but_need_write_ports():
     mapper = load_mapper()
     arch = make_arch(regs=2, regfiles=1, fu_classes={"pipe": [0]})

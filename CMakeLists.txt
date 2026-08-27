@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.13.4)
 project(NeuraMLIRProject VERSION 0.1.0)
+include(GNUInstallDirs)
 
 # Avoid cmake generate unknown warnings
 cmake_policy(SET CMP0116 NEW)
@@ -19,6 +20,7 @@ message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
 find_package(MLIR REQUIRED CONFIG)
 find_package(LLVM REQUIRED CONFIG)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 
@@ -31,6 +33,18 @@ include(HandleLLVMOptions)
 
 include_directories(BEFORE ${PROJECT_SOURCE_DIR}/include)
 include_directories(BEFORE ${PROJECT_BINARY_DIR}/include)
+
+# Package the analytical mapper beside build/install artifacts before the
+# mapping library is configured, so its default path is independent of cwd.
+set(NEURA_CPSAT_SCRIPT_SOURCE
+    ${CMAKE_SOURCE_DIR}/test/cost-model/exact_mapper_cpsat.py)
+set(NEURA_CPSAT_SCRIPT_BUILD
+    ${CMAKE_BINARY_DIR}/share/neura/exact_mapper_cpsat.py)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/share/neura)
+configure_file(${NEURA_CPSAT_SCRIPT_SOURCE} ${NEURA_CPSAT_SCRIPT_BUILD}
+               COPYONLY)
+install(FILES ${NEURA_CPSAT_SCRIPT_SOURCE}
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/neura)
 
 add_subdirectory(include)
 add_subdirectory(lib)
@@ -50,6 +64,8 @@ set(MLIR_OPT ${LLVM_TOOLS_BINARY_DIR}/mlir-opt)
 set(MLIR_TRANSLATE ${LLVM_TOOLS_BINARY_DIR}/mlir-translate)
 set(LLC ${LLVM_TOOLS_BINARY_DIR}/llc)
 set(CLANG ${LLVM_TOOLS_BINARY_DIR}/clang)
+set(NEURA_PYTHON_EXECUTABLE ${Python3_EXECUTABLE} CACHE FILEPATH
+    "Python interpreter used by Neura's CP-SAT e2e tests")
 
 # Configures lit.cfg from lit.cfg.in
 configure_file(
