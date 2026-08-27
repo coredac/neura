@@ -28,6 +28,9 @@ fu_class_tiles{class:[tile ids]}, num_tiles, ctrl_mem_items}.
 
 Usage: exact_mapper_cpsat.py dfg.json [--max-ii N]
        [--deterministic-time T] [-v] [--emit out.json]
+
+Install the pinned solver version from test/cost-model/requirements.txt when
+comparing results across servers.
 """
 import argparse
 import collections
