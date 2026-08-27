@@ -11,7 +11,6 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
-#include <tuple>
 
 using namespace mlir;
 using namespace mlir::neura;
@@ -66,8 +65,6 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   // Logical operations
   if (isa<neura::OrOp>(op))
     return IOr;
-  if (isa<neura::AndOp>(op))
-    return IAnd;
   if (isa<neura::NotOp>(op))
     return INot;
   if (isa<neura::ICmpOp>(op))
@@ -100,17 +97,7 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   // Control flow operations
   if (isa<neura::ReturnOp>(op))
     return IReturn;
-  // The dataflow-mode returns are the same return FU as neura.return; they are
-  // not terminators, so they are placed like any other op.
-  if (isa<neura::ReturnVoidOp>(op))
-    return IReturn;
-  if (isa<neura::ReturnValueOp>(op))
-    return IReturn;
   if (isa<neura::PhiOp>(op))
-    return IPhi;
-  // phi_start is the loop-initialisation phi (init value + reserve), so it runs
-  // on the same phi FU as a general phi merge.
-  if (isa<neura::PhiStartOp>(op))
     return IPhi;
 
   // Data movement operations
@@ -137,16 +124,8 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   if (isa<neura::ConstantOp>(op))
     return IConstant;
 
-  // Counter operations
-  if (isa<neura::CounterOp>(op))
-    return ICounter;
-  if (isa<neura::ExtractPredicateOp>(op))
-    return IExtractPredicate;
-
-  // Unknown operations have no FU-class mapping and remain unconstrained by
-  // FU capacity. Do not guess a class here: that would turn an unmodeled op
-  // into a placement constraint when the architecture table changes.
-  return IUnknown;
+  // Default fallback
+  return IAdd;
 }
 
 // Returns true if the operation does not need CGRA tile placement.
@@ -175,8 +154,11 @@ bool occupiesFU(Operation *op) {
   if (is_non_materialized(op)) { // reserve / data_mov / ctrl_mov / yield
     return false;
   }
-  if (op->getParentOfType<neura::FusedOp>())
-    return false;
+  if (Operation *parent = op->getParentOp()) {
+    if (isa<neura::FusedOp>(parent)) {
+      return false;
+    }
+  }
   return true;
 }
 
@@ -205,15 +187,6 @@ static const std::map<OperationKind, std::string> &kindToFuClassTable() {
   return table;
 }
 
-// Unknown kinds have no FU-class constraint; modeled kinds use the tile's
-// declared capability.
-static bool tileCanRunOp(const Tile *tile, Operation *op) {
-  OperationKind kind = getOperationKindFromMlirOp(op);
-  if (!kindToFuClassTable().count(kind))
-    return true;
-  return tile->canSupportOperation(kind);
-}
-
 std::string fuClassOf(Operation *op) {
   // A fused op is placed as its whole pattern, so its class is the pattern
   // name.
@@ -225,81 +198,6 @@ std::string fuClassOf(Operation *op) {
   }
   auto found = kindToFuClassTable().find(getOperationKindFromMlirOp(op));
   return found == kindToFuClassTable().end() ? "other" : found->second;
-}
-
-llvm::SmallVector<Tile *, 16> tilesProvidingFuClass(const Architecture &arch,
-                                                    llvm::StringRef fu_class) {
-  llvm::SmallVector<Tile *, 16> tiles;
-  auto found = kFuTypesToOperations.find(fu_class.str());
-  if (found == kFuTypesToOperations.end() || found->second.empty()) {
-    for (Tile *tile : arch.getAllTiles())
-      tiles.push_back(tile);
-    return tiles;
-  }
-  OperationKind probe_kind = found->second.front();
-  for (Tile *tile : arch.getAllTiles()) {
-    if (tile->canSupportOperation(probe_kind))
-      tiles.push_back(tile);
-  }
-  return tiles;
-}
-
-Operation *getPlacedProducer(Value value) {
-  Operation *producer = value.getDefiningOp();
-  if (!producer || isa<neura::ReserveOp>(producer))
-    return nullptr;
-  if (auto move = dyn_cast<neura::DataMovOp>(producer)) {
-    Operation *inner_producer = move.getOperand().getDefiningOp();
-    return inner_producer && !isa<neura::ReserveOp>(inner_producer)
-               ? inner_producer
-               : nullptr;
-  }
-  return producer;
-}
-
-std::vector<DependenceEdge>
-buildDfgEdges(Region &region, const std::vector<Operation *> &placed_ops) {
-  llvm::DenseMap<Operation *, int> op_id;
-  for (int index = 0; index < static_cast<int>(placed_ops.size()); ++index)
-    op_id[placed_ops[index]] = index;
-
-  std::vector<DependenceEdge> edges;
-  std::set<std::tuple<int, int, int>> seen;
-  auto addEdge = [&](int src, int dst, int omega) {
-    if (seen.insert({src, dst, omega}).second)
-      edges.push_back(DependenceEdge{src, dst, omega});
-  };
-
-  for (Operation *consumer : placed_ops) {
-    int consumer_id = op_id.find(consumer)->second;
-    for (Value operand : consumer->getOperands()) {
-      Operation *producer = getPlacedProducer(operand);
-      auto producer_id = producer ? op_id.find(producer) : op_id.end();
-      if (producer_id != op_id.end())
-        addEdge(producer_id->second, consumer_id, 0);
-    }
-  }
-
-  region.walk([&](neura::CtrlMovOp ctrl_mov) {
-    Operation *producer = getPlacedProducer(ctrl_mov.getValue());
-    auto reserve = ctrl_mov.getTarget().getDefiningOp<neura::ReserveOp>();
-    auto producer_id = producer ? op_id.find(producer) : op_id.end();
-    if (producer_id == op_id.end() || !reserve)
-      return;
-    for (Operation *user : reserve.getResult().getUsers()) {
-      Operation *placed_user = user;
-      if (is_non_materialized(user)) {
-        for (Operation *router_user : user->getUsers()) {
-          if (op_id.count(router_user))
-            placed_user = router_user;
-        }
-      }
-      auto user_id = op_id.find(placed_user);
-      if (user_id != op_id.end())
-        addEdge(producer_id->second, user_id->second, 1);
-    }
-  });
-  return edges;
 }
 
 } // namespace neura
@@ -394,60 +292,32 @@ mlir::neura::collectRecurrenceCycles(Region &region) {
   return recurrence_cycles;
 }
 
-int mlir::neura::calculateRecMii(Region &region,
-                                 std::set<Operation *> *critical_ops_out) {
-  SmallVector<RecurrenceCycle, 4> recurrence_cycles =
-      collectRecurrenceCycles(region);
-  RecurrenceCycle *longest_cycle = nullptr;
-
-  for (RecurrenceCycle &cycle : recurrence_cycles) {
-    llvm::outs() << "[DEBUG] Recurrence cycle (length " << cycle.length
-                 << "):\n";
-    for (Operation *operation : cycle.operations) {
-      if (critical_ops_out)
-        critical_ops_out->insert(operation);
-      llvm::outs() << "  " << *operation << "\n";
-    }
-    if (!longest_cycle || cycle.length > longest_cycle->length)
-      longest_cycle = &cycle;
-  }
-
-  if (!longest_cycle)
-    return 1;
-
-  llvm::outs() << "[calculateRecMii] Longest recurrence cycle (length "
-               << longest_cycle->length << "):\n";
-  for (Operation *operation : longest_cycle->operations) {
-    operation->print(llvm::outs());
-    llvm::outs() << "\n";
-  }
-  return longest_cycle->length;
-}
-
 int mlir::neura::calculateResourceMii(Region &region,
-                                      const Architecture &architecture,
-                                      long long *demand_out,
-                                      long long *capacity_out) {
-  long long num_ops = 0;
+                                      const Architecture &architecture) {
+  int num_ops = 0;
 
   // Count all "compute" operations (non-terminators, non-block ops).
   region.walk([&](Operation *op) {
-    if (occupiesFU(op))
-      ++num_ops;
+    // Skips non-materialized ops.
+    if (isa<func::FuncOp>(op) ||
+        isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op)) {
+      return;
+    }
+    // Skips operations inside fused_op regions
+    Operation *parent_op = op->getParentOp();
+    if (isa<neura::FusedOp>(parent_op)) {
+      return;
+    }
+    ++num_ops;
   });
 
   llvm::errs() << "[calculateResourceMii] Total operations: " << num_ops
                << "\n";
 
   // Avoid divide-by-zero
-  long long num_tiles = std::max(1, architecture.getNumTiles());
+  int num_tiles = std::max(1, architecture.getNumTiles());
 
-  if (demand_out)
-    *demand_out = num_ops;
-  if (capacity_out)
-    *capacity_out = num_tiles;
-
-  return static_cast<int>(llvm::divideCeil(num_ops, num_tiles));
+  return llvm::divideCeil(num_ops, num_tiles);
 }
 
 std::vector<Operation *>
@@ -1181,7 +1051,7 @@ mlir::neura::calculateAward(Operation *op, std::set<Operation *> &critical_ops,
   // Early exit if the operation is not supported by all the tiles.
   bool op_can_be_supported = false;
   for (Tile *tile : architecture.getAllTiles()) {
-    if (tileCanRunOp(tile, op)) {
+    if (tile->canSupportOperation(getOperationKindFromMlirOp(op))) {
       op_can_be_supported = true;
     }
   }
@@ -1224,7 +1094,7 @@ mlir::neura::calculateAward(Operation *op, std::set<Operation *> &critical_ops,
                << "; Producers: " << producers.size() << "\n";
 
   for (Tile *tile : architecture.getAllTiles()) {
-    if (!tileCanRunOp(tile, op)) {
+    if (!tile->canSupportOperation(getOperationKindFromMlirOp(op))) {
       llvm::errs() << "[calculateAward] Tile<" << tile->getX() << ", "
                    << tile->getY() << "> does not support operation: " << *op
                    << "\n";

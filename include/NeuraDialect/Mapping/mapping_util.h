@@ -3,8 +3,6 @@
 #include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/MappingState.h"
 #include "mlir/IR/Operation.h"
-#include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/StringRef.h"
 
 namespace mlir {
 namespace neura {
@@ -34,26 +32,6 @@ std::vector<Operation *> collectPlacedOps(Region &region);
 // analytical cost model and --dump-dfg-json so both bucket ops identically.
 std::string fuClassOf(Operation *op);
 
-// Returns tiles that provide `fu_class`. An undescribed class is unconstrained
-// and returns all tiles; a described class with no provider returns no tiles.
-llvm::SmallVector<Tile *, 16> tilesProvidingFuClass(const Architecture &arch,
-                                                    llvm::StringRef fu_class);
-
-// Returns the placed producer of `value`, unwrapping one data_mov. Reserve
-// values have no direct producer; their loop-carried edge is added separately.
-Operation *getPlacedProducer(Value value);
-
-struct DependenceEdge {
-  int src;
-  int dst;
-  int omega;
-};
-
-// Builds the de-duplicated forward and loop-carried dependence edges over the
-// shared collectPlacedOps order.
-std::vector<DependenceEdge>
-buildDfgEdges(Region &region, const std::vector<Operation *> &placed_ops);
-
 // Returns true if the operation is a steering-mode operation that doesn't
 // require DataMovOp wrapping (e.g., constants, carry, invariant, etc.).
 bool is_steering_unwrapped_op(Operation *op);
@@ -74,16 +52,8 @@ struct RecurrenceCycle {
 // Collects recurrence cycles rooted at reserve and closed by ctrl_mov.
 SmallVector<RecurrenceCycle, 4> collectRecurrenceCycles(Region &region);
 
-// Calculates the same RecMII used to seed the mapper. When requested, also
-// returns every operation that belongs to a recurrence cycle.
-int calculateRecMii(Region &region,
-                    std::set<Operation *> *critical_ops_out = nullptr);
-
-// Calculates ResourceMII: ceil(#ops / #tiles). Optional outputs expose the
-// exact numerator and denominator to callers that need a diagnostic breakdown.
-int calculateResourceMii(Region &region, const Architecture &architecture,
-                         long long *demand_out = nullptr,
-                         long long *capacity_out = nullptr);
+// Calculates ResourceMII: ceil(#ops / #tiles).
+int calculateResourceMii(Region &region, const Architecture &architecture);
 
 // Returns topologically sorted operations in region.
 std::vector<Operation *> getTopologicallySortedOps(Region &region);

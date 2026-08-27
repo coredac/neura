@@ -1,2 +1,1 @@
-# Keep deterministic-time search budgets comparable across servers.
 ortools==9.11.4210

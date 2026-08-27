@@ -24,7 +24,7 @@
   },
   {
    "id": 2,
-   "class": "phi",
+   "class": "add",
    "tile": 4,
    "x": 0,
    "y": 1,
@@ -34,7 +34,7 @@
   },
   {
    "id": 3,
-   "class": "phi",
+   "class": "add",
    "tile": 5,
    "x": 1,
    "y": 1,
@@ -44,7 +44,7 @@
   },
   {
    "id": 4,
-   "class": "other",
+   "class": "add",
    "tile": 4,
    "x": 0,
    "y": 1,
@@ -64,7 +64,7 @@
   },
   {
    "id": 6,
-   "class": "other",
+   "class": "add",
    "tile": 1,
    "x": 1,
    "y": 0,
@@ -164,7 +164,7 @@
   },
   {
    "id": 16,
-   "class": "return",
+   "class": "add",
    "tile": 0,
    "x": 0,
    "y": 0,

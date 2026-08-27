@@ -31,8 +31,7 @@ std::unique_ptr<mlir::Pass> createMapToAcceleratorPass(
 // from DFG + architecture structural parameters only; never invokes the mapper.
 std::unique_ptr<mlir::Pass> createCostModelAnalyticalPass(
     const CostModelAnalyticalOptions &options = CostModelAnalyticalOptions{});
-std::unique_ptr<mlir::Pass> createDumpDfgJsonPass(
-    const DumpDfgJsonOptions &options = DumpDfgJsonOptions{});
+std::unique_ptr<mlir::Pass> createDumpDfgJsonPass();
 std::unique_ptr<mlir::Pass> createGenerateCodePass();
 std::unique_ptr<mlir::Pass> createCanonicalizeReturnPass();
 std::unique_ptr<mlir::Pass> createCanonicalizeLiveInPass();

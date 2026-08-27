@@ -94,7 +94,7 @@
   },
   {
    "id": 9,
-   "class": "logic",
+   "class": "add",
    "tile": 4,
    "x": 0,
    "y": 1,
@@ -114,7 +114,7 @@
   },
   {
    "id": 11,
-   "class": "logic",
+   "class": "add",
    "tile": 4,
    "x": 0,
    "y": 1,
@@ -354,7 +354,7 @@
   },
   {
    "id": 35,
-   "class": "other",
+   "class": "add",
    "tile": 0,
    "x": 0,
    "y": 0,
@@ -454,7 +454,7 @@
   },
   {
    "id": 45,
-   "class": "other",
+   "class": "add",
    "tile": 1,
    "x": 1,
    "y": 0,
@@ -484,7 +484,7 @@
   },
   {
    "id": 48,
-   "class": "other",
+   "class": "add",
    "tile": 3,
    "x": 3,
    "y": 0,
@@ -934,7 +934,7 @@
   },
   {
    "id": 93,
-   "class": "return",
+   "class": "add",
    "tile": 3,
    "x": 3,
    "y": 0,

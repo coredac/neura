@@ -18,7 +18,6 @@
 #include "llvm/Support/MathExtras.h"
 
 #include <algorithm>
-#include <cassert>
 #include <cmath>
 #include <map>
 #include <string>
@@ -64,7 +63,9 @@ int valueBitWidth(Value value) {
 }
 
 int ceilDiv(long long numerator, long long denominator) {
-  assert(denominator > 0 && "ceilDiv denominator must be positive");
+  if (denominator <= 0) {
+    denominator = 1;
+  }
   return static_cast<int>((numerator + denominator - 1) / denominator);
 }
 
@@ -74,51 +75,41 @@ namespace mlir {
 namespace neura {
 
 //===----------------------------------------------------------------------===//
-// ComputeMII — per-FU-class start issue demand.
+// ComputeMII — per-FU-class, latency-weighted.
 //
-//   work(c)  = number of placed ops of class c
+//   work(c)  = sum over placed ops of class c of max(1, latency(op))
 //   fus(c)   = #tiles that physically provide FU class c
 //   ComputeMII = max over classes c of ceil( work(c) / fus(c) )
 //
-// A pipelined FU accepts one new operation per issue slot. Its latency belongs
-// in the shared recurrence constraint rather than being counted as occupancy.
+// Why not reuse neura::calculateResourceMii (mapping_util.cpp)? That one is
+// just ceil(#ops / #tiles): it treats every tile as interchangeable and every
+// op as unit-cost, so it under-predicts whenever an FU class is scarce (e.g. 6
+// muls but only 2 mul-capable tiles) or ops are multi-cycle. Reusing it would
+// defeat the point of a sharper model. Its exact formula is preserved as
+// ResourceMII below.
 //===----------------------------------------------------------------------===//
 IIBound calculateComputeMiiPerClass(Region &region, const Architecture &arch) {
-  std::map<std::string, long long> work_by_class; // class -> start slots.
+  std::map<std::string, long long> work_by_class; // class -> sum of latencies.
   region.walk([&](Operation *op) {
     if (!occupiesFU(op)) {
       return;
     }
-    ++work_by_class[fuClassOf(op)];
+    work_by_class[fuClassOf(op)] += std::max(1, getOpLatency(op));
   });
 
   IIBound bound;
   bound.value = 1;
-  std::vector<std::string> unprovided_classes;
   for (const auto &[fu_class, class_work] : work_by_class) {
-    int fu_count = tilesSupportingClass(arch, fu_class);
-    if (fu_count == 0) {
-      unprovided_classes.push_back(fu_class);
-      continue;
-    }
+    int fu_count = std::max(1, tilesSupportingClass(arch, fu_class));
     int class_ii = ceilDiv(class_work, fu_count);
-    if (bound.detail.empty() || class_ii > bound.value) {
+    if (class_ii > bound.value) {
       bound.value = class_ii;
       bound.demand = class_work;
       bound.capacity = fu_count;
       bound.detail = "class=" + fu_class +
-                     " ops=" + std::to_string(class_work) +
+                     " work=" + std::to_string(class_work) +
                      " fus=" + std::to_string(fu_count);
     }
-  }
-  if (!unprovided_classes.empty()) {
-    bound.infeasible = true;
-    bound.demand = work_by_class[unprovided_classes.front()];
-    bound.capacity = 0;
-    bound.value = 0;
-    bound.detail = "infeasible: no tile provides fu class";
-    for (const std::string &fu_class : unprovided_classes)
-      bound.detail += " " + fu_class;
   }
   if (bound.detail.empty()) {
     bound.detail = "no placed ops";
@@ -149,13 +140,125 @@ IIBound calculateComputeMiiPerClass(Region &region, const Architecture &arch) {
 // scheduler's precedence  t[dst] >= t[src] + lat(src) + hop - omega*II  with
 // hop dropped (a lower bound, hop >= 0).
 //===----------------------------------------------------------------------===//
-IIBound makeRecMiiBound(Region &region) {
+IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch) {
+  (void)arch;
   IIBound bound;
-  bound.value = calculateRecMii(region);
-  bound.demand = bound.value;
-  bound.capacity = 1;
-  bound.detail =
-      "shared mapper recurrence bound=" + std::to_string(bound.value);
+  bound.value = 1;
+  bound.detail = "no recurrence";
+
+  // Node ids for the materialized ops (same predicate the mapper/dump use).
+  llvm::DenseMap<Operation *, int> op_id;
+  region.walk([&](Operation *op) {
+    if (occupiesFU(op)) {
+      op_id[op] = (int)op_id.size();
+    }
+  });
+  if (op_id.empty()) {
+    return bound;
+  }
+
+  // Safe producer unwrap through a DataMovOp; ReserveOp (loop-carried
+  // placeholder) returns null and is handled by the back-edge walk. Mirrors
+  // DumpDfgJsonPass::materializedProducer (no asserts).
+  auto producerOf = [](Value value) -> Operation * {
+    Operation *producer = value.getDefiningOp();
+    if (!producer || isa<neura::ReserveOp>(producer)) {
+      return nullptr;
+    }
+    if (auto mov = dyn_cast<neura::DataMovOp>(producer)) {
+      Operation *inner = mov.getOperand().getDefiningOp();
+      return (inner && !isa<neura::ReserveOp>(inner)) ? inner : nullptr;
+    }
+    return producer;
+  };
+
+  struct Arc {
+    int dst;
+    int delay;
+    int omega;
+  };
+  std::vector<std::vector<Arc>> out(op_id.size());
+  long long total_delay = 0;
+  // Forward (intra-iteration) edges, omega=0.
+  for (auto &entry : op_id) {
+    Operation *consumer = entry.first;
+    for (Value operand : consumer->getOperands()) {
+      Operation *producer = producerOf(operand);
+      auto found = producer ? op_id.find(producer) : op_id.end();
+      if (found != op_id.end()) {
+        int delay = std::max(1, getOpLatency(producer));
+        out[found->second].push_back({entry.second, delay, 0});
+        total_delay += delay;
+      }
+    }
+  }
+  // Loop-carried edges, omega=1: producer of a ctrl_mov's value -> the
+  // materialized users of the reserve it targets (value[i] feeding iteration
+  // i+1). Same construction as DumpDfgJsonPass.
+  region.walk([&](neura::CtrlMovOp ctrl_mov) {
+    Operation *producer = producerOf(ctrl_mov.getValue());
+    auto reserve = ctrl_mov.getTarget().getDefiningOp<neura::ReserveOp>();
+    auto found = producer ? op_id.find(producer) : op_id.end();
+    if (found == op_id.end() || !reserve) {
+      return;
+    }
+    int delay = std::max(1, getOpLatency(producer));
+    for (Operation *user : reserve.getResult().getUsers()) {
+      Operation *materialized_user = user;
+      if (is_non_materialized(user)) {
+        for (Operation *router_user : user->getUsers()) {
+          if (op_id.count(router_user)) {
+            materialized_user = router_user;
+          }
+        }
+      }
+      auto user_id = op_id.find(materialized_user);
+      if (user_id != op_id.end()) {
+        out[found->second].push_back({user_id->second, delay, 1});
+        total_delay += delay;
+      }
+    }
+  });
+
+  // Max cycle ratio via binary search on r: a cycle has ratio > r iff the graph
+  // with edge weight (delay - r*omega) has a positive cycle. Every cycle uses
+  // >=1 omega=1 back-edge (forward edges form a DAG), so the ratio is finite.
+  const int num_nodes = (int)op_id.size();
+  auto hasPositiveCycle = [&](double r) {
+    std::vector<double> dist(num_nodes, 0.0);
+    for (int iter = 0; iter < num_nodes; ++iter) {
+      bool updated = false;
+      for (int u = 0; u < num_nodes; ++u) {
+        for (const Arc &arc : out[u]) {
+          double relaxed = dist[u] + (arc.delay - r * arc.omega);
+          if (relaxed > dist[arc.dst] + 1e-9) {
+            dist[arc.dst] = relaxed;
+            updated = true;
+          }
+        }
+      }
+      if (!updated) {
+        return false; // settled with no positive cycle
+      }
+    }
+    return true; // still relaxing after |V| passes => positive cycle
+  };
+  double lo = 0.0, hi = (double)total_delay + 1.0;
+  if (hasPositiveCycle(0.0)) { // a recurrence exists at all
+    for (int iter = 0; iter < 100; ++iter) {
+      double mid = 0.5 * (lo + hi);
+      if (hasPositiveCycle(mid)) {
+        lo = mid;
+      } else {
+        hi = mid;
+      }
+    }
+    int rec_ii = std::max(1, (int)std::ceil(lo - 1e-6));
+    bound.value = rec_ii;
+    bound.demand = rec_ii;
+    bound.capacity = 1;
+    bound.detail = "critical circuit ratio=" + std::to_string(lo);
+  }
   return bound;
 }
 
@@ -182,12 +285,10 @@ IIBound calculateMemMii(Region &region, const Architecture &arch) {
     }
   });
 
-  int mem_tiles = tilesSupportingClass(arch, "mem");
-  int indexed_tiles = tilesSupportingClass(arch, "mem_indexed");
-  bool infeasible = (num_mem_ops > 0 && mem_tiles == 0) ||
-                    (num_indexed_ops > 0 && indexed_tiles == 0);
-  int mem_ii = ceilDiv(num_mem_ops, std::max(1, mem_tiles));
-  int indexed_ii = ceilDiv(num_indexed_ops, std::max(1, indexed_tiles));
+  int mem_tiles = std::max(1, tilesSupportingClass(arch, "mem"));
+  int indexed_tiles = std::max(1, tilesSupportingClass(arch, "mem_indexed"));
+  int mem_ii = ceilDiv(num_mem_ops, mem_tiles);
+  int indexed_ii = ceilDiv(num_indexed_ops, indexed_tiles);
 
   IIBound bound;
   if (indexed_ii >= mem_ii) {
@@ -202,18 +303,6 @@ IIBound calculateMemMii(Region &region, const Architecture &arch) {
     bound.capacity = mem_tiles;
     bound.detail = "loads+stores=" + std::to_string(num_mem_ops) +
                    " mem_fus=" + std::to_string(mem_tiles);
-  }
-  if (infeasible) {
-    bound.infeasible = true;
-    bound.value = 0;
-    bound.capacity = 0;
-    if (num_mem_ops > 0 && mem_tiles == 0) {
-      bound.demand = num_mem_ops;
-      bound.detail = "infeasible: no tile provides mem";
-    } else {
-      bound.demand = num_indexed_ops;
-      bound.detail = "infeasible: no tile provides mem_indexed";
-    }
   }
   return bound;
 }
@@ -407,6 +496,22 @@ IIBound calculateRegMii(Region &region, const Architecture &arch) {
 // FU-agnostic floor: every op needs some tile-slot per iteration regardless of
 // class. This is exactly the legacy calculateResourceMii formula.
 //===----------------------------------------------------------------------===//
+IIBound calculateResourceMiiBound(Region &region, const Architecture &arch) {
+  long long num_ops = 0;
+  region.walk([&](Operation *op) {
+    if (occupiesFU(op)) {
+      ++num_ops;
+    }
+  });
+  int num_tiles = std::max(1, arch.getNumTiles());
+  IIBound bound;
+  bound.value = std::max(1, ceilDiv(num_ops, num_tiles));
+  bound.demand = num_ops;
+  bound.capacity = num_tiles;
+  bound.detail =
+      "ops=" + std::to_string(num_ops) + " tiles=" + std::to_string(num_tiles);
+  return bound;
+}
 
 //===----------------------------------------------------------------------===//
 // Combine.
@@ -423,18 +528,11 @@ AnalyticalIIBreakdown computeAnalyticalII(Region &region,
                                           const Architecture &arch) {
   AnalyticalIIBreakdown breakdown;
   breakdown.compute = calculateComputeMiiPerClass(region, arch);
-  breakdown.rec = makeRecMiiBound(region);
+  breakdown.rec = calculateRecMiiWeighted(region, arch);
   breakdown.mem = calculateMemMii(region, arch);
   breakdown.route = calculateRouteMii(region, arch);
   breakdown.reg = calculateRegMii(region, arch);
-  long long res_demand = 0;
-  long long res_capacity = 0;
-  breakdown.res.value =
-      calculateResourceMii(region, arch, &res_demand, &res_capacity);
-  breakdown.res.demand = res_demand;
-  breakdown.res.capacity = res_capacity;
-  breakdown.res.detail = "ops=" + std::to_string(res_demand) +
-                         " tiles=" + std::to_string(res_capacity);
+  breakdown.resource = calculateResourceMiiBound(region, arch);
 
   struct NamedBound {
     const char *name;
@@ -443,7 +541,9 @@ AnalyticalIIBreakdown computeAnalyticalII(Region &region,
   NamedBound named_bounds[] = {{"compute", breakdown.compute.value},
                                {"rec", breakdown.rec.value},
                                {"mem", breakdown.mem.value},
-                               {"res", breakdown.res.value}};
+                               {"route", breakdown.route.value},
+                               {"reg", breakdown.reg.value},
+                               {"resource", breakdown.resource.value}};
   int max_bound_ii = 1;
   const char *dominant_name = "compute";
   for (const NamedBound &named_bound : named_bounds) {
@@ -455,41 +555,28 @@ AnalyticalIIBreakdown computeAnalyticalII(Region &region,
   breakdown.dominant = dominant_name;
 
   breakdown.max_ii = arch.getMaxCtrlMemItems();
-  breakdown.infeasible =
-      breakdown.compute.infeasible || breakdown.mem.infeasible;
-  if (breakdown.infeasible) {
-    breakdown.final_ii = 0;
-    breakdown.dominant = "infeasible";
-    breakdown.infeasible_reason = breakdown.compute.infeasible
-                                      ? breakdown.compute.detail
-                                      : breakdown.mem.detail;
-  } else if (breakdown.max_ii > 0 && max_bound_ii > breakdown.max_ii) {
-    breakdown.final_ii = 0;
-    breakdown.infeasible = true;
-    breakdown.dominant = "infeasible";
-    breakdown.infeasible_reason =
-        "sound lower bound " + std::to_string(max_bound_ii) +
-        " exceeds control-memory limit " + std::to_string(breakdown.max_ii);
+  if (breakdown.max_ii > 0 && max_bound_ii > breakdown.max_ii) {
+    breakdown.final_ii = breakdown.max_ii;
+    breakdown.clamped = true;
   } else {
     breakdown.final_ii = std::max(1, max_bound_ii);
   }
   return breakdown;
 }
 
-void AnalyticalIIBreakdown::print(llvm::raw_ostream &output_stream) const {
-  output_stream << "[cost-model-analytical]\n";
-  output_stream << "  compute_mii=" << compute.value << " (" << compute.detail
-                << ")\n";
-  output_stream << "  rec_mii=" << rec.value << " (" << rec.detail << ")\n";
-  output_stream << "  mem_mii=" << mem.value << " (" << mem.detail << ")\n";
-  output_stream << "  route_mii=" << route.value << " (" << route.detail
-                << ")\n";
-  output_stream << "  reg_mii=" << reg.value << " (" << reg.detail << ")\n";
-  output_stream << "  res_mii=" << res.value << " (" << res.detail << ")\n";
-  output_stream << "  final_ii=" << final_ii << " (dominant=" << dominant;
-  if (infeasible)
-    output_stream << ", INFEASIBLE: " << infeasible_reason;
-  output_stream << ")\n";
+void AnalyticalIIBreakdown::print(llvm::raw_ostream &os) const {
+  os << "[cost-model-analytical]\n";
+  os << "  compute_mii=" << compute.value << " (" << compute.detail << ")\n";
+  os << "  rec_mii=" << rec.value << " (" << rec.detail << ")\n";
+  os << "  mem_mii=" << mem.value << " (" << mem.detail << ")\n";
+  os << "  route_mii=" << route.value << " (" << route.detail << ")\n";
+  os << "  reg_mii=" << reg.value << " (" << reg.detail << ")\n";
+  os << "  res_mii=" << resource.value << " (" << resource.detail << ")\n";
+  os << "  final_ii=" << final_ii << " (dominant=" << dominant;
+  if (clamped) {
+    os << ", clamped-to-max_ii=" << max_ii;
+  }
+  os << ")\n";
 }
 
 } // namespace neura

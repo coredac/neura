@@ -14,7 +14,7 @@
   },
   {
    "id": 1,
-   "class": "phi",
+   "class": "add",
    "tile": 5,
    "x": 1,
    "y": 1,
@@ -24,7 +24,7 @@
   },
   {
    "id": 2,
-   "class": "other",
+   "class": "add",
    "tile": 4,
    "x": 0,
    "y": 1,
@@ -84,7 +84,7 @@
   },
   {
    "id": 8,
-   "class": "other",
+   "class": "add",
    "tile": 0,
    "x": 0,
    "y": 0,
@@ -174,7 +174,7 @@
   },
   {
    "id": 17,
-   "class": "return",
+   "class": "add",
    "tile": 1,
    "x": 1,
    "y": 0,

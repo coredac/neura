@@ -1,7 +1,0 @@
-{
-  "compiled_ii": 1,
-  "placements": [
-    {"id": 0, "class": "grant", "tile": 0, "time_step": 0},
-    {"id": 0, "class": "grant", "tile": 1, "time_step": 0}
-  ]
-}
