@@ -686,6 +686,8 @@ Register *mlir::neura::getAvailableRegister(const MappingState &state,
                                             Tile *tile, int start_time,
                                             int exclusive_end_time,
                                             neura::DataMovOp move_op) {
+  assert(start_time < exclusive_end_time &&
+         "register holding range must be non-empty");
   // Finds the first register that is free across the requested range AND
   // satisfies the single-port cluster constraints:
   //   - Write port: at start_time, only one register per RegisterFile may be
@@ -710,7 +712,7 @@ Register *mlir::neura::getAvailableRegister(const MappingState &state,
       continue;
     }
     // Check cluster read-port constraint at the read time step.
-    if (!state.isRegisterReadAvailableAcrossTime(reg, exclusive_end_time)) {
+    if (!state.isRegisterReadAvailableAcrossTime(reg, exclusive_end_time - 1)) {
       continue;
     }
     return reg;

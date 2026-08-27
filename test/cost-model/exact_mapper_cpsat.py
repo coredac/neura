@@ -1,29 +1,33 @@
 #!/usr/bin/env python3
-"""Complete exact CGRA modulo mapper (OR-Tools CP-SAT).
+"""Budgeted CGRA modulo mapper (OR-Tools CP-SAT).
 
-Unlike exact_oracle_cpsat.py (a relaxation lower bound), this models the FULL
-mapping and produces a concrete, valid assignment: placement + schedule + the
-routing path of every value + register/link occupancy — all on the REAL link
-graph (works for any topology incl. multi-CGRA), with modulo resource limits.
-The minimum II for which it succeeds is the true contention-aware optimum, and
-the emitted mapping is directly usable by a backend.
+Unlike the lower-bound oracle, this models the full mapping and produces a
+concrete assignment: placement + schedule + the routing path of every value +
+register/link occupancy — all on the real link graph (works for any topology
+including multi-CGRA), with modulo resource limits. The first II for which it
+finds a witness is reported; because each solve has a deterministic search
+budget, that result is not a proof of the minimum II. The emitted mapping is
+directly usable by a backend.
 
 Two-stage per II (iterated upward from a lower bound):
   1. schedule(): CP-SAT places ops on FU-supporting tiles and assigns issue
-     times, enforcing the FU modulo resource (<=1 op per tile per residue) and
-     precedence/recurrence with the true shortest-path hop latency over the link
-     graph.
+     times, enforcing the FU modulo resource and precedence/recurrence with the
+     shortest-path hop latency over the link graph. A same-tile dependence is
+     represented by a one-slot local register transfer during routing.
   2. route(): with placement+times fixed, CP-SAT routes every net (producer ->
      all its consumers) as presence-flow over the time-expanded modulo graph,
      enforcing per-(link,residue) <=1 net and per-(tile,residue) <= #registers.
      Fan-out shares links (same net is free to reuse a (link,residue)).
-First II with both stages feasible = true optimal; the routes are the mapping.
+If a witness cannot be found within budget, the driver tries II+1. The legacy
+``--fallback`` flag remains accepted for callers that already pass it; retries
+are now the normal ladder behavior. The routes are the emitted mapping.
 
 Input dfg.json (from --dump-dfg-json): ops[{class,latency}], edges[{s,d,w}]
 (w=1 marks a loop-carried edge), and arch{tiles[{id,x,y,regs}], links[[s,d,lat]],
 fu_class_tiles{class:[tile ids]}, num_tiles, ctrl_mem_items}.
 
-Usage: exact_mapper_cpsat.py dfg.json [--max-ii N] [--seconds S] [-v] [--emit out.json]
+Usage: exact_mapper_cpsat.py dfg.json [--max-ii N]
+       [--deterministic-time T] [-v] [--emit out.json]
 """
 import argparse
 import collections
@@ -31,6 +35,33 @@ import json
 import sys
 
 from ortools.sat.python import cp_model
+
+
+INFEASIBLE = "infeasible"
+BUDGET_EXHAUSTED = "budget_exhausted"
+SOLVER_ERROR = "solver_error"
+
+
+def configure_solver(solver, deterministic_time):
+    """Use a CP-SAT solver-work budget for every solve."""
+    if deterministic_time <= 0:
+        raise ValueError("deterministic_time must be positive")
+    # Deterministic time avoids CPU-speed-dependent cutoffs; pin the OR-Tools
+    # version and model construction order as well when reproducing a run.
+    solver.parameters.max_deterministic_time = deterministic_time
+    solver.parameters.num_search_workers = 1
+    solver.parameters.random_seed = 0
+
+
+def solver_outcome(status):
+    """Map a CP-SAT status to the driver's small status vocabulary."""
+    if status == cp_model.INFEASIBLE:
+        return INFEASIBLE
+    if status == cp_model.UNKNOWN:
+        return BUDGET_EXHAUSTED
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return "feasible"
+    return SOLVER_ERROR
 
 
 def shortest_hops(arch):
@@ -67,7 +98,7 @@ def unprovidable_classes(data):
     A class that is ABSENT from fu_class_tiles is a different case: nothing is
     known about which FU runs it, so it is unconstrained and every tile is a
     candidate (see the .get(cls, tile_ids) default below). Note that
-    `fu_class_tiles.get(cls) or tile_ids` collapses exactly these two cases --
+    `fu_class_tiles.get(cls) or tile_ids` collapses these two cases --
     an empty list is falsy, so a class no tile provides silently became ALL
     tiles, and the mapper reported capacity num_tiles where the analytical cost
     model reported infeasible."""
@@ -77,10 +108,11 @@ def unprovidable_classes(data):
                    and not fu_class_tiles[op["class"]]})
 
 
-def schedule(data, ii, seconds, hops, minimize_routing=False):
+def schedule(data, ii, deterministic_time, hops, minimize_routing=False):
     """Stage 1: decide place[i] (tile) and issue_time[i] for every op at this II.
-    Returns {i:(tile,time)} if feasible, None if infeasible, "unknown" on
-    timeout. minimize_routing biases toward a router-friendly witness (see below).
+    Returns {i:(tile,time)} if feasible, None if infeasible, or
+    ``BUDGET_EXHAUSTED`` when the deterministic search budget is consumed.
+    ``minimize_routing`` biases toward a router-friendly witness (see below).
     """
     ops, edges, arch = data["ops"], data["edges"], data["arch"]
     tile_ids = [t["id"] for t in arch["tiles"]]
@@ -103,24 +135,21 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
         # the arch does not list at all is unconstrained -> any tile; a class it
         # lists as [] is provided by no tile and was rejected above, so the
         # default here must be `.get(cls, tile_ids)`, never `.get(cls) or
-        # tile_ids` (the two differ exactly on the empty list).
+        # tile_ids` (the two differ specifically on the empty list).
         valid_tiles = fu_class_tiles.get(op["class"], tile_ids)
         place_var = model.NewIntVarFromDomain(
             cp_model.Domain.FromValues(valid_tiles), f"place{i}")
         place.append(place_var)
         issue_time.append(model.NewIntVar(0, max_time, f"time{i}"))
-    # FU modulo resource: a latency-L op occupies its tile for the WHOLE pipeline
-    # window [t, t+L) -- matching the backend, which marks START/IN/END pipe
-    # stages and rejects any overlap (MappingState bindMultiCycleOp). Model it as
-    # a single AllDifferent over one cell per occupied (tile, residue): for op i
-    # and pipeline offset k in [0,L_i), occupied residue = (time+k) mod II and
-    # cell = place*II + that residue. Equal cells => two ops (or two stages) share
-    # a tile at congruent times, exactly the conflict to ban. The L=1 case reduces
-    # to the old "one cell per op". If L_i > II the op's own stages collide on a
-    # residue -> AllDifferent is infeasible -> that II is correctly rejected (the
-    # FU cannot be re-issued every II). Example (II=4): op on tile 1 at t=5,
-    # latency 2 occupies residues 5%4=1 and 6%4=2 -> cells 1*4+1=5 and 1*4+2=6.
-    cells = []
+    # Match MappingState's pipeline-aware occupancy. SINGLE is exclusive;
+    # START conflicts only with another START; END conflicts only with another
+    # END; and IN can share with any non-SINGLE stage. Do not put all stages in
+    # one AllDifferent: a pipelined START/END overlap is legal, including an
+    # operation's own modulo overlap when latency exceeds II.
+    single_cells = []
+    start_cells = []
+    end_cells = []
+    pipeline_cells = []
     for i in range(num_ops):
         residue = model.NewIntVar(0, ii - 1, f"residue{i}")
         iteration = model.NewIntVar(0, max_time, f"iter{i}")
@@ -132,11 +161,29 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
             model.AddModuloEquality(occ_residue, residue + k, ii)
             cell = model.NewIntVar(0, (max(tile_ids) + 1) * ii, f"cell{i}_{k}")
             model.Add(cell == place[i] * ii + occ_residue)
-            cells.append(cell)
-    model.AddAllDifferent(cells)
+            if latency_i == 1:
+                single_cells.append(cell)
+            elif k == 0:
+                start_cells.append(cell)
+                pipeline_cells.append(cell)
+            elif k == latency_i - 1:
+                end_cells.append(cell)
+                pipeline_cells.append(cell)
+            else:
+                pipeline_cells.append(cell)
+    if single_cells:
+        model.AddAllDifferent(single_cells)
+    if start_cells:
+        model.AddAllDifferent(start_cells)
+    if end_cells:
+        model.AddAllDifferent(end_cells)
+    for single_cell in single_cells:
+        for pipeline_cell in pipeline_cells:
+            model.Add(single_cell != pipeline_cell)
     # Precedence/recurrence. hop is the place-dependent travel latency between the
     # producer and consumer tiles, pinned to the shortest-path table so the timing
-    # is exact. is_loop_carried (w=1) relaxes the bound by one II (next iteration).
+    # follows the selected shortest path. is_loop_carried (w=1) relaxes the bound
+    # by one II (next iteration).
     # Example: producer src on tile 0 issued at time 3 with latency 1, consumer
     # dst on tile 5 (2 hops away) -> time[dst] >= 3 + 1 + 2 = 6. If it were a
     # loop-carried edge (w=1, II=4) the value is consumed next iteration:
@@ -149,9 +196,9 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
         hop = model.NewIntVar(0, int(max_hop), "")
         # hop == hops[(place[src], place[dst])] via a table constraint listing
         # every reachable (src_tile, dst_tile, hop_count) triple.
-        allowed_hops = [[a, b, int(hops[(a, b)])]
-                        for a in tile_ids for b in tile_ids
-                        if hops[(a, b)] != float("inf")]
+        allowed_hops = [[src_tile, dst_tile, int(hops[(src_tile, dst_tile)])]
+                        for src_tile in tile_ids for dst_tile in tile_ids
+                        if hops[(src_tile, dst_tile)] != float("inf")]
         model.AddAllowedAssignments([place[src], place[dst], hop], allowed_hops)
         model.Add(issue_time[dst] >=
                   issue_time[src] + src_latency + hop - is_loop_carried * ii)
@@ -167,21 +214,20 @@ def schedule(data, ii, seconds, hops, minimize_routing=False):
             model.Add(makespan >= issue_time[i])
         model.Minimize(makespan * (int(max_hop) * len(edges) + 1) + sum(hop_vars))
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = seconds
-    # Deterministic: single worker + fixed seed (reproducible for tests).
-    solver.parameters.num_search_workers = 1
-    solver.parameters.random_seed = 0
+    configure_solver(solver, deterministic_time)
     status = solver.Solve(model)
-    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    outcome = solver_outcome(status)
+    if outcome == "feasible":
         return {i: (solver.Value(place[i]), solver.Value(issue_time[i]))
                 for i in range(num_ops)}
-    return None if status == cp_model.INFEASIBLE else "unknown"
+    return None if outcome == INFEASIBLE else outcome
 
 
-def route(data, sched, ii, seconds, want_routes=False):
+def route(data, sched, ii, deterministic_time, want_routes=False):
     """Stage 2: with placement+times fixed, find a modulo-feasible routing of
-    every value. Returns (feasible, routes). routes is None unless want_routes;
-    otherwise routes[(s,d)] is the concrete [(tile,cycle),...] path per edge."""
+    every value. Returns (feasible, routes, status). routes is None unless
+    want_routes; otherwise routes[(s,d)] is the concrete [(tile,cycle),...]
+    path per edge."""
     ops, edges, arch = data["ops"], data["edges"], data["arch"]
     tile_ids = [t["id"] for t in arch["tiles"]]
     num_regs = {t["id"]: t["regs"] for t in arch["tiles"]}
@@ -218,17 +264,22 @@ def route(data, sched, ii, seconds, want_routes=False):
     # limit the storage-count cap below misses, which is what makes a register-
     # routing hub fail to import. The regfile count is read straight from the arch
     # (emitted by --dump-dfg-json); older dumps without it fall back to regs/8
-    # (Architecture.cpp k_num_regs_per_regfile). We enforce it as a necessary
-    # condition: every value MOVING INTO a tile takes a write port, every value
-    # MOVING OUT takes a read port. (Conservative: an arrival consumed the same
-    # cycle need not persist, so this may slightly over-constrain, but it never
-    # lets the oracle claim a mapping the backend cannot realize.)
-    num_regfiles = {t["id"]: max(1, t.get("regfiles", t["regs"] // 8))
+    # (Architecture.cpp k_num_regs_per_regfile). We charge write/read ports at
+    # register-run boundaries; a bare link move does not use a register port.
+    num_regfiles = {t["id"]: t.get("regfiles", t["regs"] // 8)
                     for t in arch["tiles"]}
     link_use = collections.defaultdict(list)  # (link_key, residue) -> [bool]
     reg_use = collections.defaultdict(list)   # (tile, residue)     -> [bool]
-    write_port_use = collections.defaultdict(list)  # (tile, residue) -> [bool] in
-    read_port_use = collections.defaultdict(list)   # (tile, residue) -> [bool] out
+    # A register slot is owned by one producer net at one absolute cycle. This
+    # lets a direct local consumer share the same slot with a longer route from
+    # that producer without merging distinct live slots at the same residue.
+    register_slot_use = collections.defaultdict(list)
+    # Port candidates are consolidated per producer/tile/absolute slot below,
+    # so fan-out of one value can reuse its register address and port event.
+    write_port_candidates = collections.defaultdict(list)
+    read_port_candidates = collections.defaultdict(list)
+    write_port_use = collections.defaultdict(list)  # (tile, residue) -> [bool]
+    read_port_use = collections.defaultdict(list)   # (tile, residue) -> [bool]
     present_of = {}                           # producer -> {(tile,cycle): boolvar}
     # producer -> {(child_tile,child_cyc): [(kind, parent_node, boolvar)]}. Used
     # after solving to trace each consumer back to the producer (concrete route).
@@ -243,6 +294,7 @@ def route(data, sched, ii, seconds, want_routes=False):
         present = {(tile, cycle): model.NewBoolVar(f"pr{producer}_{tile}_{cycle}")
                    for tile in tile_ids for cycle in cycles}
         present_of[producer] = present
+        hold_vars = {}
         model.Add(present[(src_tile, start_cycle)] == 1)   # starts at producer
         for (cons_tile, deadline) in consumers:
             model.Add(present[(cons_tile, deadline)] == 1)  # present at consumer
@@ -259,8 +311,9 @@ def route(data, sched, ii, seconds, want_routes=False):
                     # link move below).
                     hold_var = model.NewBoolVar(f"hold{producer}_{tile}_{cycle}")
                     model.Add(present[(tile, cycle - 1)] == 1).OnlyEnforceIf(hold_var)
+                    model.Add(present[(tile, cycle)] == 1).OnlyEnforceIf(hold_var)
                     incoming.append(hold_var)
-                    reg_use[(tile, (cycle - 1) % ii)].append(hold_var)
+                    hold_vars[(tile, cycle)] = hold_var
                     arcs_of[producer][(tile, cycle)].append(
                         ("hold", (tile, cycle - 1), hold_var))
                     # link moves from neighbors into `tile` (arrive after latency)
@@ -273,42 +326,108 @@ def route(data, sched, ii, seconds, want_routes=False):
                                 model.Add(
                                     present[(neighbor, cycle - latency)] == 1
                                 ).OnlyEnforceIf(move_var)
+                                model.Add(present[(tile, cycle)] == 1).OnlyEnforceIf(
+                                    move_var)
                                 incoming.append(move_var)
                                 link_use[((neighbor, dst_tile),
                                           (cycle - latency) % ii)].append(move_var)
-                                # A move consumes a write port on the destination
-                                # (arrival residue) and a read port on the source
-                                # (departure residue).
-                                write_port_use[(tile, cycle % ii)].append(move_var)
-                                read_port_use[(neighbor,
-                                               (cycle - latency) % ii)].append(move_var)
                                 arcs_of[producer][(tile, cycle)].append(
                                     ("move", (neighbor, cycle - latency), move_var))
-                # present => at least one incoming arc chosen
-                model.Add(sum(incoming) >= 1).OnlyEnforceIf(present[(tile, cycle)])
+                # present => one incoming arc chosen. Besides making
+                # route reconstruction unambiguous, this prevents a net from
+                # charging multiple holds for the same occupied node.
+                model.Add(sum(incoming) == 1).OnlyEnforceIf(present[(tile, cycle)])
                 if not incoming:
                     model.Add(present[(tile, cycle)] == 0)
+        # A register run starts at the first selected hold and ends at the last
+        # selected hold. Only those two boundary slots use regfile ports; the
+        # intermediate holds consume storage but no port. H_(tile, cycle) is
+        # the register slot at `cycle - 1`, because it holds into `cycle`.
+        for (tile, cycle), hold_var in hold_vars.items():
+            absolute_slot = cycle - 1
+            register_slot_use[(producer, tile, absolute_slot)].append(hold_var)
+            previous_hold = hold_vars.get((tile, cycle - 1))
+            next_hold = hold_vars.get((tile, cycle + 1))
+            write_boundary = model.NewBoolVar(
+                f"write{producer}_{tile}_{absolute_slot}")
+            read_boundary = model.NewBoolVar(
+                f"read{producer}_{tile}_{absolute_slot}")
+            if previous_hold is None:
+                model.Add(write_boundary == hold_var)
+            else:
+                model.Add(write_boundary <= hold_var)
+                model.Add(write_boundary + previous_hold <= 1)
+                model.Add(write_boundary >= hold_var - previous_hold)
+            if next_hold is None:
+                model.Add(read_boundary == hold_var)
+            else:
+                model.Add(read_boundary <= hold_var)
+                model.Add(read_boundary + next_hold <= 1)
+                model.Add(read_boundary >= hold_var - next_hold)
+            port_key = (producer, tile, absolute_slot)
+            write_port_candidates[port_key].append(write_boundary)
+            read_port_candidates[port_key].append(read_boundary)
+        # A one-node route is a legal backend representation for a same-tile
+        # value transfer, but it still consumes one register slot. The slot is
+        # also charged with one write and one read at this cycle; with zero
+        # registers (or zero register files) the model therefore rejects it.
+        local_transfer = any(cons_tile == src_tile and deadline == start_cycle
+                             for cons_tile, deadline in consumers)
+        if local_transfer:
+            local_slot = model.NewBoolVar(
+                f"local{producer}_{src_tile}_{start_cycle}")
+            model.Add(local_slot == 1)
+            absolute_slot = start_cycle
+            register_slot_use[(producer, src_tile, absolute_slot)].append(
+                local_slot)
+            port_key = (producer, src_tile, absolute_slot)
+            write_port_candidates[port_key].append(local_slot)
+            read_port_candidates[port_key].append(local_slot)
+    # Consolidate hold arcs and direct local transfers of one producer net into
+    # one physical register slot per absolute cycle.
+    for (producer, tile, absolute_slot), uses in register_slot_use.items():
+        slot = model.NewBoolVar(f"regslot{producer}_{tile}_{absolute_slot}")
+        for use in uses:
+            model.Add(slot >= use)
+        model.Add(slot <= sum(uses))
+        reg_use[(tile, absolute_slot % ii)].append(slot)
+    # Merge boundary events belonging to the same producer net and absolute
+    # slot. A direct local edge and a longer fan-out route may use the same
+    # register and therefore the same physical port event.
+    for (producer, tile, absolute_slot), uses in write_port_candidates.items():
+        boundary = model.NewBoolVar(
+            f"writeport{producer}_{tile}_{absolute_slot}")
+        for use in uses:
+            model.Add(boundary >= use)
+        model.Add(boundary <= sum(uses))
+        write_port_use[(tile, absolute_slot % ii)].append(boundary)
+    for (producer, tile, absolute_slot), uses in read_port_candidates.items():
+        boundary = model.NewBoolVar(
+            f"readport{producer}_{tile}_{absolute_slot}")
+        for use in uses:
+            model.Add(boundary >= use)
+        model.Add(boundary <= sum(uses))
+        read_port_use[(tile, absolute_slot % ii)].append(boundary)
     # Modulo resources: a link carries one net-move per residue; a tile holds no
     # more values per residue than it has registers.
     for key, bool_vars in link_use.items():
         model.Add(sum(bool_vars) <= 1)          # one net-move per (link, residue)
     for (tile, residue), bool_vars in reg_use.items():
-        model.Add(sum(bool_vars) <= max(1, num_regs[tile]))  # storage capacity
-    # Regfile port limits (see num_regfiles above): writes-in / reads-out per
-    # modulo slot cannot exceed the tile's regfile count.
+        model.Add(sum(bool_vars) <= num_regs[tile])  # storage capacity
+    # Regfile port limits (see num_regfiles above): register-run boundaries per
+    # modulo slot cannot exceed the tile's regfile count. Bare link moves do not
+    # use a register port.
     for (tile, residue), bool_vars in write_port_use.items():
         model.Add(sum(bool_vars) <= num_regfiles[tile])
     for (tile, residue), bool_vars in read_port_use.items():
         model.Add(sum(bool_vars) <= num_regfiles[tile])
     solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = seconds
-    # Deterministic: single worker + fixed seed (reproducible for tests).
-    solver.parameters.num_search_workers = 1
-    solver.parameters.random_seed = 0
+    configure_solver(solver, deterministic_time)
     status = solver.Solve(model)
-    feasible = status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+    outcome = solver_outcome(status)
+    feasible = outcome == "feasible"
     if not want_routes or not feasible:
-        return (feasible, None)
+        return (feasible, None, outcome)
 
     # Reconstruct the concrete route of every edge: trace each consumer node
     # back to the producer through the chosen arcs. routes[(s,d)] = ordered list
@@ -342,7 +461,7 @@ def route(data, sched, ii, seconds, want_routes=False):
         path = trace(src, (sched[dst][0], deadline))
         if path is not None:
             routes[(src, dst)] = path
-    return (feasible, routes)
+    return (feasible, routes, outcome)
 
 
 def emit_mapping(data, sched, ii, path, routes=None):
@@ -368,7 +487,7 @@ def emit_mapping(data, sched, ii, path, routes=None):
         # Concrete per-edge route: producer -> consumer as an ordered list of
         # [tile, cycle] hops (consecutive different tiles => a link move; same
         # tile across cycles => a register hold). The backend importer replays
-        # exactly this path instead of greedily re-routing, so it reproduces the
+        # selected path instead of greedily re-routing, so it reproduces the
         # solver's joint routing even on large kernels.
         out["routes"] = [{"s": src, "d": dst,
                           "path": [[tile, cycle] for (tile, cycle) in routes[(src, dst)]]}
@@ -380,61 +499,65 @@ def emit_mapping(data, sched, ii, path, routes=None):
 
 
 def main():
-    # Driver: climb II from min to max; the first II whose schedule AND routing
-    # are both feasible is the answer. --emit writes that mapping; --fallback and
-    # --emit-cap trade a possibly-larger II for a bounded solve time (see below).
+    # Driver: climb II from min to max and report the first concrete witness
+    # found under the deterministic solve budget. --emit writes that mapping;
+    # --fallback is retained as a compatibility flag; bounded retries are the
+    # normal ladder behavior.
     ap = argparse.ArgumentParser()
     ap.add_argument("json")
     ap.add_argument("--min-ii", type=int, default=1)
     ap.add_argument("--max-ii", type=int, default=0)
-    ap.add_argument("--seconds", type=float, default=30.0)
+    ap.add_argument("--deterministic-time", type=float, default=None,
+                    help="CP-SAT deterministic work budget per stage (default: 30).")
+    ap.add_argument("--seconds", type=float, default=None,
+                    help="Deprecated alias for --deterministic-time.")
     ap.add_argument("-v", action="store_true")
     ap.add_argument("--emit", default=None,
                     help="Write the concrete placement+schedule mapping to JSON.")
     ap.add_argument("--fallback", action="store_true",
-                    help="Unified mode: if the schedule times out (or does not "
-                         "route) within the solve budget at this II, back off "
-                         "to II+1 and retry, instead of giving up. Yields the "
-                         "smallest II for which a real, routable mapping is "
-                         "actually found within budget (>= the true minimum).")
-    ap.add_argument("--minimize-routing", dest="mr", action="store_true",
+                    help="Deprecated compatibility flag; the II ladder always "
+                         "retries an infeasible or budget-exhausted stage.")
+    ap.add_argument("--minimize-routing", dest="minimize_routing",
+                    action="store_true",
                     default=None,
-                    help="Bias stage 1 toward a router-friendly placement (mr). "
-                         "Without it stage 1 ignores routability, so at a tight "
-                         "II it hands stage 2 a placement that cannot be routed "
-                         "and the II is rejected -- even though another "
-                         "placement at that II would route. Measured: "
-                         "relu_tiled_20 on the graph-isomorphic shapes 8x2 and "
-                         "2x8 (same tiles, links and mean hops) comes back 3 and "
-                         "2, reproducibly and with no timeouts, purely from "
-                         "which placement stage 1 happened to return. On by "
-                         "default; --no-minimize-routing trades that accuracy "
-                         "for speed.")
-    ap.add_argument("--no-minimize-routing", dest="mr", action="store_false",
-                    help="Skip the router-friendly bias. Faster, and reports an "
-                         "II that may be above the optimum for the reason above.")
-    ap.add_argument("--emit-cap", type=float, default=12.0,
-                    help="When emitting, cap each per-II solve at this many "
-                         "seconds. We only need a compact, ROUTABLE witness, "
-                         "not a proven-optimal makespan, and the compact "
-                         "solution is found early -- the long tail is just the "
-                         "solver proving minimality. Keeps emit fast.")
+                    help="Bias stage 1 toward a router-friendly placement. "
+                         "Enabled by default when emitting a witness.")
+    ap.add_argument("--no-minimize-routing", dest="minimize_routing",
+                    action="store_false",
+                    help="Skip the router-friendly bias. Faster, but one witness "
+                         "may be harder for the backend router to reproduce.")
+    ap.add_argument("--emit-deterministic-time", type=float, default=None,
+                    help="Per-stage deterministic budget while emitting (default: 12).")
+    ap.add_argument("--emit-cap", type=float, default=None,
+                    help="Deprecated alias for --emit-deterministic-time.")
     a = ap.parse_args()
+    if a.deterministic_time is not None and a.seconds is not None:
+        ap.error("use only one of --deterministic-time and deprecated --seconds")
+    if a.emit_deterministic_time is not None and a.emit_cap is not None:
+        ap.error("use only one of --emit-deterministic-time and deprecated --emit-cap")
+    deterministic_time = (a.deterministic_time if a.deterministic_time is not None
+                          else a.seconds if a.seconds is not None else 30.0)
+    emit_deterministic_time = (a.emit_deterministic_time
+                               if a.emit_deterministic_time is not None else
+                               a.emit_cap if a.emit_cap is not None else 12.0)
+    if a.seconds is not None:
+        print("[deprecated] --seconds is an alias for --deterministic-time; "
+              "the value is a deterministic work budget", file=sys.stderr)
+    if a.emit_cap is not None:
+        print("[deprecated] --emit-cap is an alias for "
+              "--emit-deterministic-time", file=sys.stderr)
+    if deterministic_time <= 0 or emit_deterministic_time <= 0:
+        ap.error("deterministic budgets must be positive")
     data = json.load(open(a.json))
     hops = shortest_hops(data["arch"])
     max_ii = a.max_ii or data["arch"]["ctrl_mem_items"]
     # When emitting a mapping for the backend, prefer low-hop (router-friendly)
-    # placements so the greedy per-net router can reproduce them. We do NOT need
-    # to prove the makespan optimal (the compact witness appears early), so cap
-    # the per-solve time to avoid the optimality-proving tail.
-    # Unset leaves the historical behaviour exactly as it was -- on for --emit,
-    # off otherwise -- so every existing caller and every committed
-    # *.exact-mapping.json is reproduced bit for bit. Callers that use this as a
-    # VERIFIER should pass --minimize-routing: for them the bias is not a
-    # convenience for the backend router, it is what stops a tight II being
-    # rejected on the strength of one unroutable placement.
-    minimize_routing = bool(a.emit) if a.mr is None else a.mr
-    solve_seconds = min(a.seconds, a.emit_cap) if a.emit else a.seconds
+    # placements so the greedy per-net router can reproduce them. A separate
+    # deterministic cap keeps witness generation bounded.
+    minimize_routing = (bool(a.emit) if a.minimize_routing is None
+                        else a.minimize_routing)
+    solve_budget = (min(deterministic_time, emit_deterministic_time)
+                    if a.emit else deterministic_time)
     # An op whose FU class no tile provides cannot be placed at ANY II, so say so
     # once instead of proving every II infeasible. Reported with the same
     # "> max_ii" verdict the II sweep uses when nothing fits this shape, which is
@@ -443,35 +566,39 @@ def main():
     if missing:
         print(f"[infeasible] no tile provides fu class(es): {', '.join(missing)}",
               file=sys.stderr)
-        print(f"{'MAPPED_II' if a.fallback else 'TRUE_MIN_II'} > {max_ii}")
+        print(f"NO_MAPPED_II_WITHIN_BUDGET (through II={max_ii})")
         return
     for ii in range(a.min_ii, max_ii + 1):
-        sched = schedule(data, ii, solve_seconds, hops, minimize_routing)
+        sched = schedule(data, ii, solve_budget, hops, minimize_routing)
         if sched is None:
             if a.v: print(f"  II={ii}: schedule infeasible", file=sys.stderr)
-            continue                            # II provably too small; try II+1
-        if sched == "unknown":
-            # Solver could not settle this II within the time budget.
-            if a.fallback:
-                if a.v: print(f"  II={ii}: schedule timeout, backing off to "
-                              f"II+1", file=sys.stderr)
-                continue
-            print(f"TRUE_MIN_II >= {ii} (schedule timeout)"); return
-        ok, routes = route(data, sched, ii, solve_seconds,
-                           want_routes=bool(a.emit))
-        if a.v: print(f"  II={ii}: schedule OK, routing={'OK' if ok else 'FAIL'}",
-                      file=sys.stderr)
+            continue                            # Try the next II.
+        if sched == BUDGET_EXHAUSTED:
+            # The solver could not settle this II within the deterministic
+            # budget. This is deliberately treated as a reason to try II+1,
+            # not as evidence about the minimum II.
+            if a.v: print(f"  II={ii}: schedule budget exhausted, backing "
+                          f"off to II+1", file=sys.stderr)
+            continue
+        if sched == SOLVER_ERROR:
+            print(f"  II={ii}: schedule solver error; aborting", file=sys.stderr)
+            return 2
+        ok, routes, route_status = route(data, sched, ii, solve_budget,
+                                         want_routes=bool(a.emit))
+        if a.v:
+            print(f"  II={ii}: schedule OK, routing={route_status.upper()}",
+                  file=sys.stderr)
+        if route_status == SOLVER_ERROR:
+            print(f"  II={ii}: routing solver error; aborting", file=sys.stderr)
+            return 2
         if ok:
-            # In fallback mode this II may be above the proven minimum, so the
-            # tag reflects "found within budget" rather than "proven optimal".
-            tag = ("MAPPED_II" if a.fallback else "TRUE_MIN_II")
-            print(f"{tag} = {ii} (placement+schedule+routing all feasible)")
+            print(f"MAPPED_II = {ii} (placement+schedule+routing witness)")
             if a.emit:
                 emit_mapping(data, sched, ii, a.emit, routes)
             return
-        # else: this schedule did not route; try II+1 (conservative).
-    print(f"{'MAPPED_II' if a.fallback else 'TRUE_MIN_II'} > {max_ii}")
+        # This schedule did not route (infeasible or budget exhausted); try II+1.
+    print(f"NO_MAPPED_II_WITHIN_BUDGET (through II={max_ii})")
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main() or 0)

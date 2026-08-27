@@ -372,6 +372,35 @@ struct MapToAcceleratorPass
                       llvm::DenseMap<int, Tile *> &tile_by_id,
                       MappingState &mapping_state, neura::DataMovOp mov_op,
                       std::vector<MappingLoc> &out_path) {
+    if (hops.empty()) {
+      llvm::errs() << "[MapToAcceleratorPass] cannot reserve an empty route\n";
+      return false;
+    }
+
+    // A one-node route is an immediate same-tile value transfer. It still
+    // needs a local register mapping: GenerateCodePass uses that register to
+    // wire the consumer, and an empty resource path leaves it unresolved.
+    if (hops.size() == 1) {
+      auto tile_it = tile_by_id.find(hops.front().tile);
+      if (tile_it == tile_by_id.end()) {
+        llvm::errs() << "[MapToAcceleratorPass] route references tile "
+                     << hops.front().tile << " not in architecture\n";
+        return false;
+      }
+      Register *reg = getAvailableRegister(mapping_state, tile_it->second,
+                                           hops.front().cycle,
+                                           hops.front().cycle + 1, mov_op);
+      if (!reg) {
+        llvm::errs() << "[MapToAcceleratorPass] no free register on tile "
+                     << hops.front().tile
+                     << " for immediate same-tile route at t="
+                     << hops.front().cycle << "\n";
+        return false;
+      }
+      out_path.push_back(MappingLoc{reg, hops.front().cycle});
+      return true;
+    }
+
     size_t hop_idx = 0;
     while (hop_idx + 1 < hops.size()) {
       if (hops[hop_idx].tile == hops[hop_idx + 1].tile) {
@@ -490,9 +519,13 @@ struct MapToAcceleratorPass
                           dyn_cast<neura::DataMovOp>(mov), path)) {
         return false;
       }
-      if (!path.empty()) {
-        mapping_state.reserveRoute(mov, path);
+      if (path.empty()) {
+        llvm::errs() << "[MapToAcceleratorPass] imported route " << producer_idx
+                     << "->" << consumer_idx
+                     << " produced no reservable resources\n";
+        return false;
       }
+      mapping_state.reserveRoute(mov, path);
       return true;
     };
     for (size_t i = 0; i < materialized.size(); ++i) {
