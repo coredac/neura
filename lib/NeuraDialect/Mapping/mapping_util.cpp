@@ -292,8 +292,8 @@ mlir::neura::collectRecurrenceCycles(Region &region) {
   return recurrence_cycles;
 }
 
-int mlir::neura::calculateResourceMii(Region &region,
-                                      const Architecture &architecture) {
+int mlir::neura::calculateResMii(Region &region,
+                                 const Architecture &architecture) {
   int num_ops = 0;
 
   // Count all "compute" operations (non-terminators, non-block ops).
@@ -311,8 +311,7 @@ int mlir::neura::calculateResourceMii(Region &region,
     ++num_ops;
   });
 
-  llvm::errs() << "[calculateResourceMii] Total operations: " << num_ops
-               << "\n";
+  llvm::errs() << "[calculateResMii] Total operations: " << num_ops << "\n";
 
   // Avoid divide-by-zero
   int num_tiles = std::max(1, architecture.getNumTiles());

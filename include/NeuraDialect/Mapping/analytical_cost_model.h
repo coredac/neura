@@ -44,7 +44,7 @@ struct AnalyticalIIBreakdown {
   IIBound mem;     // MemMII   — load/store port + memory-FU contention.
   IIBound route;   // RouteMII — routed edge demand vs link capacity.
   IIBound reg; // RegMII   — simultaneously-live values vs register capacity.
-  IIBound resource; // ResourceMII — tile issue-slot occupancy.
+  IIBound resource; // ResMII — tile issue-slot occupancy.
 
   int final_ii = 1;     // clamp(max(all bounds), 1, max_ii).
   int max_ii = 0;       // architecture II ceiling (ctrl_mem_items).
@@ -69,11 +69,9 @@ struct AnalyticalIIBreakdown {
 //   )
 IIBound calculateComputeMiiPerClass(Region &region, const Architecture &arch);
 
-// RecMII: for every loop-carried recurrence cycle (reserve -> ... -> ctrl_mov),
-// sums the execution latency of the materialized ops on the cycle and divides
-// by the dependence distance (1 for a single reserve/ctrl_mov pair in this IR).
-//   RecMII = max_cycle ceil( sum_latency(cycle) / distance(cycle) )
-IIBound calculateRecMiiWeighted(Region &region, const Architecture &arch);
+// RecMII: the maximum recurrence length reported by the mapper's shared
+// collectRecurrenceCycles helper.
+IIBound calculateRecMiiBound(Region &region, const Architecture &arch);
 
 // MemMII: load/store demand against the tiles that provide memory FUs.
 //   MemMII = max( ceil(mem_ops / #mem_tiles),
@@ -90,12 +88,6 @@ IIBound calculateRouteMii(Region &region, const Architecture &arch);
 // against the total register capacity of the array.
 //   RegMII = ceil( max_level(#live values) / sum_tiles(#registers) )
 IIBound calculateRegMii(Region &region, const Architecture &arch);
-
-// ResourceMII: total placed-op issue slots against total tile issue
-// bandwidth (1 issue / tile / cycle here). Coincides with the crude
-// ceil(#ops / #tiles) baseline and is kept separate so multi-issue tiles are
-// expressible.
-IIBound calculateResourceMiiBound(Region &region, const Architecture &arch);
 
 // Computes all bounds and combines them into the final prediction.
 AnalyticalIIBreakdown computeAnalyticalII(Region &region,

@@ -616,7 +616,7 @@ struct MapToAcceleratorPass
     llvm::errs() << "[MapToAcceleratorPass] Calculated Recurrence MII: "
                  << rec_mii << "\n";
 
-    int res_mii = calculateResourceMii(region, architecture);
+    int res_mii = calculateResMii(region, architecture);
 
     const int possible_min_ii = std::max(rec_mii, res_mii);
     const int max_ii = architecture.getMaxCtrlMemItems();

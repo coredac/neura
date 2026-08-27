@@ -52,8 +52,8 @@ struct RecurrenceCycle {
 // Collects recurrence cycles rooted at reserve and closed by ctrl_mov.
 SmallVector<RecurrenceCycle, 4> collectRecurrenceCycles(Region &region);
 
-// Calculates ResourceMII: ceil(#ops / #tiles).
-int calculateResourceMii(Region &region, const Architecture &architecture);
+// Calculates ResMII: ceil(#ops / #tiles).
+int calculateResMii(Region &region, const Architecture &architecture);
 
 // Returns topologically sorted operations in region.
 std::vector<Operation *> getTopologicallySortedOps(Region &region);
