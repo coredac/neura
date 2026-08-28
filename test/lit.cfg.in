@@ -21,10 +21,25 @@ config.substitutions.append(('clang', '@CLANG@'))
 config.neura_python = '@NEURA_PYTHON_EXECUTABLE@'
 config.substitutions.append(('%neura_python', config.neura_python))
 
+
+def _python_has_module(module):
+    return subprocess.run(
+        [config.neura_python, '-c', f'import {module}'],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    ).returncode == 0
+
+# E2E RUN lines use llvm-extract without a substitution.  Make that resolve to
+# the LLVM toolchain used to build Neura, rather than an arbitrary system LLVM
+# which may not parse the IR produced by this build.
+config.environment['PATH'] = ('@LLVM_TOOLS_BINARY_DIR@' + os.pathsep +
+                              config.environment['PATH'])
+
 # CP-SAT analytical mapping is an optional e2e dependency.  A configured
 # interpreter keeps the test hermetic; machines without OR-Tools explicitly
 # skip the analytical cases instead of accidentally using an arbitrary
 # `python3` from PATH.
-if subprocess.run([config.neura_python, '-c', 'import ortools'],
-                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+if _python_has_module('ortools'):
     config.available_features.add('neura-ortools')
+if _python_has_module('torch_mlir'):
+    config.available_features.add('neura-torch-mlir')

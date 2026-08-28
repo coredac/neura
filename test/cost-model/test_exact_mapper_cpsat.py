@@ -48,6 +48,28 @@ def test_source_uses_a_deterministic_budget_and_honest_verdict_names():
     assert "dest=\"mr\"" not in source
 
 
+def test_route_node_limit_matches_the_joint_model_vertex_shape():
+    mapper = load_mapper()
+    arch = {
+        "tiles": [
+            {"id": 0, "x": 0, "y": 0, "regs": 1, "regfiles": 1},
+            {"id": 1, "x": 1, "y": 0, "regs": 1, "regfiles": 1},
+        ],
+        "links": [[0, 1, 1], [1, 0, 1]],
+        "fu_class_tiles": {"pipe": [0, 1]},
+        "num_tiles": 2,
+        "ctrl_mem_items": 8,
+    }
+    data = make_data(
+        [{"class": "pipe", "latency": 1} for _ in range(3)],
+        edges=[{"s": 0, "d": 1, "w": 0}, {"s": 0, "d": 2, "w": 0}],
+        arch=arch)
+    # One producer x two tiles x (horizon + one) vertices. Fan-out shares the
+    # producer net, exactly as joint_solve's `present_of` map does.
+    assert mapper.estimate_route_nodes(data, 2) == 16
+    assert mapper.estimate_route_nodes(data, 3) > mapper.estimate_route_nodes(data, 2)
+
+
 def test_pipeline_start_end_overlap_is_allowed():
     mapper = load_mapper()
     data = make_data([{"class": "pipe", "latency": 2},

@@ -23,7 +23,7 @@ Input dfg.json (from --dump-dfg-json): ops[{class,latency}], edges[{s,d,w}]
 fu_class_tiles{class:[tile ids]}, num_tiles, ctrl_mem_items}.
 
 Usage: exact_mapper_cpsat.py dfg.json [--max-ii N]
-       [--deterministic-time T] [-v] [--emit out.json]
+       [--deterministic-time T] [--max-route-nodes N] [-v] [--emit out.json]
 """
 import argparse
 import collections
@@ -786,6 +786,27 @@ def emit_mapping(data, sched, ii, path, routes=None):
           f"II={ii}) -> {path}", file=sys.stderr)
 
 
+def estimate_route_nodes(data, ii):
+    """Count the time-expanded routing vertices before constructing CP-SAT.
+
+    This is an input-derived limit, not a wall-clock timeout: the joint model
+    creates one vertex for every producer/tile/cycle combination.  Bounding it
+    keeps a large DFG from spending unbounded host time merely constructing a
+    model that the configured solver budget cannot use.
+    """
+    ops, edges, arch = data["ops"], data["edges"], data["arch"]
+    max_hop = max((h for h in shortest_hops(arch).values()
+                   if h != float("inf")), default=0)
+    max_latency = max((max(1, op["latency"]) for op in ops), default=1)
+    max_omega = max((edge["w"] for edge in edges), default=0)
+    horizon = (compact_schedule_horizon(ops, ii, int(max_hop)) +
+               max_latency + max_omega * ii)
+    # joint_solve creates `present` literals once for every producer with at
+    # least one consumer; fan-out does not duplicate this vertex set.
+    producers = len({edge["s"] for edge in edges})
+    return producers * len(arch["tiles"]) * (horizon + 1)
+
+
 def main():
     # Driver: climb II from min to max and report the first concrete witness
     # found under the deterministic solve budget. --emit writes that mapping;
@@ -797,6 +818,8 @@ def main():
     ap.add_argument("--max-ii", type=int, default=0)
     ap.add_argument("--deterministic-time", type=float, default=None,
                     help="CP-SAT deterministic work budget per II (default: 12).")
+    ap.add_argument("--max-route-nodes", type=int, default=50000,
+                    help="Maximum time-expanded route nodes to construct (default: 50000).")
     ap.add_argument("--seconds", type=float, default=None,
                     help="Deprecated alias for --deterministic-time.")
     ap.add_argument("-v", action="store_true")
@@ -815,6 +838,8 @@ def main():
               "the value is a deterministic work budget", file=sys.stderr)
     if deterministic_time <= 0:
         ap.error("deterministic budgets must be positive")
+    if a.max_route_nodes <= 0:
+        ap.error("max-route-nodes must be positive")
     data = json.load(open(a.json))
     hops = shortest_hops(data["arch"])
     max_ii = a.max_ii or data["arch"]["ctrl_mem_items"]
@@ -832,9 +857,24 @@ def main():
               file=sys.stderr)
         print(f"NO_MAPPED_II_WITHIN_BUDGET (through II={max_ii})")
         return
+    print(f"[cpsat] trying II={a.min_ii}..{max_ii}, "
+          f"deterministic_work={deterministic_time}, "
+          f"max_route_nodes={a.max_route_nodes}", file=sys.stderr)
     for ii in range(a.min_ii, max_ii + 1):
+        route_nodes = estimate_route_nodes(data, ii)
+        if route_nodes > a.max_route_nodes:
+            print(f"[model-limit] II={ii}: route_nodes={route_nodes} exceeds "
+                  f"max_route_nodes={a.max_route_nodes}", file=sys.stderr)
+            # The horizon is monotonic in II, so larger II values cannot satisfy
+            # this structural limit either.  Report that explicitly instead of
+            # implying the unbuilt candidates were solved.
+            print(f"NO_MAPPED_II_WITHIN_BUDGET (model limit at II={ii})")
+            return
+        print(f"[cpsat] II={ii}: route_nodes={route_nodes}; building joint model",
+              file=sys.stderr)
         ok, sched, routes, route_status = joint_solve(
             data, ii, solve_budget, want_routes=bool(a.emit))
+        print(f"[cpsat] II={ii}: {route_status}", file=sys.stderr)
         if a.v:
             print(f"  II={ii}: joint placement/schedule/routing="
                   f"{route_status.upper()}",

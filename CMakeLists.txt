@@ -77,7 +77,7 @@ configure_file(
 
 # Adds a custom target for running lit tests
 add_custom_target(check-neura
-  COMMAND ${LLVM_EXTERNAL_LIT} -sv ${CMAKE_BINARY_DIR}/test
+  COMMAND ${LLVM_DEFAULT_EXTERNAL_LIT} -sv ${CMAKE_SOURCE_DIR}/test
   DEPENDS mlir-neura-opt
   WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
   COMMENT "Running Sora Dialect Tests with lit"

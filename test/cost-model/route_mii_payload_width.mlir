@@ -6,7 +6,7 @@
 // treating !neura.data<i64, i1> as opaque would incorrectly report 25 and 1.
 
 module {
-  func.func @route_mii_uses_payload_width() {
+  func.func @route_mii_uses_payload_width() attributes {accelerator = "neura"} {
     %initial = "neura.grant_once"() <{constant_value = 0 : i64}> : () -> !neura.data<i64, i1>
     %move0 = "neura.data_mov"(%initial) : (!neura.data<i64, i1>) -> !neura.data<i64, i1>
     %move1 = "neura.data_mov"(%move0) : (!neura.data<i64, i1>) -> !neura.data<i64, i1>

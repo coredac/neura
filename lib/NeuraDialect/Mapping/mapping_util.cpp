@@ -128,6 +128,8 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
     return FAddFAdd;
   if (isa<neura::FMulFAddOp>(op))
     return FMulFAdd;
+  if (isa<neura::MulAddOp>(op))
+    return IMulAdd;
 
   // Control flow operations
   if (isa<neura::ReturnOp>(op))
@@ -168,7 +170,7 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
 bool is_non_materialized(Operation *op) {
   // Returns true if the operation does not need CGRA tile placement.
   return mlir::isa<neura::ReserveOp, neura::CtrlMovOp, neura::DataMovOp,
-                   neura::YieldOp>(op);
+                   neura::YieldOp, neura::FusedOp>(op);
 }
 
 // Returns true if the op occupies a tile/FU (i.e. must be placed), as opposed
@@ -179,7 +181,7 @@ bool is_non_materialized(Operation *op) {
 // definition -- if the two ever diverge, placements bind to the wrong ops.
 //
 // This is STRICTER than !is_non_materialized: that predicate only screens the
-// four routing/placeholder mov ops, whereas occupiesFU additionally rejects
+// routing/placeholder ops and fused containers, whereas occupiesFU additionally rejects
 // container ops (func/module/kernel) and fused-region interior ops. So the two
 // are deliberately NOT logical complements -- do not replace calls with a
 // negation of is_non_materialized.
@@ -187,7 +189,7 @@ bool occupiesFU(Operation *op) {
   if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(op)) {
     return false;
   }
-  if (is_non_materialized(op)) { // reserve / data_mov / ctrl_mov / yield
+  if (is_non_materialized(op)) { // routing/structural ops and fused containers
     return false;
   }
   if (Operation *parent = op->getParentOp()) {
@@ -503,19 +505,12 @@ int mlir::neura::calculateRecMii(Region &region) {
 int mlir::neura::calculateResMiiDemand(Region &region) {
   int num_ops = 0;
 
-  // Count all "compute" operations (non-terminators, non-block ops).
+  // Count exactly the operations that consume a physical FU. This is shared
+  // with exact-mapper export/import and excludes structural fused containers.
   region.walk([&](Operation *op) {
-    // Skips non-materialized ops.
-    if (isa<func::FuncOp>(op) ||
-        isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op)) {
-      return;
+    if (occupiesFU(op)) {
+      ++num_ops;
     }
-    // Skips operations inside fused_op regions
-    Operation *parent_op = op->getParentOp();
-    if (isa<neura::FusedOp>(parent_op)) {
-      return;
-    }
-    ++num_ops;
   });
 
   return num_ops;
@@ -1113,6 +1108,9 @@ Operation *mlir::neura::getMaterializedProducer(Value operand) {
       "Expected a DataMovOp as operand producer for non-ReserveOp operations");
   neura::DataMovOp mov_op = dyn_cast<neura::DataMovOp>(producer);
   Operation *materialized_producer = mov_op.getOperand().getDefiningOp();
+  assert(materialized_producer && occupiesFU(materialized_producer) &&
+         "DataMovOp source must be physically materialized; lower FusedOp "
+         "before mapping");
   return materialized_producer;
 }
 
@@ -1233,9 +1231,6 @@ bool mlir::neura::isMaterializedReserveUser(Operation *user) {
     return true;
   }
   if (isa<neura::CarryOp>(user)) {
-    return true;
-  }
-  if (isa<neura::FusedOp>(user)) {
     return true;
   }
   if (isa<neura::PhiStartOp>(user)) {

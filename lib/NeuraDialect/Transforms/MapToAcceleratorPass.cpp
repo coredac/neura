@@ -67,6 +67,99 @@ void canonicalizeDataLayoutSpec(ModuleOp module) {
                   DataLayoutSpecAttr::get(module.getContext(), entries));
 }
 
+// Generic FusedOp is graph-mining IR, not an architecture resource. Inline it
+// before physical mapping so every DataMov source is an operation that can
+// receive a real FU/tile binding. A composite-FU contract would be a separate
+// representation; never infer one from a fused pattern name here.
+bool inlineFusedOpsForPhysicalMapping(Region &region) {
+  SmallVector<neura::FusedOp> fused_ops;
+  region.walk([&](neura::FusedOp fused_op) { fused_ops.push_back(fused_op); });
+
+  // Lower nested patterns into their parent patterns before lowering the
+  // parent into the mapped region.
+  (void)llvm::reverse(fused_ops);
+  for (neura::FusedOp fused_op : fused_ops) {
+    Region &body = fused_op.getBody();
+    assert(llvm::hasSingleElement(body) &&
+           "FusedOp must have exactly one body block before mapping");
+    Block &body_block = body.front();
+    auto yield = dyn_cast<neura::YieldOp>(body_block.getTerminator());
+    assert(yield &&
+           "FusedOp body must terminate with neura.yield before mapping");
+    assert(fused_op->getNumOperands() == body_block.getNumArguments() &&
+           "FusedOp body arguments must correspond to its inputs");
+    assert(fused_op->getNumResults() == yield.getNumOperands() &&
+           "FusedOp results must correspond to its yielded values");
+
+    for (unsigned i = 0; i < body_block.getNumArguments(); ++i) {
+      body_block.getArgument(i).replaceAllUsesWith(fused_op->getOperand(i));
+    }
+
+    SmallVector<Value> yielded_values(yield.getOperands().begin(),
+                                      yield.getOperands().end());
+    SmallVector<Operation *> body_operations;
+    for (Operation &body_op : body_block) {
+      if (&body_op != yield.getOperation()) {
+        body_operations.push_back(&body_op);
+      }
+    }
+    yield.erase();
+    for (Operation *body_op : body_operations) {
+      body_op->moveBefore(fused_op);
+    }
+    fused_op->replaceAllUsesWith(yielded_values);
+    fused_op->erase();
+  }
+  return !fused_ops.empty();
+}
+
+// InsertDataMovPass intentionally leaves fused bodies untouched. Once those
+// bodies are inlined above, make their direct inputs explicit transport edges
+// before the mapper asks every non-reserve operand for a routed producer.
+void wrapInlinedFusedOperandsForPhysicalMapping(Region &region) {
+  SmallVector<Operation *> operations;
+  region.walk([&](Operation *operation) {
+    if (occupiesFU(operation)) {
+      operations.push_back(operation);
+    }
+  });
+
+  for (Operation *operation : operations) {
+    OpBuilder builder(operation);
+    for (unsigned i = 0; i < operation->getNumOperands(); ++i) {
+      Value operand = operation->getOperand(i);
+      Operation *producer = operand.getDefiningOp();
+      if (isa_and_nonnull<neura::DataMovOp, neura::ReserveOp>(producer)) {
+        continue;
+      }
+      auto move = builder.create<neura::DataMovOp>(
+          operation->getLoc(), operand.getType(), operand);
+      operation->setOperand(i, move);
+    }
+  }
+}
+
+// Routing reserves locations per DataMovOp. A fused block argument can fan out
+// after inlining even though its incoming DataMovOp was formerly consumed once
+// by the FusedOp container, so give each physical consumer its own transport
+// edge rather than reusing one routed edge.
+void splitSharedDataMovUsesForPhysicalMapping(Region &region) {
+  SmallVector<neura::DataMovOp> moves;
+  region.walk([&](neura::DataMovOp move) { moves.push_back(move); });
+  for (neura::DataMovOp move : moves) {
+    SmallVector<OpOperand *> uses;
+    for (OpOperand &use : move.getResult().getUses()) {
+      uses.push_back(&use);
+    }
+    for (auto *use : llvm::drop_begin(uses)) {
+      OpBuilder builder(use->getOwner());
+      auto copy = builder.create<neura::DataMovOp>(
+          move->getLoc(), move.getResult().getType(), move.getOperand());
+      use->set(copy);
+    }
+  }
+}
+
 struct MapToAcceleratorPass
     : public PassWrapper<MapToAcceleratorPass, OperationPass<ModuleOp>> {
   MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(MapToAcceleratorPass)
@@ -146,6 +239,11 @@ struct MapToAcceleratorPass
       *this, "python-executable",
       llvm::cl::desc("Python executable used by mapping-strategy=analytical."),
       llvm::cl::init("python3")};
+  Option<int> cpSatMaxRouteNodes{
+      *this, "cpsat-max-route-nodes",
+      llvm::cl::desc("Maximum time-expanded routing vertices constructed by "
+                     "analytical mapping (default: 50000)."),
+      llvm::cl::init(50000)};
 
   // Configures mapping strategy and mode based on command-line options.
   bool configureMappingStrategy(StringRef mapping_strategy_opt,
@@ -397,6 +495,7 @@ struct MapToAcceleratorPass
 
     std::string min_ii_arg = std::to_string(min_ii);
     std::string max_ii_arg = std::to_string(max_ii);
+    std::string max_route_nodes_arg = std::to_string(cpSatMaxRouteNodes);
     std::string script = cpSatScript.getValue();
     // The default names the build-tree copy; an installed binary resolves the
     // corresponding installed resource if that copy is absent.  An explicitly
@@ -421,9 +520,10 @@ struct MapToAcceleratorPass
       return false;
     }
     std::string program = python_path.get();
-    llvm::SmallVector<llvm::StringRef, 10> args = {
+    llvm::SmallVector<llvm::StringRef, 14> args = {
         program, script, input_path,
         "--min-ii", min_ii_arg, "--max-ii", max_ii_arg,
+        "--max-route-nodes", max_route_nodes_arg,
         "--emit", output_path};
     std::string execution_error;
     int exit_code = llvm::sys::ExecuteAndWait(program, args,
@@ -649,6 +749,13 @@ struct MapToAcceleratorPass
                  Mapping *mapping_strategy, bool is_spatial_only,
                  const std::string &resolved_mapping_mode,
                  const std::string &resolved_mapping_strategy) {
+    // Do this before all MII, exact-witness, and routing work so every mapper
+    // path sees the same physically materializable DFG.
+    if (inlineFusedOpsForPhysicalMapping(region)) {
+      splitSharedDataMovUsesForPhysicalMapping(region);
+      wrapInlinedFusedOperandsForPhysicalMapping(region);
+    }
+
     // Checks steering mode compatibility with architecture.
     auto dataflow_mode_attr =
         op->template getAttrOfType<StringAttr>(attr::kDataflowMode);

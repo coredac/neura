@@ -91,7 +91,9 @@ enum OperationKind {
   ICtrlMov = 40,
   // Counter operations.
   ICounter = 41,
-  IExtractPredicate = 42
+  IExtractPredicate = 42,
+  // Integer fused multiply-add operations.
+  IMulAdd = 43
 };
 
 // Maps hardware resource names to their supported operations.
@@ -126,7 +128,7 @@ static const std::map<std::string, std::vector<OperationKind>>
 
         // Fused operations.
         {"fadd_fadd", {FAddFAdd}},
-        {"fmul_fadd", {FMulFAdd}},
+        {"fmul_fadd", {FMulFAdd, IMulAdd}},
 
         // Shift operations.
         {"shift", {IShl}},
