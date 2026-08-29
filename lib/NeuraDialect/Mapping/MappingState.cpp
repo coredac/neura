@@ -920,6 +920,59 @@ void MappingState::encodeMappingState() {
                       mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
                                              index_per_ii))});
         mapping_entries.push_back(dict);
+      } else if (loc.resource->getKind() == ResourceKind::Port) {
+        kind_str = "port";
+        Port *port = dyn_cast<Port>(loc.resource);
+        assert(port && "Expected a Port resource");
+
+        // A port is attached to one boundary tile. The port direction
+        // describes the physical array boundary, while port kind describes
+        // whether data enters or leaves the TileArray through this resource.
+        Tile *tile = port->getTile();
+
+        int invalid_iterations = loc.time_step / II;
+        int index_per_ii = loc.time_step % II;
+
+        auto dict = mlir::DictionaryAttr::get(
+            ctx,
+            {
+                mlir::NamedAttribute(mlir::StringAttr::get(ctx, "resource"),
+                                     mlir::StringAttr::get(ctx, kind_str)),
+                mlir::NamedAttribute(
+                    mlir::StringAttr::get(ctx, "id"),
+                    mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
+                                           port->getId())),
+                mlir::NamedAttribute(
+                    mlir::StringAttr::get(ctx, "io"),
+                    mlir::StringAttr::get(
+                        ctx, stringifyPortKind(port->getPortKind()))),
+                mlir::NamedAttribute(
+                    mlir::StringAttr::get(ctx, "direction"),
+                    mlir::StringAttr::get(
+                        ctx, stringifyPortDirection(port->getDirection()))),
+                mlir::NamedAttribute(
+                    mlir::StringAttr::get(ctx, "time_step"),
+                    mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
+                                           loc.time_step)),
+                mlir::NamedAttribute(
+                    mlir::StringAttr::get(ctx, "invalid_iterations"),
+                    mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
+                                           invalid_iterations)),
+                mlir::NamedAttribute(
+                    mlir::StringAttr::get(ctx, "index_per_ii"),
+                    mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
+                                           index_per_ii)),
+                mlir::NamedAttribute(
+                    mlir::StringAttr::get(ctx, "x"),
+                    mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
+                                           tile->getX())),
+                mlir::NamedAttribute(
+                    mlir::StringAttr::get(ctx, "y"),
+                    mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
+                                           tile->getY())),
+            });
+
+        mapping_entries.push_back(dict);
       } else if (loc.resource->getKind() == ResourceKind::Register) {
         kind_str = "register";
         Register *reg = static_cast<Register *>(loc.resource);

@@ -21,11 +21,25 @@ namespace neura {
 enum class ResourceKind {
   Tile,
   Link,
+  Port,
   FunctionUnit,
   Register,
   RegisterFile,
   RegisterFileCluster,
 };
+
+// Direction of a boundary port attached to a tile.
+enum class PortDirection { North, South, East, West };
+
+// Data-flow direction supported by a port.
+enum class PortKind { Input, Output };
+
+// Converts between the textual representation used in kernel metadata and
+// the strongly typed architecture representation.
+std::optional<PortDirection> parsePortDirection(llvm::StringRef direction);
+
+llvm::StringRef stringifyPortDirection(PortDirection direction);
+llvm::StringRef stringifyPortKind(PortKind kind);
 
 // Enumeration for function unit resource type.
 enum class FunctionUnitKind {
@@ -164,6 +178,7 @@ public:
 // Forward declaration for use in Tile.
 class Tile;
 class Link;
+class Port;
 class FunctionUnit;
 class Register;
 class RegisterFile;
@@ -278,14 +293,12 @@ public:
 
   const std::vector<Register *> getRegisters() const;
 
-  // Port management.
-  const std::vector<std::string> &getPorts() const { return ports; }
-  void setPorts(const std::vector<std::string> &new_ports) {
-    ports = new_ports;
+  // Ports management.
+  void addPort(Port *port) {
+    assert(port && "Cannot add a null port");
+    ports.insert(port);
   }
-  bool hasPort(const std::string &port) const {
-    return std::find(ports.begin(), ports.end(), port) != ports.end();
-  }
+  const std::set<Port *> &getPorts() const { return ports; }
 
   // Memory management.
   int getMemoryCapacity() const { return memory_capacity; }
@@ -304,7 +317,7 @@ private:
   RegisterFileCluster *register_file_cluster = nullptr;
 
   // Port and memory configuration.
-  std::vector<std::string> ports;
+  std::set<Port *> ports;
   int memory_capacity = -1; // -1 means not configured.
 };
 
@@ -342,6 +355,35 @@ private:
   Tile *dst_tile;
   int latency = 1;    // Latency in cycles.
   int bandwidth = 32; // Bandwidth in bits per cycle.
+};
+
+//===----------------------------------------------------------------------===//
+// Port.
+//===----------------------------------------------------------------------===//
+class Port : public BasicResource {
+public:
+  Port(int id, PortKind port_kind, PortDirection direction, Tile *tile);
+
+  int getId() const override { return id; }
+  std::string getType() const override { return "port"; }
+
+  ResourceKind getKind() const override { return ResourceKind::Port; }
+
+  static bool classof(const BasicResource *resource) {
+    return resource && resource->getKind() == ResourceKind::Port;
+  }
+
+  PortKind getPortKind() const { return port_kind; }
+  PortDirection getDirection() const { return direction; }
+
+  // Returns the boundary tile physically attached to this port.
+  Tile *getTile() const { return tile; }
+
+private:
+  int id;
+  PortKind port_kind;
+  PortDirection direction;
+  Tile *tile;
 };
 
 //===----------------------------------------------------------------------===//
@@ -490,6 +532,11 @@ public:
   void removeLink(int src_tile_x, int src_tile_y, int dst_tile_x,
                   int dst_tile_y);
 
+  Port *getPort(PortKind port_kind, PortDirection direction, int x,
+                int y) const;
+
+  std::vector<Port *> getAllPorts() const;
+
   // Tile management.
   void removeTile(int tile_id);
 
@@ -539,12 +586,18 @@ private:
   void createKingMeshLinks(int &link_id, const LinkDefaults &link_defaults);
   void createRingLinks(int &link_id, const LinkDefaults &link_defaults);
 
-  // Architecture components: tiles, links, and their mappings.
-  // Ports and memory are now modeled as part of Tile class.
+  // Ports are initialized after tile overrides so that no port is attached to a
+  // tile removed from the target architecture.
+  void initializePorts();
+
+  // Architecture components: tiles, links, ports, and their mappings.
+  // Memory is now modeled as part of Tile class.
   std::map<int, std::unique_ptr<Tile>>
       tile_storage_; // Owns tiles, key is unique tile_id.
   std::map<int, std::unique_ptr<Link>>
       link_storage_; // Owns links, key is unique link_id.
+  std::map<int, std::unique_ptr<Port>>
+      port_storage_; // Owns ports, key is unique port_id.
   std::unordered_map<int, Tile *>
       id_to_tile_; // Maps unique tile_id to Tile pointer.
   std::unordered_map<std::pair<int, int>, Tile *, PairHash>

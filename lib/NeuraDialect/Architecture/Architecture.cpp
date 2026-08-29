@@ -1,8 +1,10 @@
 #include "NeuraDialect/Architecture/Architecture.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cassert>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -156,6 +158,54 @@ void Link::connect(Tile *src, Tile *dst) {
   src_tile = src;
   dst_tile = dst;
   src->linkDstTile(this, dst);
+}
+
+//===----------------------------------------------------------------------===//
+// Port
+//===----------------------------------------------------------------------===//
+Port::Port(int id, PortKind port_kind, PortDirection direction, Tile *tile)
+    : id(id), port_kind(port_kind), direction(direction), tile(tile) {
+  assert(tile && "A port must be attached to a tile");
+}
+
+std::optional<PortDirection>
+mlir::neura::parsePortDirection(llvm::StringRef direction) {
+  if (direction == "north")
+    return PortDirection::North;
+  if (direction == "south")
+    return PortDirection::South;
+  if (direction == "east")
+    return PortDirection::East;
+  if (direction == "west")
+    return PortDirection::West;
+
+  return std::nullopt;
+}
+
+llvm::StringRef mlir::neura::stringifyPortDirection(PortDirection direction) {
+  switch (direction) {
+  case PortDirection::North:
+    return "north";
+  case PortDirection::South:
+    return "south";
+  case PortDirection::East:
+    return "east";
+  case PortDirection::West:
+    return "west";
+  }
+
+  llvm_unreachable("Unknown port direction");
+}
+
+llvm::StringRef mlir::neura::stringifyPortKind(PortKind kind) {
+  switch (kind) {
+  case PortKind::Input:
+    return "input";
+  case PortKind::Output:
+    return "output";
+  }
+
+  llvm_unreachable("Unknown port kind");
 }
 
 //===----------------------------------------------------------------------===//
@@ -567,6 +617,49 @@ void Architecture::applyLinkOverrides(
   }
 }
 
+// Initializes the input and output ports exposed by boundary tiles.
+//
+// Neura's current coordinate convention is:
+//   - x increases from west to east;
+//   - y == 0 is the south boundary;
+//   - y increases from south to north.
+//
+// Each exposed boundary direction receives a distinct input port and output
+// port so that ingress and egress occupy independently modeled resources.
+void Architecture::initializePorts() {
+  int next_port_id = 0;
+
+  auto createPortPair = [&](Tile *tile, PortDirection direction) {
+    for (PortKind kind : {PortKind::Input, PortKind::Output}) {
+      auto port = std::make_unique<Port>(next_port_id, kind, direction, tile);
+
+      tile->addPort(port.get());
+      port_storage_[next_port_id] = std::move(port);
+      ++next_port_id;
+    }
+  };
+
+  for (Tile *tile : getAllTiles()) {
+    int x = tile->getX();
+    int y = tile->getY();
+
+    if (x == 0)
+      createPortPair(tile, PortDirection::West);
+
+    if (x == getPerCgraColumns() - 1)
+      createPortPair(tile, PortDirection::East);
+
+    if (y == 0)
+      createPortPair(tile, PortDirection::South);
+
+    if (y == getPerCgraRows() - 1)
+      createPortPair(tile, PortDirection::North);
+  }
+}
+
+// TODO: Add applyPortOverrides() to allow ports to be configured through the
+// architecture YAML file.
+
 // Main constructor - handles all cases internally.
 Architecture::Architecture(int multi_cgra_rows, int multi_cgra_columns,
                            BaseTopology multi_cgra_base_topology,
@@ -595,6 +688,7 @@ Architecture::Architecture(int multi_cgra_rows, int multi_cgra_columns,
   applyTileOverrides(tile_overrides);
   createLinks(link_defaults, per_cgra_base_topology);
   applyLinkOverrides(link_overrides);
+  initializePorts();
 }
 
 std::unique_ptr<Architecture> Architecture::cloneWithNewDimensions(
@@ -656,6 +750,15 @@ void Architecture::removeTile(int tile_id) {
 
   for (int link_id : links_to_remove) {
     removeLink(link_id);
+  }
+
+  // Removes ports attached to the tile before destroying the tile.
+  for (auto port_it = port_storage_.begin(); port_it != port_storage_.end();) {
+    if (port_it->second->getTile() == tile) {
+      port_it = port_storage_.erase(port_it);
+    } else {
+      ++port_it;
+    }
   }
 
   // Removes tile from coordinate mapping.
@@ -741,6 +844,37 @@ void Architecture::removeLink(int src_tile_x, int src_tile_y, int dst_tile_x,
   if (src_it == coord_to_tile_.end() || dst_it == coord_to_tile_.end())
     return; // One of the tiles does not exist.
   removeLink(src_it->second, dst_it->second);
+}
+
+Port *Architecture::getPort(PortKind port_kind, PortDirection direction, int x,
+                            int y) const {
+  for (const auto &[id, port] : port_storage_) {
+    (void)id;
+
+    Tile *tile = port->getTile();
+
+    if (port->getPortKind() == port_kind && port->getDirection() == direction &&
+        tile->getX() == x && tile->getY() == y) {
+      return port.get();
+    }
+  }
+
+  // Returns nullptr instead of asserting because kernel metadata may describe
+  // an invalid or unavailable boundary port. The caller should emit an MLIR
+  // diagnostic associated with the kernel.
+  return nullptr;
+}
+
+std::vector<Port *> Architecture::getAllPorts() const {
+  std::vector<Port *> ports;
+  ports.reserve(port_storage_.size());
+
+  for (const auto &[id, port] : port_storage_) {
+    (void)id;
+    ports.push_back(port.get());
+  }
+
+  return ports;
 }
 
 bool Architecture::canSupportCounter() const {
