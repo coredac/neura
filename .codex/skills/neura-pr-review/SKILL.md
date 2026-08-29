@@ -46,6 +46,21 @@ analytical cost model, DFG export, and CP-SAT integration.
   retain all emitted lines when there are at most 50 and only the first 50 when
   there are more than 50. Do not imply that an omitted suffix was checked.
   Record environmental/toolchain and solver discoveries in the relevant skill.
+- For PR #1 CI, configure the Neura build only after installing the selected
+  Python interpreter's OR-Tools and torch-mlir dependencies. The workflow must
+  treat every `UNSUPPORTED:` lit result as a failure. A local machine without
+  torch-mlir may skip the gather test, but that is not an acceptable remote CI
+  result; inspect the actual Actions log before changing dependencies or tests.
+- `test/Conversion/linalg2neura/matmul.mlir` belongs to independent PR #342
+  (`expand-memref-copy` / linalg ingestion), not PR #1: it is absent from the
+  PR #1 branch and its `origin/main` base. If an Actions log names that test,
+  verify the workflow revision and PR before porting any code; do not mix #342
+  into the solver-based-mapping PR to repair an unrelated CI job.
+- A conversion pipeline can leave a generic `func.return` after the Neura
+  lowerings. It is a host-function terminator, not a tile FU: exclude it in
+  `occupiesFU()` (the stricter physical-placement predicate), not by inventing
+  an `OperationKind` or a mapping location and not by broadening
+  `is_non_materialized()`.
 
 ## Review output
 

@@ -187,7 +187,10 @@ bool is_non_materialized(Operation *op) {
 // are deliberately NOT logical complements -- do not replace calls with a
 // negation of is_non_materialized.
 bool occupiesFU(Operation *op) {
-  if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(op)) {
+  // A generic func.return is a host-function terminator emitted by conversion
+  // pipelines that have not materialized a Neura return. It has no CGRA FU
+  // semantics or mapping location; scheduling it would require inventing one.
+  if (isa<func::FuncOp, func::ReturnOp, ModuleOp, neura::KernelOp>(op)) {
     return false;
   }
   // Memref lifetime operations describe host-visible storage, not a CGRA FU.
