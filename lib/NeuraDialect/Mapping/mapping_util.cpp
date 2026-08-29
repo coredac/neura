@@ -236,9 +236,10 @@ int mlir::neura::calculateResMii(Region &region,
 
   // Count all "compute" operations (non-terminators, non-block ops).
   region.walk([&](Operation *op) {
-    // Skips non-materialized ops.
-    if (isa<func::FuncOp>(op) ||
-        isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op)) {
+    // Only materialized operations consume Tile resources. Movement,
+    // recurrence placeholders, and region terminators do not contribute to
+    // ResMII.
+    if (isa<func::FuncOp>(op) || is_non_materialized(op)) {
       return;
     }
     // Skips operations inside fused_op regions
