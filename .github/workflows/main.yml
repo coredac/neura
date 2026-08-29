@@ -106,6 +106,23 @@ jobs:
     # Always add LLVM tools to PATH (whether from cache or fresh build).
     - name: Add LLVM to PATH
       run: echo "${{github.workspace}}/llvm-project/build/bin" >> $GITHUB_PATH
+
+    # Install all Python dependencies before configuring Neura: lit records the
+    # configured interpreter and probes its optional modules at CMake time.
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    - name: Install Neura Python test dependencies
+      working-directory: ${{github.workspace}}
+      run: |
+        python -m pip install --upgrade pip
+        python -m pip install torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu
+        wget https://github.com/ShangkunLi/python-wheels/releases/download/v1.0/torch_mlir-20251210.657-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+        python -m pip install torch_mlir-20251210.657-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
+        python -m pip install -r test/cost-model/requirements.txt
+        python -c 'import ortools, torch, torch_mlir; print("Python test dependencies available")'
+
     # setup mlir-cgra
     - name: setup dataflow tool-chain
       working-directory: ${{github.workspace}}
@@ -116,6 +133,7 @@ jobs:
           -DMLIR_DIR=${{github.workspace}}/llvm-project/build/lib/cmake/mlir \
           -DMLIR_SOURCE_DIR=${{github.workspace}}/llvm-project/mlir \
           -DMLIR_BINARY_DIR=${{github.workspace}}/llvm-project/build \
+          -DNEURA_PYTHON_EXECUTABLE="$(command -v python)" \
           -DCMAKE_CXX_FLAGS="-std=c++17"
 
         ninja
@@ -142,19 +160,6 @@ jobs:
         #     sh script.sh
         #     ./simulate
 
-    # Sets up Python environment for torch-mlir
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install PyTorch (cpu)
-      run: |
-        pip install torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu
-    - name: Install torch-mlir
-      run: |
-        wget https://github.com/ShangkunLi/python-wheels/releases/download/v1.0/torch_mlir-20251210.657-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-        pip install torch_mlir-20251210.657-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl
-
     # shows ccache stats to verify it's working.
     - name: ccache stats
       run: ccache -s
@@ -163,5 +168,10 @@ jobs:
     - name: run test
       working-directory: ${{github.workspace}}
       run: |
+        set -o pipefail
         cd ${{github.workspace}}/test
-        ${{github.workspace}}/llvm-project/build/bin/llvm-lit . -v
+        ${{github.workspace}}/llvm-project/build/bin/llvm-lit . -sv | tee /tmp/neura-lit.log
+        if grep -q '^UNSUPPORTED:' /tmp/neura-lit.log; then
+          echo 'Unexpected unsupported lit tests'
+          exit 1
+        fi

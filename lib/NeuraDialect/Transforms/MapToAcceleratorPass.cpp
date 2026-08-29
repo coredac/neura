@@ -244,6 +244,11 @@ struct MapToAcceleratorPass
       llvm::cl::desc("Maximum time-expanded routing vertices constructed by "
                      "analytical mapping (default: 50000)."),
       llvm::cl::init(50000)};
+  Option<int> cpSatDeterministicWork{
+      *this, "cpsat-deterministic-work",
+      llvm::cl::desc("CP-SAT deterministic work budget for each attempted II "
+                     "(default: 12)."),
+      llvm::cl::init(12)};
 
   // Configures mapping strategy and mode based on command-line options.
   bool configureMappingStrategy(StringRef mapping_strategy_opt,
@@ -496,6 +501,8 @@ struct MapToAcceleratorPass
     std::string min_ii_arg = std::to_string(min_ii);
     std::string max_ii_arg = std::to_string(max_ii);
     std::string max_route_nodes_arg = std::to_string(cpSatMaxRouteNodes);
+    std::string deterministic_work_arg =
+        std::to_string(cpSatDeterministicWork);
     std::string script = cpSatScript.getValue();
     // The default names the build-tree copy; an installed binary resolves the
     // corresponding installed resource if that copy is absent.  An explicitly
@@ -520,10 +527,11 @@ struct MapToAcceleratorPass
       return false;
     }
     std::string program = python_path.get();
-    llvm::SmallVector<llvm::StringRef, 14> args = {
+    llvm::SmallVector<llvm::StringRef, 16> args = {
         program, script, input_path,
         "--min-ii", min_ii_arg, "--max-ii", max_ii_arg,
         "--max-route-nodes", max_route_nodes_arg,
+        "--deterministic-time", deterministic_work_arg,
         "--emit", output_path};
     std::string execution_error;
     int exit_code = llvm::sys::ExecuteAndWait(program, args,

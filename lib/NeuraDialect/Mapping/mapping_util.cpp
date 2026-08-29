@@ -8,6 +8,7 @@
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/DenseMap.h"
@@ -187,6 +188,12 @@ bool is_non_materialized(Operation *op) {
 // negation of is_non_materialized.
 bool occupiesFU(Operation *op) {
   if (isa<func::FuncOp, ModuleOp, neura::KernelOp>(op)) {
+    return false;
+  }
+  // Memref lifetime operations describe host-visible storage, not a CGRA FU.
+  // Loads and stores consume the architecture's memory resources; allocating
+  // or releasing their address handle must never be scheduled onto a tile.
+  if (isa<memref::AllocOp, memref::AllocaOp, memref::DeallocOp>(op)) {
     return false;
   }
   if (is_non_materialized(op)) { // routing/structural ops and fused containers
@@ -1276,6 +1283,11 @@ mlir::neura::calculateAward(Operation *op, std::set<Operation *> &critical_ops,
   // Assembles all the producers.
   std::vector<Operation *> producers;
   for (Value operand : op->getOperands()) {
+    // A memref is a host-memory address handle for a Neura load/store, not a
+    // routed CGRA value.  Its associated load/store is the physical FU op.
+    if (isa<BaseMemRefType>(operand.getType())) {
+      continue;
+    }
     if (isa<neura::ReserveOp>(operand.getDefiningOp())) {
       // Skips Reserve ops (backward ctrl move) when calculating award.
       continue;
@@ -1525,6 +1537,11 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
     // Tries to route the data move operations.
     for (Value operand : op->getOperands()) {
       llvm::errs() << "Processing operand: " << operand << "\n";
+      // See calculateAward: memory handles are consumed directly by the
+      // load/store FU and have no tile location or DataMov route.
+      if (isa<BaseMemRefType>(operand.getType())) {
+        continue;
+      }
       if (isa<neura::ReserveOp>(operand.getDefiningOp())) {
         // Skips Reserve ops (backward ctrl move) when routing.
         continue;

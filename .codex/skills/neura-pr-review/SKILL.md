@@ -40,9 +40,12 @@ analytical cost model, DFG export, and CP-SAT integration.
   DFG edge construction, architecture-shape parsing, and operation/FU
   classification must have one source of truth.
 - For changed e2e behavior, refresh tests only from a real temporary artifact.
-  Keep a separate prefix for analytical output and check the complete generated
-  artifact, not selected metadata. Record environmental/toolchain and solver
-  discoveries in the relevant skill.
+  Keep a separate prefix for analytical output and use literal checks for the
+  retained artifact lines, not selected metadata or broad wildcards. For
+  mapping MLIR, retain at most the first 200 emitted lines. For YAML or ASM,
+  retain all emitted lines when there are at most 50 and only the first 50 when
+  there are more than 50. Do not imply that an omitted suffix was checked.
+  Record environmental/toolchain and solver discoveries in the relevant skill.
 
 ## Review output
 

@@ -28,7 +28,7 @@ bool HeuristicMapping::mapWithBacktrack(
 
   std::vector<std::pair<Operation *, int>> materialized_ops;
   for (auto [op, level] : sorted_ops_with_levels) {
-    if (!is_non_materialized(op)) {
+    if (occupiesFU(op)) {
       materialized_ops.emplace_back(op, level);
     }
   }

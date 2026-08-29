@@ -1,6 +1,6 @@
 ---
 name: e2e-fullcheck-refresh
-description: Update Neura e2e FileCheck expectations from generated temporary outputs, preserving full-output coverage and recording failures discovered during the refresh.
+description: Update Neura e2e FileCheck expectations from generated temporary outputs, preserving bounded generated-output coverage and recording failures discovered during the refresh.
 ---
 
 # E2E full-check refresh
@@ -13,21 +13,30 @@ refreshed from an actual generated temporary artifact.
 1. Run the exact `RUN:` pipeline from the test, redirecting its full stdout
    and stderr to a uniquely named file under `/tmp`. Do not synthesize expected
    output from source code or hand-edit individual values.
-2. Copy the complete generated artifact into the test's matching check block,
-   using the test's existing FileCheck style. Every emitted line must have the
-   appropriate check prefix (`PREFIX:`, `PREFIX-NEXT:`, or `PREFIX-LABEL:`);
-   do not reduce the block to key fields such as `compiled_ii`.
+2. Copy the generated artifact from that file into the test's matching check
+   block, using the test's existing FileCheck style. Keep every retained line
+   literal and give it the appropriate check prefix (`PREFIX:`,
+   `PREFIX-NEXT:`, or `PREFIX-LABEL:`); do not reduce the retained block to key
+   fields such as `compiled_ii` or mask differences with broad wildcards. Apply
+   these output-size limits:
+   - For mapping MLIR, retain and check at most the first 200 emitted lines.
+   - For YAML or ASM, retain and check all emitted lines when there are at most
+     50; when there are more than 50, retain and check only the first 50.
+   These limits intentionally leave any later emitted lines unchecked; do not
+   claim that the omitted suffix was checked or invent a trailer for it.
 3. If the test needs a new pipeline mode, add a dedicated check prefix and a
    `RUN:` line for that mode. Keep its expected output separate from a
    heuristic baseline so the comparison remains readable.
 4. Run the individual test after each refresh. For every failure, inspect the
    saved `/tmp` artifact and either fix the implementation/test expectation or
    add a concise, reusable discovery to this skill under **Discoveries**.
-5. Before handoff, rerun every changed e2e test and verify each check block is
-   complete and generated from its corresponding `/tmp` artifact.
+5. Before handoff, rerun every changed e2e test and verify each retained check
+   segment is generated from its corresponding `/tmp` artifact. Confirm that
+   the segment ends at the applicable limit when the artifact exceeds it.
 
-Do not commit, delete unrelated artifacts, or weaken a full-output check to
-make a test pass.
+Do not commit, delete unrelated artifacts, or weaken the retained-output check
+to make a test pass. The limits above are the only permitted omission; do not
+substitute selected metadata or broad wildcards for retained artifact lines.
 
 ## Discoveries
 
@@ -74,16 +83,17 @@ make a test pass.
   `calculateRouteMii`: a `DataMovOp` can carry a non-scalar payload, so a
   scalar-only `valueBitWidth` assertion is an implementation bug, not an
   expectation drift.  Preserve `/tmp/neura-e2e-baseline-all.log`, fix/rebuild
-  the mapper, then regenerate every affected full artifact.
+  the mapper, then regenerate every affected artifact.
 - A concurrently interrupted relink can leave
   `build/tools/mlir-neura-opt/mlir-neura-opt` as a zero-byte, non-executable
   file.  In that state every lit e2e test fails with exit 126 before mapping;
   do not refresh checks.  Rebuild the target and verify the executable is
   non-empty before rerunning the suite.
 - Generated mapping MLIR has one significant final blank line after the module
-  closing brace.  A genuinely complete FileCheck block must represent it with
-  `PREFIX-EMPTY:` after the final `PREFIX-NEXT: }`; omitting it weakens the
-  output-completeness guarantee.
+  closing brace.  Preserve it with `PREFIX-EMPTY:` after the final
+  `PREFIX-NEXT: }` when it falls within the first 200 emitted lines.  If the
+  artifact exceeds that mapping limit, stop at line 200 and do not claim that
+  the suffix (including any later blank line) was checked.
 - Do not add a dynamic analytical lit test for a workload until its exact
   pipeline has completed with the test's final deterministic budget.  In the
   current joint model, BICG-int produced no mapping after more than seven
@@ -106,13 +116,14 @@ make a test pass.
   seed produced the same mapping body but a different ordering of entries in
   the printed `dlti.dl_spec` module attribute.  A literal whole-line check of
   that attribute is therefore not reproducible.  Treat this as a printer/IR
-  canonicalization issue: preserve complete checks for the mapping body, but
-  do not claim a test is stable until the module attribute is canonicalized or
-  the check format can represent all entries independent of their order.
+  canonicalization issue: preserve literal checks for the retained mapping
+  body, but do not claim a test is stable until the module attribute is
+  canonicalized or the check format can represent all retained entries
+  independent of their order.
 - The mapper now canonicalizes `dlti.dl_spec` at the end of mapping by sorting
-  its entries before printing.  Refresh full mapping checks only after this
-  pass is present; two AXPY automatic analytical runs then produced bytewise
-  identical MLIR.
+  its entries before printing.  Refresh mapping checks only after this pass is
+  present; two AXPY automatic analytical runs then produced bytewise identical
+  MLIR.
 - Do not depend on the current working directory for analytical e2e tests.
   The CMake build packages `exact_mapper_cpsat.py` at
   `build/share/neura/exact_mapper_cpsat.py` and the pass selects it by default;

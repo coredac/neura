@@ -4,6 +4,7 @@
 #include "NeuraDialect/NeuraPasses.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/IRMapping.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
@@ -51,7 +52,8 @@ struct InsertDataMovForNeuraOps : public RewritePattern {
     bool all_inputs_are_mov_except_reserve =
         llvm::all_of(op->getOperands(), [](Value v) {
           Operation *def_op = v.getDefiningOp();
-          return isa_and_nonnull<neura::DataMovOp>(def_op) ||
+          return isa<BaseMemRefType>(v.getType()) ||
+                 isa_and_nonnull<neura::DataMovOp>(def_op) ||
                  isa_and_nonnull<neura::ReserveOp>(def_op);
         });
 
@@ -101,6 +103,13 @@ struct InsertDataMovForNeuraOps : public RewritePattern {
     bool any_change = false;
     for (Value operand : op->getOperands()) {
       Operation *producer = operand.getDefiningOp();
+
+      // Memrefs are host-memory address handles.  A Neura load/store consumes
+      // one directly; only payload values need a routed DataMov edge.
+      if (isa<BaseMemRefType>(operand.getType())) {
+        new_operands.push_back(operand);
+        continue;
+      }
 
       // Does NOT wrap operands that come from reserve: the reserve result
       // is the recurrence back-edge target for ctrl_mov.  Wrapping it would
@@ -158,6 +167,11 @@ void wrapFusedOpsWithDataMov(ModuleOp module_op) {
     SmallVector<Value> new_operands;
     for (Value operand : fused_op->getOperands()) {
       Operation *producer = operand.getDefiningOp();
+
+      if (isa<BaseMemRefType>(operand.getType())) {
+        new_operands.push_back(operand);
+        continue;
+      }
 
       // Skip if already wrapped in data_mov or from reserve
       if (isa_and_nonnull<neura::DataMovOp>(producer) ||

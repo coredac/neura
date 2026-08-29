@@ -39,7 +39,13 @@ SOLVER_ERROR = "solver_error"
 
 
 def configure_solver(solver, deterministic_time):
-    """Use a CP-SAT solver-work budget for every solve."""
+    """Use a reproducible per-II CP-SAT search budget.
+
+    The mapper is a feasibility search: its caller advances II only when this
+    solve finds no witness within the allotted work.  Do not spend the rest of
+    that II's budget proving an objective value after a complete placement and
+    routing witness already exists.
+    """
     if deterministic_time <= 0:
         raise ValueError("deterministic_time must be positive")
     # Deterministic time avoids CPU-speed-dependent cutoffs; pin the OR-Tools
@@ -47,6 +53,7 @@ def configure_solver(solver, deterministic_time):
     solver.parameters.max_deterministic_time = deterministic_time
     solver.parameters.num_search_workers = 1
     solver.parameters.random_seed = 0
+    solver.parameters.stop_after_first_solution = True
 
 
 def solver_outcome(status):
