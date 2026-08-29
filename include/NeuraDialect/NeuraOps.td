@@ -48,7 +48,8 @@ def Neura_KernelOp : Op<NeuraDialect, "kernel",
                                           // systems).
       OptionalAttr<StrAttr>:$kernel_name, // Name of the kernel (for
                                           // identification).
-      OptionalAttr<StrAttr>:$accelerator  // Target accelerator name.
+      OptionalAttr<StrAttr>:$accelerator,  // Target accelerator name.
+      OptionalAttr<DictionaryAttr>:$kernel_metadata
   );
 
   let results = (outs Variadic<AnyType>:$outputs);
@@ -613,6 +614,41 @@ def Neura_MulAddOp : Op<NeuraDialect, "mul_add"> {
   // let assemblyFormat = "$a `,` $b `,` $c `,` $predicate attr-dict `:`
   // type($result)";
   let traits = [SameOperandsAndResultElementType];
+}
+
+def Neura_MacOp : Op<NeuraDialect, "mac"> {
+  let summary = "Configured multiply-accumulate operation.";
+  let description = [{
+    Defines one MAC operation placed on a CGRA Tile.
+
+    Supported operand conventions:
+
+    - `stationary = "weight"`
+      - input0: activation
+      - input1: optional incoming partial sum
+      - result: outgoing partial sum
+
+    - `stationary = "input"`
+      - input0: weight
+      - input1: optional incoming partial sum
+      - result: outgoing partial sum
+
+    - `stationary = "output"`
+      - input0: left multiplicand
+      - input1: right multiplicand
+      - result: locally accumulated output
+  }];
+
+  let arguments = (
+    ins AnyType:$input0,
+        Optional<AnyType>:$input1,
+        StrAttr:$stationary
+  );
+
+  let results = (outs AnyType:$result);
+
+  let traits = [SameOperandsAndResultElementType];
+  let hasVerifier = 1;
 }
 
 // ----------------------------------------------------

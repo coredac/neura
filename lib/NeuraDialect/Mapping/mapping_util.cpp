@@ -1,6 +1,7 @@
 #include <deque>
 #include <queue>
 
+#include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -93,6 +94,8 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
     return FAddFAdd;
   if (isa<neura::FMulFAddOp>(op))
     return FMulFAdd;
+  if (isa<neura::MacOp>(op))
+    return IMac;
 
   // Control flow operations
   if (isa<neura::ReturnOp>(op))

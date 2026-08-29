@@ -5,12 +5,14 @@
 #include <cassert>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "NeuraDialect/Architecture/ArchitectureSpec.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace mlir {
 namespace neura {
@@ -91,7 +93,9 @@ enum OperationKind {
   ICtrlMov = 40,
   // Counter operations.
   ICounter = 41,
-  IExtractPredicate = 42
+  IExtractPredicate = 42,
+  // Configured MAC operation.
+  IMac = 43
 };
 
 // Maps hardware resource names to their supported operations.
@@ -127,6 +131,7 @@ static const std::map<std::string, std::vector<OperationKind>>
         // Fused operations.
         {"fadd_fadd", {FAddFAdd}},
         {"fmul_fadd", {FMulFAdd}},
+        {"mac", {IMac}},
 
         // Shift operations.
         {"shift", {IShl}},

@@ -77,3 +77,19 @@ LogicalResult PhiStartOp::verify() {
 
   return success();
 }
+
+LogicalResult MacOp::verify() {
+  StringRef stationary = getStationary();
+
+  if (stationary != "weight" && stationary != "input" &&
+      stationary != "output") {
+    return emitOpError(
+        "stationary must be \"weight\", \"input\", or \"output\"");
+  }
+
+  if (stationary == "output" && !getInput1()) {
+    return emitOpError("output-stationary MAC requires two dynamic operands");
+  }
+
+  return success();
+}

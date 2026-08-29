@@ -26,7 +26,8 @@ struct TileDefaults {
       "sel",         "type_conv", "shift",   "vfmul",
       "fadd_fadd",   "fmul_fadd", "grant",   "loop_control",
       "phi",         "constant",  "mem",     "return",
-      "mem_indexed", "alloca",    "counter", "extract_predicate"};
+      "mem_indexed", "alloca",    "counter", "extract_predicate",
+      "mac"};
 };
 
 // Structure for holding memory configuration.
