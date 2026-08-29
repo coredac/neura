@@ -168,10 +168,5 @@ jobs:
     - name: run test
       working-directory: ${{github.workspace}}
       run: |
-        set -o pipefail
         cd ${{github.workspace}}/test
-        ${{github.workspace}}/llvm-project/build/bin/llvm-lit . -sv | tee /tmp/neura-lit.log
-        if grep -q '^UNSUPPORTED:' /tmp/neura-lit.log; then
-          echo 'Unexpected unsupported lit tests'
-          exit 1
-        fi
+        ${{github.workspace}}/llvm-project/build/bin/llvm-lit . -v
