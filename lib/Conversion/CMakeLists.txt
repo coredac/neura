@@ -6,6 +6,7 @@ add_subdirectory(LlvmToNeura)
 add_subdirectory(MemRefToNeura)
 add_subdirectory(BuiltinToNeura)
 add_subdirectory(TorchToNeura)
+add_subdirectory(MemrefCopyExpand)
 
 add_library(MLIRNeuraConversion INTERFACE)
 
@@ -23,5 +24,6 @@ target_link_libraries(MLIRNeuraConversion INTERFACE
   MLIRNeuraMemRefToNeuraPass
   MLIRNeuraBuiltinToNeuraPass
   MLIRNeuraTorchToNeuraPass
+  MLIRNeuraMemrefCopyExpandPass
   ${dialect_libs}
 )

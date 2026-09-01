@@ -59,4 +59,18 @@ def LowerAffineToNeura : Pass<"lower-affine-to-neura", "func::FuncOp"> {
                            "mlir::affine::AffineDialect"];
 }
 
+def ExpandMemrefCopy : Pass<"expand-memref-copy", "ModuleOp"> {
+  let summary = "Expand memref.copy into an explicit nested affine.for loop";
+  let description = [{
+    Rewrites memref.copy(src, dst) into a nested affine.for loop that loads
+    from src and stores to dst element by element. Bufferization commonly
+    leaves a trailing memref.copy (e.g. via -buffer-results-to-out-params)
+    that no Neura lowering pass understands; this lets it flow through the
+    same affine-loop-based path (--lower-affine-to-neura) as the rest of a
+    kernel body instead of needing dedicated support for memref.copy itself.
+  }];
+  let constructor = "mlir::createExpandMemrefCopyPass()";
+  let dependentDialects = ["mlir::affine::AffineDialect"];
+}
+
 #endif // NEURA_CONVERSION_PASSES_TD
