@@ -30,15 +30,14 @@ Tile *getPlacedTile(Operation *op, const Architecture &architecture) {
   int x = static_cast<int>(x_attr.getInt());
   int y = static_cast<int>(y_attr.getInt());
 
-  for (Tile *tile : architecture.getAllTiles()) {
-    if (tile->getX() == x && tile->getY() == y) {
-      return tile;
-    }
+  Tile *tile = architecture.getTile(x, y);
+  if (!tile) {
+    op->emitError() << "Placement refers to unavailable tile (" << x << ", "
+                    << y << ")";
+    return nullptr;
   }
 
-  op->emitError() << "Placement refers to unavailable tile (" << x << ", " << y
-                  << ")";
-  return nullptr;
+  return tile;
 }
 
 } // namespace
