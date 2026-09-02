@@ -236,7 +236,6 @@ struct MapToAcceleratorPass
     auto recurrence_cycles = collectRecurrenceCycles(region);
     std::set<Operation *> critical_ops;
     RecurrenceCycle *longest = nullptr;
-    int rec_mii = 1;
     for (auto &cycle : recurrence_cycles) {
       llvm::outs() << "[DEBUG] Recurrence cycle (length " << cycle.length
                    << "):\n";
@@ -255,10 +254,9 @@ struct MapToAcceleratorPass
       for (Operation *op : longest->operations) {
         op->print(llvm::outs()), llvm::outs() << "\n";
       }
-      rec_mii = longest->length;
-    } else if (!longest) {
-      rec_mii = 1; // No recurrence cycles found, set MII to 1.
     }
+
+    int rec_mii = calculateRecMii(recurrence_cycles);
 
     llvm::errs() << "[MapToAcceleratorPass] Calculated Recurrence MII: "
                  << rec_mii << "\n";
