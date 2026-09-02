@@ -489,16 +489,33 @@ bool handleAddOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.add:\n";
   }
 
-  if (op.getNumOperands() < 2) {
+  // After --map-to-accelerator, compile-time constant operands are folded into
+  // rhs_value attributes, leaving a single SSA operand (the LHS). The $rhs
+  // field in AddOp is Optional<AnyType> (NeuraOps.td) precisely to support this
+  // single-operand mapped form alongside the two-operand pre-mapping form.
+  PredicatedData lhs, rhs;
+  if (op.getNumOperands() >= 2) {
+    lhs = value_to_predicated_data_map[op.getLhs()];
+    rhs = value_to_predicated_data_map[op.getRhs()];
+  } else if (op.getNumOperands() == 1) {
+    auto rhs_attr = op->getAttrOfType<mlir::IntegerAttr>("rhs_value");
+    if (!rhs_attr) {
+      if (isVerboseMode()) {
+        llvm::errs() << "[neura-interpreter]  └─ neura.add: single-operand "
+                        "form requires rhs_value attribute\n";
+      }
+      return false;
+    }
+    lhs = value_to_predicated_data_map[op.getLhs()];
+    rhs.value = static_cast<float>(rhs_attr.getInt());
+    rhs.predicate = true; // compile-time constant is always valid
+    rhs.is_vector = false;
+  } else {
     if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.add expects at least two "
-                      "operands\n";
+      llvm::errs() << "[neura-interpreter]  └─ neura.add: no operands\n";
     }
     return false;
   }
-
-  auto lhs = value_to_predicated_data_map[op.getLhs()];
-  auto rhs = value_to_predicated_data_map[op.getRhs()];
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
