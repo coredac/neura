@@ -3,7 +3,6 @@
 #include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/MappingState.h"
 #include "mlir/IR/Operation.h"
-#include "llvm/ADT/ArrayRef.h"
 
 namespace mlir {
 namespace neura {
@@ -32,9 +31,6 @@ struct RecurrenceCycle {
 
 // Collects recurrence cycles rooted at reserve and closed by ctrl_mov.
 SmallVector<RecurrenceCycle, 4> collectRecurrenceCycles(Region &region);
-
-// Calculates RecMII from recurrence cycles, defaulting to one when none exist.
-int calculateRecMii(llvm::ArrayRef<RecurrenceCycle> recurrence_cycles);
 
 // Calculates ResMII: ceil(#ops / #tiles).
 int calculateResMii(Region &region, const Architecture &architecture);
