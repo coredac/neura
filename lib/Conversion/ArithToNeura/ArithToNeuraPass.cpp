@@ -17,6 +17,23 @@ using namespace mlir::neura;
 
 namespace {
 
+bool isSupportedCmpIPredicate(arith::CmpIPredicate predicate) {
+  switch (predicate) {
+  case arith::CmpIPredicate::eq:
+  case arith::CmpIPredicate::ne:
+  case arith::CmpIPredicate::slt:
+  case arith::CmpIPredicate::sle:
+  case arith::CmpIPredicate::sgt:
+  case arith::CmpIPredicate::sge:
+  case arith::CmpIPredicate::ult:
+  case arith::CmpIPredicate::ule:
+  case arith::CmpIPredicate::ugt:
+  case arith::CmpIPredicate::uge:
+    return true;
+  }
+  return false;
+}
+
 struct ArithConstantToNeuraConstant
     : public OpRewritePattern<mlir::arith::ConstantOp> {
   using OpRewritePattern::OpRewritePattern;
@@ -176,42 +193,11 @@ struct ArithCmpiToNeuraICmp : public OpRewritePattern<mlir::arith::CmpIOp> {
     Value lhs = op.getLhs();
     Value rhs = op.getRhs();
     Type result_type = op.getType();
-    arith::CmpIPredicate arith_cmp_type = op.getPredicate();
-    StringRef cmp_type;
-    switch (arith_cmp_type) {
-    case arith::CmpIPredicate::eq:
-      cmp_type = "eq"; // ==
-      break;
-    case arith::CmpIPredicate::ne:
-      cmp_type = "ne"; // !=
-      break;
-    case arith::CmpIPredicate::slt:
-      cmp_type = "slt"; // <
-      break;
-    case arith::CmpIPredicate::sle:
-      cmp_type = "sle"; // <=
-      break;
-    case arith::CmpIPredicate::sgt:
-      cmp_type = "sgt"; // >
-      break;
-    case arith::CmpIPredicate::sge:
-      cmp_type = "sge"; // >=
-      break;
-    case arith::CmpIPredicate::ult:
-      cmp_type = "ult"; // unsigned <
-      break;
-    case arith::CmpIPredicate::ule:
-      cmp_type = "ule"; // unsigned <=
-      break;
-    case arith::CmpIPredicate::ugt:
-      cmp_type = "ugt"; // unsigned >
-      break;
-    case arith::CmpIPredicate::uge:
-      cmp_type = "uge"; // unsigned >=
-      break;
-    default:
-      return rewriter.notifyMatchFailure(op, "Unsupported arith CmpIOp type");
-    }
+    arith::CmpIPredicate predicate = op.getPredicate();
+    if (!isSupportedCmpIPredicate(predicate))
+      return rewriter.notifyMatchFailure(op,
+                                         "unsupported arith.cmpi predicate");
+    StringRef cmp_type = arith::stringifyCmpIPredicate(predicate);
 
     // Converts arith CmpIOp to Neura ICmpOp.
 

@@ -463,7 +463,7 @@ public:
   SteerPhiToMergePattern(MLIRContext *context, OperationsToErase &ops_to_erase,
                          MergePatternFinder &merge_pattern_finder,
                          LoopAnalyzer &loop_analyzer)
-      : OpRewritePattern<neura::PhiOp>(context), ops_to_erase(ops_to_erase),
+      : OpRewritePattern<neura::PhiOp>(context),
         merge_pattern_finder(merge_pattern_finder),
         loop_analyzer(loop_analyzer) {}
 
@@ -510,7 +510,6 @@ public:
   }
 
 private:
-  OperationsToErase &ops_to_erase;
   MergePatternFinder &merge_pattern_finder;
   LoopAnalyzer &loop_analyzer;
 

@@ -371,18 +371,17 @@ void Architecture::createLinks(const LinkDefaults &link_defaults,
   switch (base_topology) {
   case BaseTopology::MESH:
     createMeshLinks(link_id, link_defaults);
-    break;
+    return;
   case BaseTopology::KING_MESH:
     createKingMeshLinks(link_id, link_defaults);
-    break;
+    return;
   case BaseTopology::RING:
     createRingLinks(link_id, link_defaults);
-    break;
-  default:
-    // Defaults to mesh if unknown topology.
-    createMeshLinks(link_id, link_defaults);
-    break;
+    return;
   }
+
+  // Preserve the existing mesh fallback for unknown topology values.
+  createMeshLinks(link_id, link_defaults);
 }
 
 // Checks if a tile is on the boundary of the architecture.
@@ -619,10 +618,9 @@ Tile *Architecture::getTile(int id) {
   return it->second;
 }
 
-Tile *Architecture::getTile(int x, int y) {
+Tile *Architecture::getTile(int x, int y) const {
   auto it = coord_to_tile_.find({x, y});
-  assert(it != coord_to_tile_.end() && "Tile with given coordinates not found");
-  return it->second;
+  return it == coord_to_tile_.end() ? nullptr : it->second;
 }
 
 std::vector<Tile *> Architecture::getAllTiles() const {

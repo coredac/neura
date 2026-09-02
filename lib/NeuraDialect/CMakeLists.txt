@@ -8,6 +8,7 @@ add_mlir_dialect_library(MLIRNeura
         Mapping/MappingState.cpp
         Mapping/Mapping.cpp
         Mapping/HeuristicMapping/HeuristicMapping.cpp
+        Mapping/TemplateMapping/TemplateMapping.cpp
         Architecture/Architecture.cpp
         Transforms/GraphMining/GraMi.cpp
         Util/ArchParser.cpp

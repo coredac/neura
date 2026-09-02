@@ -469,7 +469,8 @@ public:
                    std::vector<LinkOverride>());
 
   Tile *getTile(int id);
-  Tile *getTile(int x, int y);
+  // Returns nullptr when no available tile has the given coordinates.
+  Tile *getTile(int x, int y) const;
 
   int getMultiCgraRows() const { return multi_cgra_rows_; }
   int getMultiCgraColumns() const { return multi_cgra_columns_; }

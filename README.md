@@ -1,60 +1,85 @@
 # Neura -- a dataflow dialect.
 
-Build LLVM & Neura
---------------------------------------------------------
- - Clone llvm-project.
+## Build LLVM and Neura
 
- - Clone this repo.
+Neura is pinned to LLVM commit `6146a88f60492b520a36f8f8f3231e15f3cc6082`.
 
- - Build LLVM:
-   - Check out to commit `6146a88` (Our project is based on this version of LLVM).
-   - Build:
+### Prerequisites
+
+Use Python 3.11.16 and install the native binding dependencies into the same
+environment that will configure LLVM and Neura:
+
 ```sh
- $ mkdir build && cd build
- # May need install ccache and lld.
- $ cmake -G Ninja ../llvm \
-     -DLLVM_ENABLE_PROJECTS="mlir;clang" \
-     -DLLVM_BUILD_EXAMPLES=OFF \
-     -DLLVM_TARGETS_TO_BUILD="Native" \
-     -DCMAKE_BUILD_TYPE=Release \
-     -DLLVM_ENABLE_ASSERTIONS=ON \
-     -DCMAKE_C_COMPILER=clang \
-     -DCMAKE_CXX_COMPILER=clang++ \
-     -DCMAKE_CXX_STANDARD=17 \
-     -DCMAKE_CXX_FLAGS="-std=c++17 -frtti" \
-     -DLLVM_ENABLE_LLD=ON \
-     -DMLIR_INSTALL_AGGREGATE_OBJECTS=ON \
-     -DLLVM_ENABLE_RTTI=ON \
-     -DCMAKE_C_COMPILER_LAUNCHER=ccache \
-     -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
- $ cmake --build . --target check-mlir
- $ cmake --build . --target check-clang
+python -m pip install pybind11==2.13.6 nanobind==2.15.0
 ```
 
- - Build Neura:
-   - Step into this repo, note that this repo is outside of llvm-project.
-   - Build:
+The system build dependencies are CMake, Ninja, Clang, LLD, and optionally
+ccache.
+
+### Build LLVM/MLIR
+
+From the `llvm-project` repository:
+
 ```sh
- $ mkdir build && cd build
- # Replace the path "/workspace" accordingly.
- $ cmake -G Ninja .. \
-     -DLLVM_DIR=/workspace/llvm-project/build/lib/cmake/llvm \
-     -DMLIR_DIR=/workspace/llvm-project/build/lib/cmake/mlir \
-     -DMLIR_SOURCE_DIR=/workspace/llvm-project/mlir \
-     -DMLIR_BINARY_DIR=/workspace/llvm-project/build \
-     -DCMAKE_CXX_FLAGS="-std=c++17"
- $ ninja
+git checkout 6146a88f60492b520a36f8f8f3231e15f3cc6082
+
+cmake -G Ninja -S llvm -B build \
+  -DLLVM_ENABLE_PROJECTS="mlir;clang" \
+  -DLLVM_BUILD_EXAMPLES=OFF \
+  -DLLVM_TARGETS_TO_BUILD="Native" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_ENABLE_ASSERTIONS=ON \
+  -DCMAKE_C_COMPILER=clang \
+  -DCMAKE_CXX_COMPILER=clang++ \
+  -DCMAKE_CXX_STANDARD=17 \
+  -DCMAKE_CXX_FLAGS="-std=c++17 -frtti" \
+  -DLLVM_ENABLE_LLD=ON \
+  -DMLIR_INSTALL_AGGREGATE_OBJECTS=ON \
+  -DLLVM_ENABLE_RTTI=ON \
+  -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+  -DMLIR_BINDINGS_PYTHON_NB_DOMAIN=mlir \
+  -DPython3_EXECUTABLE="$(which python)" \
+  -DPython_EXECUTABLE="$(which python)"
+
+cmake --build build
 ```
 
- - Test:
-```sh
- $ cd ../test
- # a test with detailed middle output
- $ ../build/tools/mlir-neura-opt/mlir-neura-opt --debug test.mlir
+`MLIR_ENABLE_BINDINGS_PYTHON=ON` is required because Neura builds its Python
+package from the upstream MLIR Python bindings.
 
- # Or test with lit:
- $ /workspace/llvm-project/build/bin/llvm-lit test.mlir -v
+### Build Neura
+
+Neura is an out-of-tree MLIR project. Set `LLVM_BUILD_DIR` to the LLVM build
+directory; Neura derives the LLVM source and CMake package paths from it.
+
+```sh
+cd /path/to/dataflow
+export LLVM_BUILD_DIR=/path/to/llvm-project/build
+
+cmake -G Ninja -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPython3_EXECUTABLE="$(which python)" \
+  -DPython_EXECUTABLE="$(which python)"
+
+cmake --build build
+cmake --build build --target NeuraPythonModules
 ```
+
+The generated package is placed in
+`build/python_packages/neura_core/neura_mlir`.
+
+### Run tests
+
+```sh
+# Focused Python operation-binding test.
+$LLVM_BUILD_DIR/bin/llvm-lit -v test/python/neura_binding.py
+
+# Complete Neura test suite.
+$LLVM_BUILD_DIR/bin/llvm-lit -v test
+```
+
+Some frontend tests additionally require PyTorch and a compatible torch-mlir
+wheel; the pinned CI setup is in `.github/workflows/main.yml`.
 
 Sync `test/e2e` outputs into Zeonica_Testbench (submodule)
 --------------------------------------------------------

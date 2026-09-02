@@ -10,6 +10,7 @@ env:
   # Customize the CMake build type here (Release, Debug, RelWithDebInfo, etc.)
   BUILD_TYPE: Release
   LLVM_COMMIT: "6146a88f60492b520a36f8f8f3231e15f3cc6082"
+  LLVM_BUILD_DIR: "${{ github.workspace }}/llvm-project/build"
   CCACHE_DIR: "${{ github.workspace }}/.ccache"
   CCACHE_COMPRESS: "true"
   CCACHE_MAXSIZE: "4G"
@@ -26,7 +27,7 @@ jobs:
         python-version: ["3.11.13"]
 
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: true
 
@@ -34,6 +35,15 @@ jobs:
     - name: Git Submodule Update
       run: |
         git submodule update --init --recursive
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install MLIR Python binding dependencies
+      run: |
+        python -m pip install pybind11==2.13.6 nanobind==2.15.0
 
     # install ninja
     - name: install ninja for LLVM build
@@ -62,7 +72,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/llvm-project
-        key: ${{ runner.os }}-llvm-build-${{ env.LLVM_COMMIT }}
+        key: ${{ runner.os }}-llvm-python-${{ matrix.python-version }}-${{ env.LLVM_COMMIT }}-v1
 
     # install graphviz
     - name: install graphviz
@@ -91,6 +101,10 @@ jobs:
           -DLLVM_ENABLE_LLD=ON \
           -DMLIR_INSTALL_AGGREGATE_OBJECTS=ON \
           -DLLVM_ENABLE_RTTI=ON \
+          -DMLIR_ENABLE_BINDINGS_PYTHON=ON \
+          -DMLIR_BINDINGS_PYTHON_NB_DOMAIN=mlir \
+          -DPython3_EXECUTABLE="$(which python)" \
+          -DPython_EXECUTABLE="$(which python)" \
           -DLLVM_CCACHE_BUILD=ON \
           -DCMAKE_C_COMPILER_LAUNCHER=ccache \
           -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -110,15 +124,13 @@ jobs:
     - name: setup dataflow tool-chain
       working-directory: ${{github.workspace}}
       run: |
-        mkdir build && cd build
-        cmake -G Ninja .. \
-          -DLLVM_DIR=${{github.workspace}}/llvm-project/build/lib/cmake/llvm \
-          -DMLIR_DIR=${{github.workspace}}/llvm-project/build/lib/cmake/mlir \
-          -DMLIR_SOURCE_DIR=${{github.workspace}}/llvm-project/mlir \
-          -DMLIR_BINARY_DIR=${{github.workspace}}/llvm-project/build \
-          -DCMAKE_CXX_FLAGS="-std=c++17"
+        cmake -G Ninja -S . -B build \
+          -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+          -DPython3_EXECUTABLE="$(which python)" \
+          -DPython_EXECUTABLE="$(which python)"
 
-        ninja
+        cmake --build build
+        cmake --build build --target NeuraPythonModules
 
         # # install clang-12/opt-12
         # - name: install LLVM and Clang for scripts/experiment
@@ -142,11 +154,7 @@ jobs:
         #     sh script.sh
         #     ./simulate
 
-    # Sets up Python environment for torch-mlir
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v4
-      with:
-        python-version: ${{ matrix.python-version }}
+    # Python dependencies used by frontend tests
     - name: Install PyTorch (cpu)
       run: |
         pip install torch==2.5.1+cpu --index-url https://download.pytorch.org/whl/cpu
@@ -163,5 +171,4 @@ jobs:
     - name: run test
       working-directory: ${{github.workspace}}
       run: |
-        cd ${{github.workspace}}/test
-        ${{github.workspace}}/llvm-project/build/bin/llvm-lit . -v
+        ${{github.workspace}}/llvm-project/build/bin/llvm-lit -v test

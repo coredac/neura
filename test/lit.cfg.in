@@ -3,7 +3,7 @@ import lit.formats
 
 config.name = 'Neura Dialect Tests'
 config.test_format = lit.formats.ShTest(True)
-config.suffixes = ['.mlir']
+config.suffixes = ['.mlir', '.py']
 config.test_source_root = os.path.dirname(__file__)
 config.test_exec_root = os.path.dirname(__file__)
 config.excludes = ['samples', 'benchmark']
@@ -17,3 +17,14 @@ config.substitutions.append(('mlir-opt', '@MLIR_OPT@'))
 config.substitutions.append(('mlir-translate', '@MLIR_TRANSLATE@'))
 config.substitutions.append(('llc', '@LLC@'))
 config.substitutions.append(('clang', '@CLANG@'))
+config.substitutions.append(("%python", "@Python3_EXECUTABLE@"))
+
+python_package_root = r"@NEURA_PYTHON_PACKAGE_ROOT@"
+current_python_path = config.environment.get("PYTHONPATH")
+
+if current_python_path:
+    config.environment["PYTHONPATH"] = os.pathsep.join(
+        [python_package_root, current_python_path]
+    )
+else:
+    config.environment["PYTHONPATH"] = python_package_root
