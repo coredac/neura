@@ -58,17 +58,3 @@ func.func @test_add_mapped_form() -> !neura.data<i64, i1> {
 }
 
 // RUN: neura-interpreter %s | FileCheck %s
-
-// TODO: Remove Test 6 because we plan to remove the predicate attribute in
-// https://github.com/coredac/dataflow/issues/116
-
-// ===----------------------------------------------------------------------===//
-// Test 6: Add with operation embed predicate 0
-// ===----------------------------------------------------------------------===//
-// func.func @test_add__embed_predicate_zero() -> f32 {
-//   %a = "neura.constant"() {value = 10.0 : f32, predicate = false} : () -> f32
-//   %b = "neura.constant"() {value = 32.0 : f32, predicate = false} : () -> f32
-//   %res = "neura.add"(%a, %b) : (f32, f32) -> f32
-//   // [neura-interpreter]  → Output: 0.000000
-//   return %res : f32
-// }
