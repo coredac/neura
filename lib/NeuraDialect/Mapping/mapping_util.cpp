@@ -227,6 +227,19 @@ mlir::neura::collectRecurrenceCycles(Region &region) {
   return recurrence_cycles;
 }
 
+int mlir::neura::calculateRecMii(
+    llvm::ArrayRef<RecurrenceCycle> recurrence_cycles) {
+  if (recurrence_cycles.empty()) {
+    return 1;
+  }
+
+  int rec_mii = recurrence_cycles.front().length;
+  for (const RecurrenceCycle &cycle : recurrence_cycles.drop_front()) {
+    rec_mii = std::max(rec_mii, cycle.length);
+  }
+  return rec_mii;
+}
+
 int mlir::neura::calculateResMii(Region &region,
                                  const Architecture &architecture) {
   int num_ops = 0;
