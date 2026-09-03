@@ -920,12 +920,12 @@ void MappingState::encodeMappingState() {
                       mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),
                                              index_per_ii))});
         mapping_entries.push_back(dict);
-      } else if (loc.resource->getKind() == ResourceKind::Port) {
-        kind_str = "port";
-        Port *port = dyn_cast<Port>(loc.resource);
-        assert(port && "Expected a Port resource");
+      } else if (loc.resource->getKind() == ResourceKind::BoundaryPort) {
+        kind_str = "boundary_port";
+        BoundaryPort *port = dyn_cast<BoundaryPort>(loc.resource);
+        assert(port && "Expected a BoundaryPort resource");
 
-        // A port is attached to one boundary tile. The port direction
+        // A boundary port is attached to one boundary tile. The port direction
         // describes the physical array boundary, while port kind describes
         // whether data enters or leaves the TileArray through this resource.
         Tile *tile = port->getTile();
@@ -944,12 +944,14 @@ void MappingState::encodeMappingState() {
                                            port->getId())),
                 mlir::NamedAttribute(
                     mlir::StringAttr::get(ctx, "io"),
-                    mlir::StringAttr::get(
-                        ctx, stringifyPortKind(port->getPortKind()))),
+                    mlir::StringAttr::get(ctx,
+                                          stringifyBoundaryPortKind(
+                                              port->getBoundaryPortKind()))),
                 mlir::NamedAttribute(
                     mlir::StringAttr::get(ctx, "direction"),
                     mlir::StringAttr::get(
-                        ctx, stringifyPortDirection(port->getDirection()))),
+                        ctx, stringifyBoundaryPortDirection(
+                                 port->getBoundaryPortDirection()))),
                 mlir::NamedAttribute(
                     mlir::StringAttr::get(ctx, "time_step"),
                     mlir::IntegerAttr::get(mlir::IntegerType::get(ctx, 32),

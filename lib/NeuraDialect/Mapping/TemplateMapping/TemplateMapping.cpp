@@ -16,9 +16,9 @@ namespace neura {
 namespace {
 
 // Maps kernel inputs and results to physical boundary ports.
-struct TemplatePortBindings {
-  llvm::DenseMap<Value, Port *> input_ports;
-  std::map<unsigned, Port *> output_ports;
+struct TemplateBoundaryPortBindings {
+  llvm::DenseMap<Value, BoundaryPort *> input_ports;
+  std::map<unsigned, BoundaryPort *> output_ports;
 };
 
 // Gets the Tile specified by an operation's placement attribute.
@@ -65,9 +65,11 @@ findParentKernel(const std::vector<std::pair<Operation *, int>> &operations) {
   return KernelOp();
 }
 
-// Resolves one input_ports or output_ports entry to a physical Port.
-Port *resolvePortBinding(KernelOp kernel, DictionaryAttr binding,
-                         PortKind port_kind, const Architecture &architecture) {
+// Resolves one input_ports or output_ports entry to a physical boundary port.
+BoundaryPort *resolveBoundaryPortBinding(KernelOp kernel,
+                                         DictionaryAttr binding,
+                                         BoundaryPortKind port_kind,
+                                         const Architecture &architecture) {
   auto direction_attr = binding.getAs<StringAttr>("direction");
   auto x_attr = binding.getAs<IntegerAttr>(attr::kX);
   auto y_attr = binding.getAs<IntegerAttr>(attr::kY);
@@ -77,8 +79,8 @@ Port *resolvePortBinding(KernelOp kernel, DictionaryAttr binding,
     return nullptr;
   }
 
-  std::optional<PortDirection> direction =
-      parsePortDirection(direction_attr.getValue());
+  std::optional<BoundaryPortDirection> direction =
+      parseBoundaryPortDirection(direction_attr.getValue());
 
   if (!direction) {
     kernel.emitOpError() << "unsupported port direction \""
@@ -86,13 +88,13 @@ Port *resolvePortBinding(KernelOp kernel, DictionaryAttr binding,
     return nullptr;
   }
 
-  Port *port = architecture.getPort(port_kind, *direction,
-                                    static_cast<int>(x_attr.getInt()),
-                                    static_cast<int>(y_attr.getInt()));
+  BoundaryPort *port = architecture.getBoundaryPort(
+      port_kind, *direction, static_cast<int>(x_attr.getInt()),
+      static_cast<int>(y_attr.getInt()));
 
   if (!port) {
     kernel.emitOpError() << "binding does not identify an available "
-                         << stringifyPortKind(port_kind) << " port";
+                         << stringifyBoundaryPortKind(port_kind) << " port";
     return nullptr;
   }
 
@@ -100,9 +102,9 @@ Port *resolvePortBinding(KernelOp kernel, DictionaryAttr binding,
 }
 
 // Reads input_ports and output_ports from template mapping.
-bool collectTemplatePortBindings(KernelOp kernel,
-                                 const Architecture &architecture,
-                                 TemplatePortBindings &bindings) {
+bool collectTemplateBoundaryPortBindings(
+    KernelOp kernel, const Architecture &architecture,
+    TemplateBoundaryPortBindings &bindings) {
   auto metadata = kernel->getAttrOfType<DictionaryAttr>("kernel_metadata");
   if (!metadata) {
     return true;
@@ -145,8 +147,8 @@ bool collectTemplatePortBindings(KernelOp kernel,
         return false;
       }
 
-      Port *port =
-          resolvePortBinding(kernel, binding, PortKind::Input, architecture);
+      BoundaryPort *port = resolveBoundaryPortBinding(
+          kernel, binding, BoundaryPortKind::Input, architecture);
 
       if (!port) {
         return false;
@@ -186,8 +188,8 @@ bool collectTemplatePortBindings(KernelOp kernel,
         return false;
       }
 
-      Port *port =
-          resolvePortBinding(kernel, binding, PortKind::Output, architecture);
+      BoundaryPort *port = resolveBoundaryPortBinding(
+          kernel, binding, BoundaryPortKind::Output, architecture);
 
       if (!port) {
         return false;
@@ -209,7 +211,7 @@ bool collectTemplatePortBindings(KernelOp kernel,
 // matching input_ports entry.
 bool validateKernelInputBindings(
     const std::vector<std::pair<Operation *, int>> &operations,
-    const TemplatePortBindings &bindings) {
+    const TemplateBoundaryPortBindings &bindings) {
   for (const auto &[op, level] : operations) {
     (void)level;
 
@@ -259,7 +261,7 @@ void releaseRoutes(const std::vector<Operation *> &routes,
 
 // Routes kernel inputs from their assigned ports to the consumer Tile.
 bool routeKernelInputPorts(Operation *op, const MappingLoc &target_loc,
-                           const TemplatePortBindings &bindings,
+                           const TemplateBoundaryPortBindings &bindings,
                            MappingState &mapping_state,
                            std::vector<Operation *> &routed_inputs) {
   assert(routed_inputs.empty() &&
@@ -285,9 +287,9 @@ bool routeKernelInputPorts(Operation *op, const MappingLoc &target_loc,
     auto binding = bindings.input_ports.find(source);
 
     assert(binding != bindings.input_ports.end() &&
-           "Kernel input must have a Port binding");
+           "Kernel input must have a boundary port binding");
 
-    Port *input_port = binding->second;
+    BoundaryPort *input_port = binding->second;
 
     Tile *input_tile = input_port->getTile();
     Tile *consumer_tile = dyn_cast<Tile>(target_loc.resource);
@@ -332,8 +334,8 @@ bool routeKernelInputPorts(Operation *op, const MappingLoc &target_loc,
       return false;
     }
 
-    // The DataMovOp first occupies the input Port and then any internal links
-    // or registers selected by Tile-to-Tile routing.
+    // The DataMovOp first occupies the input boundary port and then any
+    // internal links or registers selected by Tile-to-Tile routing.
     std::vector<MappingLoc> complete_path = {
         input_port_loc,
     };
@@ -350,7 +352,7 @@ bool routeKernelInputPorts(Operation *op, const MappingLoc &target_loc,
 
 // Routes kernel results from their producer Tiles to their assigned ports.
 bool routeKernelOutputPorts(KernelOp kernel,
-                            const TemplatePortBindings &bindings,
+                            const TemplateBoundaryPortBindings &bindings,
                             const Architecture &architecture,
                             MappingState &mapping_state) {
   if (bindings.output_ports.empty()) {
@@ -441,8 +443,8 @@ bool routeKernelOutputPorts(KernelOp kernel,
         continue;
       }
 
-      // The output Port is the final location of the DataMovOp connected to
-      // neura.yield.
+      // The output boundary port is the final location of the DataMovOp
+      // connected to neura.yield.
       tile_path.push_back(output_port_loc);
       mapping_state.reserveRoute(data_move.getOperation(), tile_path);
 
@@ -469,10 +471,10 @@ bool TemplateMapping::map(
 
   KernelOp kernel = findParentKernel(sorted_ops_with_levels);
 
-  TemplatePortBindings port_bindings;
+  TemplateBoundaryPortBindings port_bindings;
 
-  if (kernel &&
-      !collectTemplatePortBindings(kernel, architecture, port_bindings)) {
+  if (kernel && !collectTemplateBoundaryPortBindings(kernel, architecture,
+                                                     port_bindings)) {
     return false;
   }
 
@@ -525,8 +527,8 @@ bool TemplateMapping::map(
         break;
       }
 
-      // Input Port routes are created by TemplateMapping and must be released
-      // before trying the next schedule time.
+      // Input boundary port routes are created by TemplateMapping and must be
+      // released before trying the next schedule time.
       releaseRoutes(routed_inputs, mapping_state);
     }
 

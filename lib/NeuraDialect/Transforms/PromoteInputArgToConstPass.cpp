@@ -65,7 +65,8 @@ collectPortBoundInputIndices(neura::KernelOp kernel_op,
 
   auto kind = metadata.getAs<StringAttr>("kind");
 
-  // Port-aware argument preservation currently belongs to template kernels.
+  // Boundary-port-aware argument preservation currently belongs to template
+  // kernels.
   if (!kind || kind.getValue() != "template") {
     return success();
   }

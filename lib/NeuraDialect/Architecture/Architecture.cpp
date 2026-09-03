@@ -161,51 +161,53 @@ void Link::connect(Tile *src, Tile *dst) {
 }
 
 //===----------------------------------------------------------------------===//
-// Port
+// Boundary Port
 //===----------------------------------------------------------------------===//
-Port::Port(int id, PortKind port_kind, PortDirection direction, Tile *tile)
+BoundaryPort::BoundaryPort(int id, BoundaryPortKind port_kind,
+                           BoundaryPortDirection direction, Tile *tile)
     : id(id), port_kind(port_kind), direction(direction), tile(tile) {
-  assert(tile && "A port must be attached to a tile");
+  assert(tile && "A boundary port must be attached to a tile");
 }
 
-std::optional<PortDirection>
-mlir::neura::parsePortDirection(llvm::StringRef direction) {
+std::optional<BoundaryPortDirection>
+mlir::neura::parseBoundaryPortDirection(llvm::StringRef direction) {
   if (direction == "north")
-    return PortDirection::North;
+    return BoundaryPortDirection::North;
   if (direction == "south")
-    return PortDirection::South;
+    return BoundaryPortDirection::South;
   if (direction == "east")
-    return PortDirection::East;
+    return BoundaryPortDirection::East;
   if (direction == "west")
-    return PortDirection::West;
+    return BoundaryPortDirection::West;
 
   return std::nullopt;
 }
 
-llvm::StringRef mlir::neura::stringifyPortDirection(PortDirection direction) {
+llvm::StringRef
+mlir::neura::stringifyBoundaryPortDirection(BoundaryPortDirection direction) {
   switch (direction) {
-  case PortDirection::North:
+  case BoundaryPortDirection::North:
     return "north";
-  case PortDirection::South:
+  case BoundaryPortDirection::South:
     return "south";
-  case PortDirection::East:
+  case BoundaryPortDirection::East:
     return "east";
-  case PortDirection::West:
+  case BoundaryPortDirection::West:
     return "west";
   }
 
-  llvm_unreachable("Unknown port direction");
+  llvm_unreachable("Unknown boundary port direction");
 }
 
-llvm::StringRef mlir::neura::stringifyPortKind(PortKind kind) {
+llvm::StringRef mlir::neura::stringifyBoundaryPortKind(BoundaryPortKind kind) {
   switch (kind) {
-  case PortKind::Input:
+  case BoundaryPortKind::Input:
     return "input";
-  case PortKind::Output:
+  case BoundaryPortKind::Output:
     return "output";
   }
 
-  llvm_unreachable("Unknown port kind");
+  llvm_unreachable("Unknown boundary port kind");
 }
 
 //===----------------------------------------------------------------------===//
@@ -617,7 +619,7 @@ void Architecture::applyLinkOverrides(
   }
 }
 
-// Initializes the input and output ports exposed by boundary tiles.
+// Initializes the input and output boundary ports exposed by boundary tiles.
 //
 // Neura's current coordinate convention is:
 //   - x increases from west to east;
@@ -626,15 +628,17 @@ void Architecture::applyLinkOverrides(
 //
 // Each exposed boundary direction receives a distinct input port and output
 // port so that ingress and egress occupy independently modeled resources.
-void Architecture::initializePorts() {
+void Architecture::initializeBoundaryPorts() {
   int next_port_id = 0;
 
-  auto createPortPair = [&](Tile *tile, PortDirection direction) {
-    for (PortKind kind : {PortKind::Input, PortKind::Output}) {
-      auto port = std::make_unique<Port>(next_port_id, kind, direction, tile);
+  auto createPortPair = [&](Tile *tile, BoundaryPortDirection direction) {
+    for (BoundaryPortKind kind :
+         {BoundaryPortKind::Input, BoundaryPortKind::Output}) {
+      auto port =
+          std::make_unique<BoundaryPort>(next_port_id, kind, direction, tile);
 
-      tile->addPort(port.get());
-      port_storage_[next_port_id] = std::move(port);
+      tile->addBoundaryPort(port.get());
+      boundary_port_storage_[next_port_id] = std::move(port);
       ++next_port_id;
     }
   };
@@ -643,17 +647,21 @@ void Architecture::initializePorts() {
     int x = tile->getX();
     int y = tile->getY();
 
-    if (x == 0)
-      createPortPair(tile, PortDirection::West);
+    if (x == 0) {
+      createPortPair(tile, BoundaryPortDirection::West);
+    }
 
-    if (x == getPerCgraColumns() - 1)
-      createPortPair(tile, PortDirection::East);
+    if (x == getPerCgraColumns() - 1) {
+      createPortPair(tile, BoundaryPortDirection::East);
+    }
 
-    if (y == 0)
-      createPortPair(tile, PortDirection::South);
+    if (y == 0) {
+      createPortPair(tile, BoundaryPortDirection::South);
+    }
 
-    if (y == getPerCgraRows() - 1)
-      createPortPair(tile, PortDirection::North);
+    if (y == getPerCgraRows() - 1) {
+      createPortPair(tile, BoundaryPortDirection::North);
+    }
   }
 }
 
@@ -688,7 +696,7 @@ Architecture::Architecture(int multi_cgra_rows, int multi_cgra_columns,
   applyTileOverrides(tile_overrides);
   createLinks(link_defaults, per_cgra_base_topology);
   applyLinkOverrides(link_overrides);
-  initializePorts();
+  initializeBoundaryPorts();
 }
 
 std::unique_ptr<Architecture> Architecture::cloneWithNewDimensions(
@@ -753,11 +761,12 @@ void Architecture::removeTile(int tile_id) {
   }
 
   // Removes ports attached to the tile before destroying the tile.
-  for (auto port_it = port_storage_.begin(); port_it != port_storage_.end();) {
-    if (port_it->second->getTile() == tile) {
-      port_it = port_storage_.erase(port_it);
+  for (auto boundary_port_it = boundary_port_storage_.begin();
+       boundary_port_it != boundary_port_storage_.end();) {
+    if (boundary_port_it->second->getTile() == tile) {
+      boundary_port_it = boundary_port_storage_.erase(boundary_port_it);
     } else {
-      ++port_it;
+      ++boundary_port_it;
     }
   }
 
@@ -846,15 +855,17 @@ void Architecture::removeLink(int src_tile_x, int src_tile_y, int dst_tile_x,
   removeLink(src_it->second, dst_it->second);
 }
 
-Port *Architecture::getPort(PortKind port_kind, PortDirection direction, int x,
-                            int y) const {
-  for (const auto &[id, port] : port_storage_) {
+BoundaryPort *Architecture::getBoundaryPort(BoundaryPortKind port_kind,
+                                            BoundaryPortDirection direction,
+                                            int x, int y) const {
+  for (const auto &[id, port] : boundary_port_storage_) {
     (void)id;
 
     Tile *tile = port->getTile();
 
-    if (port->getPortKind() == port_kind && port->getDirection() == direction &&
-        tile->getX() == x && tile->getY() == y) {
+    if (port->getBoundaryPortKind() == port_kind &&
+        port->getBoundaryPortDirection() == direction && tile->getX() == x &&
+        tile->getY() == y) {
       return port.get();
     }
   }
@@ -865,11 +876,11 @@ Port *Architecture::getPort(PortKind port_kind, PortDirection direction, int x,
   return nullptr;
 }
 
-std::vector<Port *> Architecture::getAllPorts() const {
-  std::vector<Port *> ports;
-  ports.reserve(port_storage_.size());
+std::vector<BoundaryPort *> Architecture::getAllBoundaryPorts() const {
+  std::vector<BoundaryPort *> ports;
+  ports.reserve(boundary_port_storage_.size());
 
-  for (const auto &[id, port] : port_storage_) {
+  for (const auto &[id, port] : boundary_port_storage_) {
     (void)id;
     ports.push_back(port.get());
   }

@@ -619,36 +619,22 @@ def Neura_MulAddOp : Op<NeuraDialect, "mul_add"> {
 def Neura_MacOp : Op<NeuraDialect, "mac"> {
   let summary = "Configured multiply-accumulate operation.";
   let description = [{
-    Defines one MAC operation placed on a CGRA Tile.
+    Defines one configured MAC operation placed on a CGRA Tile. The operation
+    consumes a flowing value and an optional incoming partial sum. It produces
+    the accumulated result and forwards the flowing value to the next Tile.
 
-    Supported operand conventions:
-
-    - `stationary = "weight"`
-      - input0: activation
-      - input1: optional incoming partial sum
-      - result: outgoing partial sum
-
-    - `stationary = "input"`
-      - input0: weight
-      - input1: optional incoming partial sum
-      - result: outgoing partial sum
-
-    - `stationary = "output"`
-      - input0: left multiplicand
-      - input1: right multiplicand
-      - result: locally accumulated output
+    The stationary value is configured once by the enclosing template kernel
+    and is therefore not represented as a dynamic operand of each MAC.
   }];
 
   let arguments = (
     ins AnyType:$input0,
-        Optional<AnyType>:$input1,
-        StrAttr:$stationary
+        Optional<AnyType>:$input1
   );
 
-  let results = (outs AnyType:$result);
+  let results = (outs AnyType:$result, AnyType:$forwarded);
 
   let traits = [SameOperandsAndResultElementType];
-  let hasVerifier = 1;
 }
 
 // ----------------------------------------------------
