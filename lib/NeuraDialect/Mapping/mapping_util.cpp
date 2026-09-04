@@ -1,6 +1,7 @@
 #include <deque>
 #include <queue>
 
+#include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -93,6 +94,8 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
     return FAddFAdd;
   if (isa<neura::FMulFAddOp>(op))
     return FMulFAdd;
+  if (isa<neura::MacOp>(op))
+    return IMac;
 
   // Control flow operations
   if (isa<neura::ReturnOp>(op))
@@ -246,9 +249,10 @@ int mlir::neura::calculateResMii(Region &region,
 
   // Count all "compute" operations (non-terminators, non-block ops).
   region.walk([&](Operation *op) {
-    // Skips non-materialized ops.
-    if (isa<func::FuncOp>(op) ||
-        isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op)) {
+    // Only materialized operations consume Tile resources. Movement,
+    // recurrence placeholders, and region terminators do not contribute to
+    // ResMII.
+    if (isa<func::FuncOp>(op) || is_non_materialized(op)) {
       return;
     }
     // Skips operations inside fused_op regions
@@ -682,6 +686,14 @@ bool mlir::neura::tryRouteDataMove(Operation *mov_op, MappingLoc src_loc,
   int exclusive_deadline_step = dst_loc.time_step;
   if (is_backward_move) {
     exclusive_deadline_step += state.getII();
+  }
+
+  // No routing resource is required when data is already at the destination
+  // tile at the exact time it is consumed. Outer mapping algorithms (e.g.,
+  // TemplateMapping) can encounter this case after injecting data through a
+  // port attached to the consumer tile.
+  if (src_tile == dst_tile && src_loc.time_step == exclusive_deadline_step) {
+    return true;
   }
 
   llvm::outs() << "[tryRouteDataMove] Routing from Tile#" << src_tile->getId()
@@ -1278,8 +1290,55 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
       assert(isa<neura::DataMovOp>(data_move) &&
              "Expected a DataMovOp as operand for non-ReserveOp operations");
 
+      // A specialized mapping strategy (e.g., TemplateMapping) may route an
+      // operand before invoking this shared placement implementation. Reuse
+      // that route instead of trying to discover and route its producer again.
+      const std::vector<MappingLoc> &existing_route =
+          mapping_state.getAllLocsOfOp(data_move);
+
+      if (!existing_route.empty()) {
+        pending_operand_routes.push_back({
+            data_move,
+            existing_route,
+        });
+
+        llvm::errs() << "[DEBUG] Reusing pre-routed data move: " << *data_move
+                     << "\n";
+        continue;
+      }
+
       Operation *producer = getMaterializedProducer(operand);
-      MappingLoc src_loc = mapping_state.getAllLocsOfOp(producer).back();
+
+      // A block argument has no defining operation. A mapping strategy that
+      // supports external inputs must route this DataMovOp before calling
+      // placeAndRoute.
+      if (!producer) {
+        data_move->emitError(
+            "external input was not routed by the selected mapping strategy");
+
+        mapping_state.unbindOp(op);
+        for (Operation *routed_op : routed_operands) {
+          mapping_state.releaseRoute(routed_op);
+        }
+
+        return false;
+      }
+
+      const std::vector<MappingLoc> &producer_locs =
+          mapping_state.getAllLocsOfOp(producer);
+
+      if (producer_locs.empty()) {
+        data_move->emitError("producer has not been mapped");
+
+        mapping_state.unbindOp(op);
+        for (Operation *routed_op : routed_operands) {
+          mapping_state.releaseRoute(routed_op);
+        }
+
+        return false;
+      }
+
+      MappingLoc src_loc = producer_locs.back();
 
       std::vector<MappingLoc> route_path;
       if (tryRouteForwardMove(data_move, src_loc, target_loc, mapping_state,

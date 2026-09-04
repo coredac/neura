@@ -48,7 +48,8 @@ def Neura_KernelOp : Op<NeuraDialect, "kernel",
                                           // systems).
       OptionalAttr<StrAttr>:$kernel_name, // Name of the kernel (for
                                           // identification).
-      OptionalAttr<StrAttr>:$accelerator  // Target accelerator name.
+      OptionalAttr<StrAttr>:$accelerator,  // Target accelerator name.
+      OptionalAttr<DictionaryAttr>:$kernel_metadata
   );
 
   let results = (outs Variadic<AnyType>:$outputs);
@@ -612,6 +613,41 @@ def Neura_MulAddOp : Op<NeuraDialect, "mul_add"> {
   let results = (outs AnyType:$result);
   // let assemblyFormat = "$a `,` $b `,` $c `,` $predicate attr-dict `:`
   // type($result)";
+  let traits = [SameOperandsAndResultElementType];
+}
+
+def Neura_MacOp : Op<NeuraDialect, "mac"> {
+  let summary = "Configured multiply-accumulate operation.";
+  let description = [{
+    Defines one configured MAC operation placed on a CGRA Tile.
+
+    `input0` is the flowing multiplicand and `input1` is an optional incoming
+    partial sum. The stationary multiplicand is configured by the enclosing
+    template kernel and is therefore not represented as a dynamic operand.
+
+    For a Tile-local stationary value `s`, the operation computes:
+
+      result = input0 * s + input1
+
+    When `input1` is absent, its value is implicitly zero. The `forwarded`
+    result carries `input0` unchanged to the next Tile.
+
+    This interface supports weight-stationary and input-stationary dataflows.
+    The distinction is determined by which kernel input is configured as the
+    stationary multiplicand.
+
+    Output-stationary dataflow is not currently supported. It requires two
+    flowing multiplicands, a Tile-local accumulator, and a separate protocol
+    for draining the completed accumulator.
+  }];
+
+  let arguments = (
+    ins AnyType:$input0,
+        Optional<AnyType>:$input1
+  );
+
+  let results = (outs AnyType:$result, AnyType:$forwarded);
+
   let traits = [SameOperandsAndResultElementType];
 }
 

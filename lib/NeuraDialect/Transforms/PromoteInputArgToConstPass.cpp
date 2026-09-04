@@ -10,7 +10,9 @@
 #include "mlir/IR/Region.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Pass/Pass.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SetVector.h"
+#include "llvm/Support/LogicalResult.h"
 #include <cassert>
 #include <string>
 
@@ -47,6 +49,69 @@ LogicalResult promoteFunctionArgsToConstants(Region &region) {
   return success();
 }
 
+// Collects kernel input indices that are explicitly bound to physical input
+// ports by template metadata.
+//
+// These arguments must remain as block arguments because TemplateMapping uses
+// them as external streaming values injected through TileArray boundary ports.
+LogicalResult
+collectPortBoundInputIndices(neura::KernelOp kernel_op,
+                             llvm::DenseSet<unsigned> &port_bound_inputs) {
+  auto metadata = kernel_op->getAttrOfType<DictionaryAttr>("kernel_metadata");
+
+  if (!metadata) {
+    return success();
+  }
+
+  auto kind = metadata.getAs<StringAttr>("kind");
+
+  // Boundary-port-aware argument preservation currently belongs to template
+  // kernels.
+  if (!kind || kind.getValue() != "template") {
+    return success();
+  }
+
+  auto template_metadata = metadata.getAs<DictionaryAttr>("template");
+
+  if (!template_metadata) {
+    return kernel_op.emitOpError("template kernel requires template metadata");
+  }
+
+  auto input_ports = template_metadata.getAs<ArrayAttr>("input_ports");
+
+  if (!input_ports) {
+    return success();
+  }
+
+  size_t num_inputs = kernel_op.getInputs().size();
+
+  for (Attribute attribute : input_ports) {
+    auto binding = dyn_cast<DictionaryAttr>(attribute);
+
+    if (!binding) {
+      return kernel_op.emitOpError("input port binding must be a dictionary");
+    }
+
+    auto index_attr = binding.getAs<IntegerAttr>("kernel_input");
+
+    if (!index_attr) {
+      return kernel_op.emitOpError("input port binding requires kernel_input");
+    }
+
+    int64_t input_index = index_attr.getInt();
+
+    if (input_index < 0 || input_index >= static_cast<int64_t>(num_inputs)) {
+      return kernel_op.emitOpError("kernel_input index is out of bounds");
+    }
+
+    if (!port_bound_inputs.insert(static_cast<unsigned>(input_index)).second) {
+      return kernel_op.emitOpError("kernel input has multiple port bindings");
+    }
+  }
+
+  return success();
+}
+
 LogicalResult promoteKernelArgsToConstants(neura::KernelOp kernel_op) {
   Region &kernel_region = kernel_op.getBody();
   if (kernel_region.empty()) {
@@ -59,6 +124,11 @@ LogicalResult promoteKernelArgsToConstants(neura::KernelOp kernel_op) {
   // Gets the number of inputs and iter_args from kernel operands.
   size_t num_inputs = kernel_op.getInputs().size();
   size_t num_iter_args = kernel_op.getIterArgsInit().size();
+  llvm::DenseSet<unsigned> port_bound_inputs;
+
+  if (failed(collectPortBoundInputIndices(kernel_op, port_bound_inputs))) {
+    return failure();
+  }
 
   // Verifies block arguments layout: [inputs..., iter_args...]
   SmallVector<BlockArgument> args(entry_block.getArguments().begin(),
@@ -72,7 +142,21 @@ LogicalResult promoteKernelArgsToConstants(neura::KernelOp kernel_op) {
   for (size_t i = 0; i < num_inputs; ++i) {
     BlockArgument input_arg = args[i];
 
-    // Creates a constant for this input.
+    // Inputs explicitly bound to boundary ports remain block arguments.
+    // TemplateMapping later routes their DataMovOps from the selected ports.
+    if (port_bound_inputs.contains(static_cast<unsigned>(i))) {
+      continue;
+    }
+
+    // Metadata-only inputs do not need a materialized constant operation.
+    // For example, a stationary tensor may be referenced by kernel metadata
+    // without appearing as an SSA operand in the compute network.
+    if (input_arg.use_empty()) {
+      continue;
+    }
+
+    // All other live kernel inputs are represented as constant sources in the
+    // internal Neura dataflow graph.
     std::string const_name = "%input" + std::to_string(i);
     auto const_op = builder.create<neura::ConstantOp>(
         input_arg.getLoc(), input_arg.getType(),
@@ -110,8 +194,8 @@ struct PromoteInputArgToConstPass
     return "promote-input-arg-to-const";
   }
   StringRef getDescription() const override {
-    return "Promotes input arguments of functions or neura.kernels to neura "
-           "constant operations.";
+    return "Promotes input arguments to neura constants while preserving "
+           "port-bound template inputs.";
   }
   void getDependentDialects(DialectRegistry &registry) const override {
     registry.insert<mlir::neura::NeuraDialect>();
