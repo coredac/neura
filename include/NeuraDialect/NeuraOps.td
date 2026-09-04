@@ -619,12 +619,26 @@ def Neura_MulAddOp : Op<NeuraDialect, "mul_add"> {
 def Neura_MacOp : Op<NeuraDialect, "mac"> {
   let summary = "Configured multiply-accumulate operation.";
   let description = [{
-    Defines one configured MAC operation placed on a CGRA Tile. The operation
-    consumes a flowing value and an optional incoming partial sum. It produces
-    the accumulated result and forwards the flowing value to the next Tile.
+    Defines one configured MAC operation placed on a CGRA Tile.
 
-    The stationary value is configured once by the enclosing template kernel
-    and is therefore not represented as a dynamic operand of each MAC.
+    `input0` is the flowing multiplicand and `input1` is an optional incoming
+    partial sum. The stationary multiplicand is configured by the enclosing
+    template kernel and is therefore not represented as a dynamic operand.
+
+    For a Tile-local stationary value `s`, the operation computes:
+
+      result = input0 * s + input1
+
+    When `input1` is absent, its value is implicitly zero. The `forwarded`
+    result carries `input0` unchanged to the next Tile.
+
+    This interface supports weight-stationary and input-stationary dataflows.
+    The distinction is determined by which kernel input is configured as the
+    stationary multiplicand.
+
+    Output-stationary dataflow is not currently supported. It requires two
+    flowing multiplicands, a Tile-local accumulator, and a separate protocol
+    for draining the completed accumulator.
   }];
 
   let arguments = (
