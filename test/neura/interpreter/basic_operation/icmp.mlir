@@ -169,6 +169,24 @@ func.func @test_icmp_ugt_false() -> i1 {
   return %ugt : i1
 }
 
+// ====== Mapped form — single SSA operand with rhs_value attribute ======
+// After --map-to-accelerator, compile-time constant operands are folded into
+// rhs_value attributes (e.g. "neura.icmp"(%x) {cmpType = "sge", rhs_value = 0 : i32}).
+// Before this fix, the interpreter rejected any op with numOperands < 2.
+func.func @test_icmp_mapped_form_true() -> !neura.data<i1, i1> {
+  %a = "neura.grant_once"() <{constant_value = 5 : i32}> : () -> !neura.data<i32, i1>
+  %res = "neura.icmp"(%a) {cmpType = "sge", rhs_value = 0 : i32} : (!neura.data<i32, i1>) -> !neura.data<i1, i1>
+  // CHECK: [neura-interpreter]  → Output: 1.000000
+  return %res : !neura.data<i1, i1>
+}
+
+func.func @test_icmp_mapped_form_false() -> !neura.data<i1, i1> {
+  %a = "neura.grant_once"() <{constant_value = -5 : i32}> : () -> !neura.data<i32, i1>
+  %res = "neura.icmp"(%a) {cmpType = "sge", rhs_value = 0 : i32} : (!neura.data<i32, i1>) -> !neura.data<i1, i1>
+  // CHECK: [neura-interpreter]  → Output: 0.000000
+  return %res : !neura.data<i1, i1>
+}
+
 // ====== Unsigned greater than or equal (uge) ======
 // Positive case: lhs >= rhs (unsigned)
 func.func @test_icmp_uge_true() -> i1 {
