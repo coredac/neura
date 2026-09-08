@@ -482,6 +482,54 @@ bool handleNeuraConstantOp(
  * @return bool                          True if the constant is successfully
  * parsed and stored; false if the constant type is unsupported
  */
+/**
+ * @brief Resolves the LHS/RHS operands for a binary op that supports both
+ * the pre-mapping two-operand form and the post-mapping single-operand form.
+ *
+ * After --map-to-accelerator, FoldConstantPass folds compile-time constant
+ * operands into a rhs_value attribute, leaving a single SSA operand (the
+ * LHS). This is the shape shared by every binary neura op whose $rhs field
+ * is Optional<AnyType> in NeuraOps.td (e.g. AddOp, ICmpOp) — the mapper
+ * always folds into the same slot, so one resolver covers all of them.
+ *
+ * @param op          The op being handled (must have 1-2 operands + optional
+ * rhs_value attribute)
+ * @param op_name     Name used in diagnostics, e.g. "neura.add"
+ * @param lhs, rhs    Out params, populated on success
+ * @return bool       True if operands were resolved; false (with a
+ * diagnostic in verbose mode) if the op has zero operands or a single
+ * operand without a rhs_value attribute
+ */
+bool resolveBinaryOperands(
+    mlir::Operation *op, const char *op_name,
+    llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map,
+    PredicatedData &lhs, PredicatedData &rhs) {
+  if (op->getNumOperands() >= 2) {
+    lhs = value_to_predicated_data_map[op->getOperand(0)];
+    rhs = value_to_predicated_data_map[op->getOperand(1)];
+    return true;
+  }
+  if (op->getNumOperands() == 1) {
+    auto rhs_attr = op->getAttrOfType<mlir::IntegerAttr>("rhs_value");
+    if (!rhs_attr) {
+      if (isVerboseMode()) {
+        llvm::errs() << "[neura-interpreter]  └─ " << op_name
+                     << ": single-operand form requires rhs_value attribute\n";
+      }
+      return false;
+    }
+    lhs = value_to_predicated_data_map[op->getOperand(0)];
+    rhs.value = static_cast<float>(rhs_attr.getInt());
+    rhs.predicate = true; // compile-time constant is always valid
+    rhs.is_vector = false;
+    return true;
+  }
+  if (isVerboseMode()) {
+    llvm::errs() << "[neura-interpreter]  └─ " << op_name << ": no operands\n";
+  }
+  return false;
+}
+
 bool handleAddOp(
     neura::AddOp op,
     llvm::DenseMap<Value, PredicatedData> &value_to_predicated_data_map) {
@@ -489,31 +537,9 @@ bool handleAddOp(
     llvm::outs() << "[neura-interpreter]  Executing neura.add:\n";
   }
 
-  // After --map-to-accelerator, compile-time constant operands are folded into
-  // rhs_value attributes, leaving a single SSA operand (the LHS). The $rhs
-  // field in AddOp is Optional<AnyType> (NeuraOps.td) precisely to support this
-  // single-operand mapped form alongside the two-operand pre-mapping form.
   PredicatedData lhs, rhs;
-  if (op.getNumOperands() >= 2) {
-    lhs = value_to_predicated_data_map[op.getLhs()];
-    rhs = value_to_predicated_data_map[op.getRhs()];
-  } else if (op.getNumOperands() == 1) {
-    auto rhs_attr = op->getAttrOfType<mlir::IntegerAttr>("rhs_value");
-    if (!rhs_attr) {
-      if (isVerboseMode()) {
-        llvm::errs() << "[neura-interpreter]  └─ neura.add: single-operand "
-                        "form requires rhs_value attribute\n";
-      }
-      return false;
-    }
-    lhs = value_to_predicated_data_map[op.getLhs()];
-    rhs.value = static_cast<float>(rhs_attr.getInt());
-    rhs.predicate = true; // compile-time constant is always valid
-    rhs.is_vector = false;
-  } else {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.add: no operands\n";
-    }
+  if (!resolveBinaryOperands(op, "neura.add", value_to_predicated_data_map, lhs,
+                             rhs)) {
     return false;
   }
 
@@ -1607,16 +1633,11 @@ bool handleICmpOp(
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  Executing neura.icmp:\n";
   }
-  if (op.getNumOperands() < 2) {
-    if (isVerboseMode()) {
-      llvm::errs() << "[neura-interpreter]  └─ neura.icmp expects at least two "
-                      "operands\n";
-    }
+  PredicatedData lhs, rhs;
+  if (!resolveBinaryOperands(op, "neura.icmp", value_to_predicated_data_map,
+                             lhs, rhs)) {
     return false;
   }
-
-  auto lhs = value_to_predicated_data_map[op.getLhs()];
-  auto rhs = value_to_predicated_data_map[op.getRhs()];
 
   if (isVerboseMode()) {
     llvm::outs() << "[neura-interpreter]  ├─ Operands \n";
