@@ -1,16 +1,20 @@
 #include "NeuraDialect/Mapping/TemplateMapping/TemplateMapping.h"
 
 #include "NeuraDialect/Mapping/mapping_util.h"
+#include "NeuraDialect/NeuraOps.h"
+#include "NeuraDialect/NeuraTypes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "llvm/Support/raw_ostream.h"
 
 #include <algorithm>
+#include <cstdlib>
 
 namespace mlir {
 namespace neura {
 
 namespace {
 
+// Gets the Tile specified by an operation's placement attribute.
 Tile *getPlacedTile(Operation *op, const Architecture &architecture) {
   auto placement = op->getAttrOfType<DictionaryAttr>(attr::kPlacement);
 
@@ -40,6 +44,38 @@ Tile *getPlacedTile(Operation *op, const Architecture &architecture) {
   return tile;
 }
 
+// All dynamic data must originate in a mapped operation, including LD Tiles.
+// Memrefs referenced by template configuration are not dynamic data inputs.
+bool validateTemplateOperands(
+    const std::vector<std::pair<Operation *, int>> &operations) {
+  for (const auto &[op, level] : operations) {
+    (void)level;
+    if (is_non_materialized(op))
+      continue;
+    for (Value operand : op->getOperands()) {
+      if (isConfiguredMemrefAddress(op, operand)) {
+        continue;
+      }
+      Operation *producer = operand.getDefiningOp();
+      if (isa_and_nonnull<ReserveOp>(producer))
+        continue;
+      auto move = dyn_cast_or_null<DataMovOp>(producer);
+      if (!move) {
+        op->emitError(
+            "template-mapped operands must be wrapped by neura.data_mov");
+        return false;
+      }
+      if (!move.getInput().getDefiningOp()) {
+        move.emitOpError(
+            "template input must be produced by a mapped operation; "
+            "use a configured load for memory input");
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
 } // namespace
 
 bool TemplateMapping::map(
@@ -48,6 +84,10 @@ bool TemplateMapping::map(
     MappingState &mapping_state) {
   // Template mapping does not currently use critical-path information.
   (void)critical_ops;
+
+  if (!validateTemplateOperands(sorted_ops_with_levels)) {
+    return false;
+  }
 
   for (auto [op, level] : sorted_ops_with_levels) {
     if (is_non_materialized(op)) {
@@ -67,7 +107,30 @@ bool TemplateMapping::map(
 
     // Placement is fixed, but scheduling remains automatic. Start from the
     // operation's dependency level and allow enough slack for multi-hop routes.
+    // LD sources are materialized Tiles too. Keep their ALAP level so later
+    // rows do not inject earlier than their incoming partial sums.
     int first_time_step = std::max(0, level);
+    // Stores have no outgoing data edge. Scheduling every store at the common
+    // ALAP sink level would add needless waiting to earlier output columns.
+    if (isa<StoreOp>(op)) {
+      first_time_step = 0;
+      for (Value operand : op->getOperands()) {
+        auto move = operand.getDefiningOp<DataMovOp>();
+        if (!move)
+          continue;
+        Operation *producer = move.getInput().getDefiningOp();
+        const auto &locations = mapping_state.getAllLocsOfOp(producer);
+        if (locations.empty())
+          continue;
+        const auto &source = locations.back();
+        auto *source_tile = dyn_cast<Tile>(source.resource);
+        if (source_tile)
+          first_time_step = std::max(
+              first_time_step,
+              source.time_step + std::abs(source_tile->getX() - tile->getX()) +
+                  std::abs(source_tile->getY() - tile->getY()));
+      }
+    }
     int routing_slack =
         architecture.getPerCgraRows() + architecture.getPerCgraColumns();
     int last_time_step =

@@ -1,8 +1,10 @@
 #include "NeuraDialect/Architecture/Architecture.h"
+#include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cassert>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 

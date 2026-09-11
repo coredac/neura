@@ -15,7 +15,7 @@ per_cgra_defaults:
 
 tile_defaults:
   num_registers: 32
-  fu_types: ["add", "mul", "div", "fadd", "fmul", "fdiv", "logic", "cmp", "sel", "type_conv", "vfmul", "fadd_fadd", "fmul_fadd", "grant", "loop_control", "phi", "constant", "return", "alloca", "shift"]
+  fu_types: ["mac", "add", "mul", "div", "fadd", "fmul", "fdiv", "logic", "cmp", "sel", "type_conv", "vfmul", "fadd_fadd", "fmul_fadd", "grant", "loop_control", "phi", "constant", "return", "alloca", "shift"]
 
 link_defaults:
   latency: 1

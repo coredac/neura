@@ -1,6 +1,7 @@
 #include "Common/AcceleratorAttrs.h"
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraOps.h"
+#include "NeuraDialect/NeuraTypes.h"
 #include "NeuraDialect/NeuraPasses.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
@@ -23,6 +24,25 @@ struct InsertDataMovForNeuraOps : public RewritePattern {
 
   LogicalResult matchAndRewrite(Operation *op,
                                 PatternRewriter &rewriter) const override {
+    auto is_memref_address = [op](Value operand) {
+      Value address;
+      if (auto load = dyn_cast<neura::LoadOp>(op)) {
+        address = load.getAddr();
+      }
+      if (auto store = dyn_cast<neura::StoreOp>(op)) {
+        address = store.getAddr();
+      }
+      if (!address || operand != address) {
+        return false;
+      }
+
+      Type type = address.getType();
+      if (auto data = dyn_cast<neura::PredicatedValue>(type)) {
+        type = data.getValueType();
+      }
+      return isa<MemRefType>(type);
+    };
+
     // Only processes operations from the neura dialect. Operations from
     // other dialects (arith, math, etc.) should have been lowered to neura
     // ops by earlier passes (LowerArithToNeura, etc.) before this pass runs.
@@ -49,9 +69,10 @@ struct InsertDataMovForNeuraOps : public RewritePattern {
     }
 
     bool all_inputs_are_mov_except_reserve =
-        llvm::all_of(op->getOperands(), [](Value v) {
+        llvm::all_of(op->getOperands(), [&](Value v) {
           Operation *def_op = v.getDefiningOp();
-          return isa_and_nonnull<neura::DataMovOp>(def_op) ||
+          return is_memref_address(v) ||
+                 isa_and_nonnull<neura::DataMovOp>(def_op) ||
                  isa_and_nonnull<neura::ReserveOp>(def_op);
         });
 
@@ -100,6 +121,11 @@ struct InsertDataMovForNeuraOps : public RewritePattern {
     SmallVector<Value> new_operands;
     bool any_change = false;
     for (Value operand : op->getOperands()) {
+      // Memref bases are launch-time bindings, not link-carried address tokens.
+      if (is_memref_address(operand)) {
+        new_operands.push_back(operand);
+        continue;
+      }
       Operation *producer = operand.getDefiningOp();
 
       // Does NOT wrap operands that come from reserve: the reserve result

@@ -5,6 +5,7 @@
 #include "NeuraDialect/NeuraTypes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/PatternMatch.h"
+#include "mlir/IR/Visitors.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/Support/LogicalResult.h"
@@ -40,7 +41,7 @@ struct LeveragePredicatedValuePass
       if (!accel_attr || accel_attr.getValue() != accel::kNeuraTarget) {
         return;
       }
-      if (failed(processRegion(func.getFunctionBody()))) {
+      if (failed(processRegion(func.getFunctionBody(), false))) {
         llvm::errs() << "Failed to process function: " << func.getName()
                      << "\n";
         signalPassFailure();
@@ -56,7 +57,7 @@ struct LeveragePredicatedValuePass
         return;
       }
 
-      if (failed(processRegion(kernel_op.getBody()))) {
+      if (failed(processRegion(kernel_op.getBody(), true))) {
         llvm::errs() << "Failed to process neura.kernel operation: "
                      << *kernel_op << "\n";
         signalPassFailure();
@@ -67,14 +68,15 @@ struct LeveragePredicatedValuePass
 
 private:
   // Processes a region (function body or kernel body).
-  LogicalResult processRegion(Region &region) {
+  LogicalResult processRegion(Region &region,
+                              bool convert_entry_block_arguments) {
     if (region.empty()) {
       return success();
     }
 
     for (Block &block : region) {
       // Skips the entry (first) block of the function.
-      if (&block == &region.front()) {
+      if (!convert_entry_block_arguments && &block == &region.front()) {
         continue;
       }
 
@@ -113,10 +115,14 @@ private:
   void getOperationsInTopologicalOrder(Region &region,
                                        SmallVector<Operation *> &ordered) {
     DenseSet<Operation *> visited;
-    region.walk<WalkOrder::PreOrder>([&](Operation *op) {
+    region.walk<WalkOrder::PreOrder>([&](Operation *op) -> WalkResult {
+      if (op->hasTrait<OpTrait::IsIsolatedFromAbove>()) {
+        return WalkResult::skip();
+      }
+
       // Uses standard DFS to build topological order.
       if (visited.contains(op)) {
-        return;
+        return WalkResult::advance();
       }
 
       // Visits operands first.
@@ -134,6 +140,8 @@ private:
         visited.insert(op);
         ordered.push_back(op);
       }
+
+      return WalkResult::advance();
     });
   }
 

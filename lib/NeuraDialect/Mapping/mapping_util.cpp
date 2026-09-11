@@ -1,8 +1,10 @@
 #include <deque>
 #include <queue>
 
+#include "NeuraDialect/Architecture/Architecture.h"
 #include "NeuraDialect/Mapping/mapping_util.h"
 #include "NeuraDialect/NeuraOps.h"
+#include "NeuraDialect/NeuraTypes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/Operation.h"
@@ -14,6 +16,25 @@
 
 using namespace mlir;
 using namespace mlir::neura;
+
+bool mlir::neura::isConfiguredMemrefAddress(Operation *op, Value operand) {
+  Value address;
+  if (auto load = dyn_cast<LoadOp>(op)) {
+    address = load.getAddr();
+  }
+  if (auto store = dyn_cast<StoreOp>(op)) {
+    address = store.getAddr();
+  }
+  if (!address || operand != address) {
+    return false;
+  }
+
+  Type type = address.getType();
+  if (auto data = dyn_cast<PredicatedValue>(type)) {
+    type = data.getValueType();
+  }
+  return isa<MemRefType>(type);
+}
 
 // Constants for award calculation.
 constexpr int kAwardProximityScale = 1;
@@ -93,6 +114,8 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
     return FAddFAdd;
   if (isa<neura::FMulFAddOp>(op))
     return FMulFAdd;
+  if (isa<neura::MacOp>(op))
+    return IMac;
 
   // Control flow operations
   if (isa<neura::ReturnOp>(op))
@@ -246,9 +269,10 @@ int mlir::neura::calculateResMii(Region &region,
 
   // Count all "compute" operations (non-terminators, non-block ops).
   region.walk([&](Operation *op) {
-    // Skips non-materialized ops.
-    if (isa<func::FuncOp>(op) ||
-        isa<neura::CtrlMovOp, neura::DataMovOp, neura::ReserveOp>(op)) {
+    // Only materialized operations consume Tile resources. Movement,
+    // recurrence placeholders, and region terminators do not contribute to
+    // ResMII.
+    if (isa<func::FuncOp>(op) || is_non_materialized(op)) {
       return;
     }
     // Skips operations inside fused_op regions
@@ -684,6 +708,12 @@ bool mlir::neura::tryRouteDataMove(Operation *mov_op, MappingLoc src_loc,
     exclusive_deadline_step += state.getII();
   }
 
+  // No routing resource is required when data is already at the destination
+  // tile at the exact time it is consumed.
+  if (src_tile == dst_tile && src_loc.time_step == exclusive_deadline_step) {
+    return true;
+  }
+
   llvm::outs() << "[tryRouteDataMove] Routing from Tile#" << src_tile->getId()
                << " @t=" << src_loc.time_step << " to Tile#"
                << dst_tile->getId() << " @t=" << exclusive_deadline_step
@@ -1013,6 +1043,9 @@ mlir::neura::calculateAward(Operation *op, std::set<Operation *> &critical_ops,
   // Assembles all the producers.
   std::vector<Operation *> producers;
   for (Value operand : op->getOperands()) {
+    if (isConfiguredMemrefAddress(op, operand)) {
+      continue;
+    }
     if (isa<neura::ReserveOp>(operand.getDefiningOp())) {
       // Skips Reserve ops (backward ctrl move) when calculating award.
       continue;
@@ -1261,6 +1294,10 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
     std::vector<Operation *> routed_ctrl_movs;
     // Tries to route the data move operations.
     for (Value operand : op->getOperands()) {
+      // Runtime memref bindings consume no Tile-to-Tile routing resource.
+      if (isConfiguredMemrefAddress(op, operand)) {
+        continue;
+      }
       llvm::errs() << "Processing operand: " << operand << "\n";
       if (isa<neura::ReserveOp>(operand.getDefiningOp())) {
         // Skips Reserve ops (backward ctrl move) when routing.
@@ -1278,8 +1315,51 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
       assert(isa<neura::DataMovOp>(data_move) &&
              "Expected a DataMovOp as operand for non-ReserveOp operations");
 
+      // Reuses an operand route already reserved by this mapping attempt.
+      const std::vector<MappingLoc> &existing_route =
+          mapping_state.getAllLocsOfOp(data_move);
+
+      if (!existing_route.empty()) {
+        pending_operand_routes.push_back({
+            data_move,
+            existing_route,
+        });
+
+        llvm::errs() << "[DEBUG] Reusing pre-routed data move: " << *data_move
+                     << "\n";
+        continue;
+      }
+
       Operation *producer = getMaterializedProducer(operand);
-      MappingLoc src_loc = mapping_state.getAllLocsOfOp(producer).back();
+
+      // Every dynamic operand needs a materialized producer.
+      if (!producer) {
+        data_move->emitError(
+            "input has no mapped producer; lower kernel inputs before mapping");
+
+        mapping_state.unbindOp(op);
+        for (Operation *routed_op : routed_operands) {
+          mapping_state.releaseRoute(routed_op);
+        }
+
+        return false;
+      }
+
+      const std::vector<MappingLoc> &producer_locs =
+          mapping_state.getAllLocsOfOp(producer);
+
+      if (producer_locs.empty()) {
+        data_move->emitError("producer has not been mapped");
+
+        mapping_state.unbindOp(op);
+        for (Operation *routed_op : routed_operands) {
+          mapping_state.releaseRoute(routed_op);
+        }
+
+        return false;
+      }
+
+      MappingLoc src_loc = producer_locs.back();
 
       std::vector<MappingLoc> route_path;
       if (tryRouteForwardMove(data_move, src_loc, target_loc, mapping_state,

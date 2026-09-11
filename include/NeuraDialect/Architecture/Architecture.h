@@ -5,12 +5,14 @@
 #include <cassert>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "NeuraDialect/Architecture/ArchitectureSpec.h"
+#include "llvm/ADT/StringRef.h"
 
 namespace mlir {
 namespace neura {
@@ -91,7 +93,9 @@ enum OperationKind {
   ICtrlMov = 40,
   // Counter operations.
   ICounter = 41,
-  IExtractPredicate = 42
+  IExtractPredicate = 42,
+  // Configured MAC operation.
+  IMac = 43
 };
 
 // Maps hardware resource names to their supported operations.
@@ -127,6 +131,7 @@ static const std::map<std::string, std::vector<OperationKind>>
         // Fused operations.
         {"fadd_fadd", {FAddFAdd}},
         {"fmul_fadd", {FMulFAdd}},
+        {"mac", {IMac}},
 
         // Shift operations.
         {"shift", {IShl}},
@@ -273,15 +278,6 @@ public:
 
   const std::vector<Register *> getRegisters() const;
 
-  // Port management.
-  const std::vector<std::string> &getPorts() const { return ports; }
-  void setPorts(const std::vector<std::string> &new_ports) {
-    ports = new_ports;
-  }
-  bool hasPort(const std::string &port) const {
-    return std::find(ports.begin(), ports.end(), port) != ports.end();
-  }
-
   // Memory management.
   int getMemoryCapacity() const { return memory_capacity; }
   void setMemoryCapacity(int capacity) { memory_capacity = capacity; }
@@ -298,8 +294,7 @@ private:
   std::set<FunctionUnit *> functional_units; // Non-owning, for fast lookup.
   RegisterFileCluster *register_file_cluster = nullptr;
 
-  // Port and memory configuration.
-  std::vector<std::string> ports;
+  // Memory configuration.
   int memory_capacity = -1; // -1 means not configured.
 };
 
@@ -535,7 +530,7 @@ private:
   void createRingLinks(int &link_id, const LinkDefaults &link_defaults);
 
   // Architecture components: tiles, links, and their mappings.
-  // Ports and memory are now modeled as part of Tile class.
+  // Memory is now modeled as part of Tile class.
   std::map<int, std::unique_ptr<Tile>>
       tile_storage_; // Owns tiles, key is unique tile_id.
   std::map<int, std::unique_ptr<Link>>

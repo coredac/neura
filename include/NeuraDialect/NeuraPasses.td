@@ -136,7 +136,9 @@ def PromoteInputArgToConst : Pass<"promote-input-arg-to-const", "ModuleOp"> {
   let summary = "Promotes input arguments of functions or neura.kernels to "
                 "neura constant operations";
   let description = [{
-    This pass promotes input arguments of functions or neura.kernels to neura constant operations.
+    This pass promotes input arguments of functions or neura.kernels to
+    neura.constant operations. Inputs referenced only by template configuration
+    remain kernel inputs and do not consume a Tile as constant operations.
   }];
   let constructor = "neura::createPromoteInputArgToConstPass()";
 }

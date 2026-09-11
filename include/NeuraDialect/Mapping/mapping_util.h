@@ -17,6 +17,8 @@ bool is_non_materialized(Operation *op);
 // require DataMovOp wrapping (e.g., constants, carry, invariant, etc.).
 bool is_steering_unwrapped_op(Operation *op);
 
+bool isConfiguredMemrefAddress(Operation *op, Value operand);
+
 // Returns true if the operation is a materialized reserve user, i.e.,
 // phi, invariant, carry.
 bool isMaterializedReserveUser(Operation *op);
@@ -50,7 +52,8 @@ getOpsInAlapLevels(const std::vector<Operation *> &sorted_ops,
                    const std::set<Operation *> &critical_ops);
 
 // Flattens the level buckets into a vector of pairs (operation, level).
-// Within each ALAP level, critical ops are prioritized before non-critical ops.
+// Within each ALAP level, critical ops are prioritized before non-critical
+// ops.
 std::vector<std::pair<Operation *, int>> flatten_level_buckets(
     const std::vector<std::vector<Operation *>> &level_buckets,
     const std::set<Operation *> &critical_ops);
@@ -125,8 +128,8 @@ bool canReachLocInTime(const std::vector<Operation *> &producers,
 // `move_op` is non-null the availability check recognises that two DataMovOps
 // reading the identical value do not actually conflict, because the single
 // register read port broadcasts the value to all consumers. Passing nullptr
-// disables this sharing and falls back to the strict one-occupant-per-register
-// rule.
+// disables this sharing and falls back to the strict
+// one-occupant-per-register rule.
 Register *getAvailableRegister(const MappingState &mapping_state, Tile *tile,
                                int start_time, int exclusive_end_time,
                                neura::DataMovOp move_op = nullptr);

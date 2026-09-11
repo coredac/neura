@@ -48,7 +48,8 @@ def Neura_KernelOp : Op<NeuraDialect, "kernel",
                                           // systems).
       OptionalAttr<StrAttr>:$kernel_name, // Name of the kernel (for
                                           // identification).
-      OptionalAttr<StrAttr>:$accelerator  // Target accelerator name.
+      OptionalAttr<StrAttr>:$accelerator,  // Target accelerator name.
+      OptionalAttr<DictionaryAttr>:$kernel_metadata
   );
 
   let results = (outs Variadic<AnyType>:$outputs);
@@ -292,15 +293,60 @@ def Neura_FCmpOp : Op<NeuraDialect, "fcmp"> {
 
 // Defines a load operation.
 def Neura_LoadOp : Op<NeuraDialect, "load"> {
-  let arguments = (ins AnyType:$addr);
+  let description = [{
+    Loads values using one of three address forms:
+
+    1. Dynamic address:
+        %value = "neura.load"(%addr) : (i32) -> i32
+
+    2. Memref base with element offsets:
+        %value = "neura.load"(%A) {
+          constants = array<i32: 0, 3, 6>
+        } : (memref<3x3xi32>) -> i32
+
+      The k-th execution reads from base(%A) + constants[k]. The memref is
+      bound at kernel launch and does not consume a data-routing resource.
+
+    3. Absolute addresses:
+        %value = "neura.load"() {
+          constants = array<i32: 32, 35, 38>
+        } : () -> i32
+
+      The k-th execution reads from constants[k].
+  }];
+  let arguments = (ins Optional<AnyType>:$addr);
   let results = (outs AnyType:$value);
+  let hasVerifier = 1;
   // let assemblyFormat = "$addr `,` attr-dict `:` type($value)";
 }
 
 // Defines a store operation.
 def Neura_StoreOp : Op<NeuraDialect, "store"> {
+  let description = [{
+    Stores values using one of three address forms. The first operand always
+    provides the value to store.
+
+    1. Dynamic address:
+        "neura.store"(%value, %addr) : (i32, i32) -> ()
+
+    2. Memref base with element offsets:
+        "neura.store"(%value, %C) {
+          constants = array<i32: 0, 3, 6>
+        } : (i32, memref<3x3xi32>) -> ()
+
+      The k-th execution writes to base(%C) + constants[k]. The memref is
+      bound at kernel launch and does not consume a data-routing resource.
+
+    3. Absolute addresses:
+        "neura.store"(%value) {
+          constants = array<i32: 32, 35, 38>
+        } : (i32) -> ()
+
+      The k-th execution writes to constants[k].
+  }];
   let arguments = (ins AnyType:$value, Optional<AnyType>:$addr);
   let results = (outs);
+  let hasVerifier = 1;
   // let assemblyFormat = "$value `,` $addr `,` attr-dict";
 }
 
@@ -612,6 +658,41 @@ def Neura_MulAddOp : Op<NeuraDialect, "mul_add"> {
   let results = (outs AnyType:$result);
   // let assemblyFormat = "$a `,` $b `,` $c `,` $predicate attr-dict `:`
   // type($result)";
+  let traits = [SameOperandsAndResultElementType];
+}
+
+def Neura_MacOp : Op<NeuraDialect, "mac"> {
+  let summary = "Configured multiply-accumulate operation.";
+  let description = [{
+    Defines one configured MAC operation placed on a CGRA Tile.
+
+    `input0` is the flowing multiplicand and `input1` is an optional incoming
+    partial sum. The stationary multiplicand is configured by the enclosing
+    template kernel and is therefore not represented as a dynamic operand.
+
+    For a Tile-local stationary value `s`, the operation computes:
+
+      result = input0 * s + input1
+
+    When `input1` is absent, its value is implicitly zero. The `forwarded`
+    result carries `input0` unchanged to the next Tile.
+
+    This interface supports weight-stationary and input-stationary dataflows.
+    The distinction is determined by which kernel input is configured as the
+    stationary multiplicand.
+
+    Output-stationary dataflow is not currently supported. It requires two
+    flowing multiplicands, a Tile-local accumulator, and a separate protocol
+    for draining the completed accumulator.
+  }];
+
+  let arguments = (
+    ins AnyType:$input0,
+        Optional<AnyType>:$input1
+  );
+
+  let results = (outs AnyType:$result, AnyType:$forwarded);
+
   let traits = [SameOperandsAndResultElementType];
 }
 

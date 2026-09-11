@@ -1,6 +1,8 @@
 #include "NeuraDialect/NeuraOps.h"
 #include "NeuraDialect/NeuraDialect.h"
+#include "NeuraDialect/NeuraTypes.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/OpImplementation.h"
@@ -8,6 +10,121 @@
 
 using namespace mlir;
 using namespace mlir::neura;
+
+// Validates the three supported load address forms.
+LogicalResult LoadOp::verify() {
+  Attribute raw_constants = (*this)->getAttr("constants");
+  auto constants = dyn_cast_or_null<DenseI64ArrayAttr>(raw_constants);
+  if (raw_constants && (!constants || constants.size() == 0)) {
+    return emitOpError("constants must be a nonempty i64 array");
+  }
+
+  Value address = getAddr();
+  if (!address && !constants) {
+    return emitOpError("requires an address operand or constants");
+  }
+
+  if (address) {
+    Type address_type = address.getType();
+    if (auto data = dyn_cast<PredicatedValue>(address_type)) {
+      address_type = data.getValueType();
+    }
+
+    if (constants) {
+      if (!isa<MemRefType>(address_type)) {
+        return emitOpError("operand plus constants requires a memref base");
+      }
+      return success();
+    }
+
+    if (!isa<IntegerType, IndexType, LLVM::LLVMPointerType>(address_type)) {
+      return emitOpError(
+          "dynamic address must be an integer, index, or pointer");
+    }
+    return success();
+  }
+
+  for (int64_t constant : constants.asArrayRef()) {
+    if (constant < 0) {
+      return emitOpError("absolute constant addresses must be nonnegative");
+    }
+  }
+  return success();
+}
+
+// Validates StoreOp after optional constant folding.
+LogicalResult StoreOp::verify() {
+  Attribute stored_constant = (*this)->getAttr("lhs_value");
+  Attribute address_constant = (*this)->getAttr("rhs_value");
+  Attribute raw_constants = (*this)->getAttr("constants");
+  auto constants = dyn_cast_or_null<DenseI64ArrayAttr>(raw_constants);
+
+  if (raw_constants && (!constants || constants.size() == 0)) {
+    return emitOpError("constants must be a nonempty i64 array");
+  }
+
+  Value address;
+  if (stored_constant) {
+    if (getNumOperands() > 1) {
+      return emitOpError(
+          "expects at most one address operand when the stored value "
+          "is folded");
+    }
+    if (getNumOperands() == 1) {
+      address = getOperand(0);
+    }
+  } else {
+    if (getNumOperands() == 0 || getNumOperands() > 2) {
+      return emitOpError(
+          "expects a stored value and an optional address operand");
+    }
+    if (getNumOperands() == 2) {
+      address = getOperand(1);
+    }
+  }
+
+  if (address_constant && (address || constants)) {
+    return emitOpError("has more than one address source");
+  }
+  if (!address_constant && !address && !constants) {
+    return emitOpError("requires an address operand or constants");
+  }
+
+  if (address_constant) {
+    if (!isa<IntegerAttr, StringAttr, SymbolRefAttr>(address_constant)) {
+      return emitOpError(
+          "folded address must be an integer, string, or symbol");
+    }
+    return success();
+  }
+
+  if (address) {
+    Type address_type = address.getType();
+    if (auto data = dyn_cast<PredicatedValue>(address_type)) {
+      address_type = data.getValueType();
+    }
+
+    if (constants) {
+      if (!isa<MemRefType>(address_type)) {
+        return emitOpError("operand plus constants requires a memref base");
+      }
+      return success();
+    }
+
+    if (!isa<IntegerType, IndexType, LLVM::LLVMPointerType>(address_type)) {
+      return emitOpError(
+          "dynamic address must be an integer, index, or pointer");
+    }
+    return success();
+  }
+
+  for (int64_t constant : constants.asArrayRef()) {
+    if (constant < 0) {
+      return emitOpError("absolute constant addresses must be nonnegative");
+    }
+  }
+  return success();
+}
 
 LogicalResult YieldOp::verify() {
   Operation *parent_op = (*this)->getParentOp();

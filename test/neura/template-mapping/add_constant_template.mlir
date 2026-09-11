@@ -9,6 +9,13 @@
 // RUN:   -o %t-mapping.mlir
 // RUN:   FileCheck %s --input-file=%t-mapping.mlir --check-prefix=MAPPING
 
+// RUN: mkdir -p %t.dir
+// RUN: cd %t.dir && mlir-neura-opt %s \
+// RUN:   --insert-data-mov \
+// RUN:   --map-to-accelerator="mapping-strategy=template mapping-mode=spatial-only" \
+// RUN:   --generate-code -o %t-codegen.mlir
+// RUN: FileCheck %s --input-file=%t.dir/tmp-generated-instructions.asm --check-prefix=ASM
+
 module {
   func.func @add_constant() {
     neura.kernel attributes {accelerator = "neura"} {
@@ -51,3 +58,11 @@ module {
 // MAPPING-NEXT:    return
 // MAPPING-NEXT:  }
 // MAPPING-NEXT:}
+
+// ASM:      # Compiled II: 1
+// ASM:      PE(0,0):
+// ASM:        CONSTANT, [#1] -> [EAST, RED] (t=0, inv_iters=0)
+// ASM:      PE(1,0):
+// ASM:        ADD, [WEST, RED], [EAST, RED] (t=1, inv_iters=1)
+// ASM:      PE(2,0):
+// ASM:        CONSTANT, [#2] -> [WEST, RED] (t=0, inv_iters=0)
