@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mlir/IR/BuiltinAttributes.h"
+#include "mlir/IR/Operation.h"
 #include "llvm/ADT/StringRef.h"
 
 namespace mlir {
@@ -8,6 +10,8 @@ namespace neura {
 namespace attr {
 
 // Attribute Keys
+constexpr llvm::StringLiteral kKernelMetadata = "kernel_metadata";
+constexpr llvm::StringLiteral kKind = "kind";
 
 // Specifies the dataflow representation mode, as opposed to control-flow.
 constexpr llvm::StringLiteral kDataflowMode = "dataflow_mode";
@@ -62,5 +66,15 @@ constexpr llvm::StringLiteral kNeuraFusedOp = "neura.fused_op";
 } // namespace val
 
 } // namespace attr
+
+// Returns whether an operation carries template kernel metadata.
+inline bool isTemplateKernel(Operation *operation) {
+  auto metadata =
+      operation->getAttrOfType<DictionaryAttr>(attr::kKernelMetadata);
+  auto kind =
+      metadata ? metadata.getAs<StringAttr>(attr::kKind) : StringAttr{};
+  return kind && kind.getValue() == attr::val::kTemplate;
+}
+
 } // namespace neura
 } // namespace mlir

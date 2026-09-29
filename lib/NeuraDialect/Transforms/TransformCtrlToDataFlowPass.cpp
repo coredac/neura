@@ -1012,6 +1012,10 @@ struct TransformCtrlToDataFlowPass
     //     - Normal grant predicate in entry block
     //     - Normal transfrom-ctrl-to-data-flow process
     module.walk([&](neura::KernelOp kernel_op) {
+      if (neura::isTemplateKernel(kernel_op.getOperation())) {
+        return;
+      }
+
       auto accel_attr =
           kernel_op->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
       if (!accel_attr || accel_attr.getValue() != accel::kNeuraTarget) {

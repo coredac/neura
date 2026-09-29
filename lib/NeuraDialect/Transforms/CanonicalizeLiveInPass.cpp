@@ -1,4 +1,5 @@
 #include "Common/AcceleratorAttrs.h"
+#include "NeuraDialect/NeuraAttributes.h"
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
@@ -926,6 +927,10 @@ struct CanonicalizeLiveInPass
 
     // Processes neura.kernel operations.
     module_op.walk([&](neura::KernelOp kernel_op) {
+      if (neura::isTemplateKernel(kernel_op.getOperation())) {
+        return;
+      }
+
       auto accel_attr =
           kernel_op->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
       if (!accel_attr || accel_attr.getValue() != accel::kNeuraTarget) {

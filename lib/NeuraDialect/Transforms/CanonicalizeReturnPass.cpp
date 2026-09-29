@@ -1,4 +1,5 @@
 #include "Common/AcceleratorAttrs.h"
+#include "NeuraDialect/NeuraAttributes.h"
 #include "NeuraDialect/NeuraDialect.h"
 #include "NeuraDialect/NeuraOps.h"
 #include "NeuraDialect/NeuraPasses.h"
@@ -341,6 +342,10 @@ struct CanonicalizeReturnPass
     // 1) kernel with counters - the return process is triggered by the counter.
     // 2) kernel without counters - same logic as function return.
     module_op.walk([&](neura::KernelOp kernel_op) {
+      if (neura::isTemplateKernel(kernel_op.getOperation())) {
+        return;
+      }
+
       auto accel_attr =
           kernel_op->getAttrOfType<StringAttr>(accel::kAcceleratorAttr);
       if (!accel_attr) {

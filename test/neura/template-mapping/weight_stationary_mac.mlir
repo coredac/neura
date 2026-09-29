@@ -1,3 +1,10 @@
+// RUN: mlir-neura-opt %s \
+// RUN:   --canonicalize-return --canonicalize-live-in \
+// RUN:   --transform-ctrl-to-data-flow \
+// RUN:   | FileCheck %s --check-prefix=PRESERVE \
+// RUN:     --implicit-check-not=dataflow_mode \
+// RUN:     --implicit-check-not=neura.return
+
 // RUN: mkdir -p %t.dir
 // RUN: cd %t.dir && mlir-neura-opt %s --architecture-spec=%S/../../arch_spec/architecture.yaml \
 // RUN:   --promote-input-arg-to-const --leverage-predicated-value \
@@ -33,6 +40,10 @@ module {
     return
   }
 }
+
+// PRESERVE: neura.kernel
+// PRESERVE-SAME: kernel_metadata = {kind = "template"
+// PRESERVE: neura.yield
 
 // MAPPING: #map = affine_map<(d0, d1) -> (-d1 + 2, d0 - 1)>
 // MAPPING-NEXT: module {
