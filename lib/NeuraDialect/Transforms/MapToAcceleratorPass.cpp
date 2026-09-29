@@ -448,10 +448,24 @@ struct MapToAcceleratorPass
         return;
       }
 
+      Mapping *kernel_mapping_strategy = mapping_strategy.get();
+      bool kernel_spatial_only = is_spatial_only;
+      std::string kernel_mapping_mode = resolved_mapping_mode;
+      std::string kernel_mapping_strategy_name = resolved_mapping_strategy;
+      std::unique_ptr<Mapping> template_mapping;
+
+      if (neura::isTemplateKernel(kernel_op.getOperation())) {
+        template_mapping = std::make_unique<TemplateMapping>();
+        kernel_mapping_strategy = template_mapping.get();
+        kernel_spatial_only = true;
+        kernel_mapping_mode = attr::val::kSpatialOnly.str();
+        kernel_mapping_strategy_name = attr::val::kTemplate.str();
+      }
+
       Region &kernel_region = kernel_op.getBody();
       if (!mapRegion(kernel_op, kernel_region, architecture,
-                     mapping_strategy.get(), is_spatial_only,
-                     resolved_mapping_mode, resolved_mapping_strategy)) {
+                     kernel_mapping_strategy, kernel_spatial_only,
+                     kernel_mapping_mode, kernel_mapping_strategy_name)) {
         llvm::errs() << "[MapToAcceleratorPass] Mapping failed for kernel.\n";
         signalPassFailure();
       }
