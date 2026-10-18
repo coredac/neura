@@ -20,10 +20,13 @@
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/YAMLParser.h"
 #include "llvm/Support/raw_ostream.h"
+
+#define DEBUG_TYPE "map-to-accelerator"
 
 using namespace mlir;
 using namespace mlir::neura;
@@ -107,8 +110,8 @@ struct MapToAcceleratorPass
     }
     if (mapping_mode_str == attr::val::kSpatialOnly ||
         mapping_mode_str == attr::val::kSpatialTemporal) {
-      llvm::errs() << "[MapToAcceleratorPass] Using Mapping Mode: "
-                   << mapping_mode_str << "\n";
+      LLVM_DEBUG(llvm::dbgs() << "[MapToAcceleratorPass] Using Mapping Mode: "
+                              << mapping_mode_str << "\n");
     } else {
       llvm::errs() << "[MapToAcceleratorPass] Unsupported mapping mode: "
                    << mapping_mode_str << "\n";
@@ -162,10 +165,11 @@ struct MapToAcceleratorPass
               !max_depth_str.getAsInteger(10, max_depth)) {
             mapping_strategy =
                 std::make_unique<HeuristicMapping>(max_loc, max_depth);
-            llvm::errs()
+            LLVM_DEBUG(
+                llvm::dbgs()
                 << "[MapToAcceleratorPass] Use custom backtrack parameters: "
                 << "max_location_to_try=" << max_loc
-                << ", max_backtrack_depth=" << max_depth << "\n";
+                << ", max_backtrack_depth=" << max_depth << "\n");
           } else {
             llvm::errs() << "[MapToAcceleratorPass] Illegal customized "
                             "parameters format: "
@@ -203,13 +207,13 @@ struct MapToAcceleratorPass
     for (Operation *op : sorted_ops) {
       op->setAttr(attr::kDfgId,
                   IntegerAttr::get(IntegerType::get(ctx, 32), next_id));
-      llvm::errs() << "[MapToAcceleratorPass] Assigned dfg_id=" << next_id
-                   << " to " << *op << "\n";
+      LLVM_DEBUG(llvm::dbgs() << "[MapToAcceleratorPass] Assigned dfg_id="
+                              << next_id << " to " << *op << "\n");
       next_id++;
     }
 
-    llvm::errs() << "[MapToAcceleratorPass] Assigned " << next_id
-                 << " dfg_id(s) in total\n";
+    LLVM_DEBUG(llvm::dbgs() << "[MapToAcceleratorPass] Assigned " << next_id
+                            << " dfg_id(s) in total\n");
   }
 
   // Generic mapping function works for both function and kernel mapping.
@@ -237,29 +241,33 @@ struct MapToAcceleratorPass
     std::set<Operation *> critical_ops;
     RecurrenceCycle *longest = nullptr;
     for (auto &cycle : recurrence_cycles) {
-      llvm::outs() << "[DEBUG] Recurrence cycle (length " << cycle.length
-                   << "):\n";
+      LLVM_DEBUG(llvm::dbgs() << "[DEBUG] Recurrence cycle (length "
+                              << cycle.length << "):\n");
       for (Operation *op : cycle.operations) {
         critical_ops.insert(op);
-        llvm::outs() << "  " << *op << "\n";
+        LLVM_DEBUG(llvm::dbgs() << "  " << *op << "\n");
       }
       if (!longest || cycle.length > longest->length) {
         longest = &cycle;
       }
     }
 
-    if (longest) {
-      llvm::outs() << "[MapToAcceleratorPass] Longest recurrence cycle (length "
-                   << longest->length << "):\n";
-      for (Operation *op : longest->operations) {
-        op->print(llvm::outs()), llvm::outs() << "\n";
+    LLVM_DEBUG({
+      if (longest) {
+        llvm::dbgs()
+            << "[MapToAcceleratorPass] Longest recurrence cycle (length "
+            << longest->length << "):\n";
+        for (Operation *op : longest->operations) {
+          llvm::dbgs() << *op << "\n";
+        }
       }
-    }
+    });
 
     int rec_mii = calculateRecMii(recurrence_cycles);
 
-    llvm::errs() << "[MapToAcceleratorPass] Calculated Recurrence MII: "
-                 << rec_mii << "\n";
+    LLVM_DEBUG(llvm::dbgs()
+               << "[MapToAcceleratorPass] Calculated Recurrence MII: "
+               << rec_mii << "\n");
 
     int res_mii = calculateResMii(region, architecture);
 
@@ -282,8 +290,9 @@ struct MapToAcceleratorPass
       if (parent_op &&
           parent_op->getName().getStringRef().contains(attr::val::kOpFused)) {
         // Skips operations inside a fused_op region.
-        llvm::outs() << "[MapToAcceleratorPass] Skipping op inside fused_op: "
-                     << *op << "\n";
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[MapToAcceleratorPass] Skipping op inside fused_op: "
+                   << *op << "\n");
         skipped_count++;
         continue;
       }
@@ -292,34 +301,42 @@ struct MapToAcceleratorPass
     topologically_sorted_ops = std::move(filtered_ops);
 
     if (skipped_count > 0) {
-      llvm::errs() << "[MapToAcceleratorPass] Filtered out " << skipped_count
-                   << " operations inside fused_op regions\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[MapToAcceleratorPass] Filtered out " << skipped_count
+                 << " operations inside fused_op regions\n");
     }
 
-    for (Operation *op : topologically_sorted_ops) {
-      llvm::outs() << "[MapToAcceleratorPass] Topologically sorted op: " << *op
-                   << "\n";
-    }
+    LLVM_DEBUG({
+      for (Operation *op : topologically_sorted_ops) {
+        llvm::dbgs() << "[MapToAcceleratorPass] Topologically sorted op: "
+                     << *op << "\n";
+      }
+    });
     std::vector<std::vector<Operation *>> level_buckets =
         getOpsInAlapLevels(topologically_sorted_ops, critical_ops);
-    for (int level = 0; level < static_cast<int>(level_buckets.size());
-         ++level) {
-      llvm::outs() << "[MapToAcceleratorPass] ALAP Bucket Level " << level
-                   << ": " << level_buckets[level].size() << " ops\n";
-      for (Operation *op : level_buckets[level]) {
-        llvm::outs() << "  " << *op << "\n";
+    LLVM_DEBUG({
+      for (int level = 0; level < static_cast<int>(level_buckets.size());
+           ++level) {
+        llvm::dbgs() << "[MapToAcceleratorPass] ALAP Bucket Level " << level
+                     << ": " << level_buckets[level].size() << " ops\n";
+        for (Operation *op : level_buckets[level]) {
+          llvm::dbgs() << "  " << *op << "\n";
+        }
       }
-    }
+    });
     std::vector<std::pair<Operation *, int>> sorted_ops_with_alap_levels =
         flatten_level_buckets(level_buckets, critical_ops);
-    for (const auto &[op, level] : sorted_ops_with_alap_levels) {
-      llvm::outs() << "[MapToAcceleratorPass] ALAP sorted op: " << *op
-                   << " (ALAP level: " << level << ")\n";
-    }
+    LLVM_DEBUG({
+      for (const auto &[op, level] : sorted_ops_with_alap_levels) {
+        llvm::dbgs() << "[MapToAcceleratorPass] ALAP sorted op: " << *op
+                     << " (ALAP level: " << level << ")\n";
+      }
+    });
     // assert(false);
     for (int ii = possible_min_ii; ii <= max_ii; ++ii) {
-      llvm::errs() << "[MapToAcceleratorPass] Start mapping with target II of "
-                   << ii << "\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[MapToAcceleratorPass] Start mapping with target II of "
+                 << ii << "\n");
       // Creates a mapping state for the current II.
       MappingState mapping_state(architecture, ii, is_spatial_only);
       if (mapping_strategy->map(sorted_ops_with_alap_levels, critical_ops,
@@ -366,9 +383,10 @@ struct MapToAcceleratorPass
         op->setAttr(attr::kMappingInfo, mapping_info);
         return true;
       }
-      llvm::errs() << "[MapToAcceleratorPass] Mapping failed for target II of "
-                   << ii << "\n";
-      mapping_state.dumpOpToLocs();
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[MapToAcceleratorPass] Mapping failed for target II of "
+                 << ii << "\n");
+      LLVM_DEBUG(mapping_state.dumpOpToLocs(llvm::dbgs()));
     }
     llvm::errs()
         << "[MapToAcceleratorPass] Mapping failed for all target II values.\n";
@@ -377,7 +395,8 @@ struct MapToAcceleratorPass
 
   void runOnOperation() override {
     ModuleOp module = getOperation();
-    llvm::errs() << "[MapToAcceleratorPass] Starting mapping pass...\n";
+    LLVM_DEBUG(llvm::dbgs()
+               << "[MapToAcceleratorPass] Starting mapping pass...\n");
     std::unique_ptr<Mapping> mapping_strategy;
     std::string resolved_mapping_mode;
     std::string resolved_mapping_strategy;
@@ -433,9 +452,10 @@ struct MapToAcceleratorPass
       custom_arch = global_arch.cloneWithNewDimensions(
           y_tiles.getValue(), x_tiles.getValue(), additional_overrides);
       target_arch = custom_arch.get();
-      llvm::errs()
+      LLVM_DEBUG(
+          llvm::dbgs()
           << "[MapToAcceleratorPass] Overriding architecture dimensions to "
-          << y_tiles.getValue() << "x" << x_tiles.getValue() << " tiles.\n";
+          << y_tiles.getValue() << "x" << x_tiles.getValue() << " tiles.\n");
     }
 
     const Architecture &architecture = *target_arch;

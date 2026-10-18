@@ -4,8 +4,11 @@
 #include "mlir/IR/Attributes.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
+
+#define DEBUG_TYPE "neura-mapping"
 
 using namespace mlir;
 using namespace mlir::neura;
@@ -630,13 +633,15 @@ MappingState::getCurrentStepLinks(MappingLoc loc) const {
 }
 
 void MappingState::reserveRoute(Operation *op, ArrayRef<MappingLoc> path) {
-  llvm::errs() << "Reserving route for operation: " << *op << "\n";
-  llvm::errs() << "Path: ";
-  for (const MappingLoc &loc : path) {
-    llvm::errs() << loc.resource->getType() << "#" << loc.resource->getId()
-                 << " @t=" << loc.time_step << " ";
-  }
-  llvm::errs() << "\n";
+  LLVM_DEBUG({
+    llvm::dbgs() << "Reserving route for operation: " << *op << "\n";
+    llvm::dbgs() << "Path: ";
+    for (const MappingLoc &loc : path) {
+      llvm::dbgs() << loc.resource->getType() << "#" << loc.resource->getId()
+                   << " @t=" << loc.time_step << " ";
+    }
+    llvm::dbgs() << "\n";
+  });
   assert(op_to_locs.find(op) == op_to_locs.end() &&
          "Operation already has reserved locations");
   op_to_locs[op] = std::vector<MappingLoc>(path.begin(), path.end());
