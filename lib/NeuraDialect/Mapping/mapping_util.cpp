@@ -10,9 +10,12 @@
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/Support/Debug.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cassert>
+
+#define DEBUG_TYPE "neura-mapping"
 
 using namespace mlir;
 using namespace mlir::neura;
@@ -170,7 +173,8 @@ void traverseAlongPath(Operation *op, Value reserve_value,
                        SmallVector<RecurrenceCycle, 4> &collected_paths) {
   if (!op || visited_in_path.contains(op)) {
     if (visited_in_path.contains(op)) {
-      llvm::errs() << "Skipping already visited operation: " << *op << "\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "Skipping already visited operation: " << *op << "\n");
     }
     return;
   }
@@ -236,8 +240,9 @@ mlir::neura::collectRecurrenceCycles(Region &region) {
     std::deque<Operation *> current_path;
     SmallVector<RecurrenceCycle, 4> collected_paths;
     DenseSet<Operation *> visited_in_path;
-    llvm::errs() << "Collecting recurrence cycles from back edge: parent_op "
-                 << *parent_op << "->" << reserve_op << "\n";
+    LLVM_DEBUG(llvm::dbgs()
+               << "Collecting recurrence cycles from back edge: parent_op "
+               << *parent_op << "->" << reserve_op << "\n");
     traverseAlongPath(parent_op, reserve_value, current_path, visited_in_path,
                       collected_paths);
 
@@ -283,7 +288,8 @@ int mlir::neura::calculateResMii(Region &region,
     ++num_ops;
   });
 
-  llvm::errs() << "[calculateResMii] Total operations: " << num_ops << "\n";
+  LLVM_DEBUG(llvm::dbgs() << "[calculateResMii] Total operations: " << num_ops
+                          << "\n");
 
   // Avoid divide-by-zero
   int num_tiles = std::max(1, architecture.getNumTiles());
@@ -565,17 +571,17 @@ bool hasSafeOperandIterationAtConsume(
     // Register occupancy is tracked in per-cycle slots (half-open in routing
     // builders), so max_t - min_t + 1 corresponds to the hold duration.
     for (const auto &entry : reg_time_range) {
-      Register *reg = entry.first;
       int min_t = entry.second.first;
       int max_t = entry.second.second;
       int occupancy = max_t - min_t + 1;
       if (occupancy > ii) {
-        llvm::errs() << "[DEBUG] Reject schedule due to register hold >= next "
-                        "iteration window. op="
-                     << *op << ", II=" << ii << ", reg=#" << reg->getId()
-                     << ", hold_start=" << min_t << ", hold_end=" << max_t
-                     << ", hold_len=" << occupancy
-                     << ", mov_op=" << *route.mov_op << "\n";
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[DEBUG] Reject schedule due to register hold >= next "
+                      "iteration window. op="
+                   << *op << ", II=" << ii << ", reg=#" << entry.first->getId()
+                   << ", hold_start=" << min_t << ", hold_end=" << max_t
+                   << ", hold_len=" << occupancy << ", mov_op=" << *route.mov_op
+                   << "\n");
         return false;
       }
     }
@@ -589,15 +595,16 @@ mlir::neura::getMaterializedUserOps(Operation *op) {
   llvm::SmallVector<Operation *> result;
   llvm::DenseSet<Operation *> visited;
   visited.insert(op);
-  llvm::errs() << "Starting to collect materialized users for: " << *op << "\n";
+  LLVM_DEBUG(llvm::dbgs() << "Starting to collect materialized users for: "
+                          << *op << "\n");
   llvm::SmallVector<Operation *> worklist(op->getUsers().begin(),
                                           op->getUsers().end());
 
   while (!worklist.empty()) {
     Operation *curr = worklist.pop_back_val();
-    llvm::errs() << "Visiting operation: " << *curr << "\n";
+    LLVM_DEBUG(llvm::dbgs() << "Visiting operation: " << *curr << "\n");
     if (!visited.insert(curr).second) {
-      llvm::errs() << "Already visited, so skip: " << *curr << "\n";
+      LLVM_DEBUG(llvm::dbgs() << "Already visited, so skip: " << *curr << "\n");
       continue;
     }
 
@@ -627,9 +634,11 @@ mlir::neura::getMaterializedUserOps(Operation *op) {
     result.push_back(curr);
   }
 
-  for (Operation *res : result) {
-    llvm::errs() << "Materialized user: " << *res << "\n";
-  }
+  LLVM_DEBUG({
+    for (Operation *res : result) {
+      llvm::dbgs() << "Materialized user: " << *res << "\n";
+    }
+  });
   return result;
 }
 
@@ -644,12 +653,13 @@ bool mlir::neura::tryRouteBackwardMove(Operation *mov_op, MappingLoc src_loc,
                                        MappingLoc dst_loc,
                                        const MappingState &state,
                                        std::vector<MappingLoc> &path_out) {
-  llvm::errs() << "[tryRouteBackwardMove] src_loc: "
-               << src_loc.resource->getType() << "#"
-               << src_loc.resource->getId() << " @t=" << src_loc.time_step
-               << ", dst_loc: " << dst_loc.resource->getType() << "#"
-               << dst_loc.resource->getId() << " @t=" << dst_loc.time_step
-               << "\n";
+  LLVM_DEBUG(llvm::dbgs() << "[tryRouteBackwardMove] src_loc: "
+                          << src_loc.resource->getType() << "#"
+                          << src_loc.resource->getId()
+                          << " @t=" << src_loc.time_step
+                          << ", dst_loc: " << dst_loc.resource->getType() << "#"
+                          << dst_loc.resource->getId()
+                          << " @t=" << dst_loc.time_step << "\n");
   return tryRouteDataMove(mov_op, src_loc, dst_loc, true, state, path_out);
 }
 
@@ -714,10 +724,10 @@ bool mlir::neura::tryRouteDataMove(Operation *mov_op, MappingLoc src_loc,
     return true;
   }
 
-  llvm::outs() << "[tryRouteDataMove] Routing from Tile#" << src_tile->getId()
-               << " @t=" << src_loc.time_step << " to Tile#"
-               << dst_tile->getId() << " @t=" << exclusive_deadline_step
-               << "\n";
+  LLVM_DEBUG(llvm::dbgs() << "[tryRouteDataMove] Routing from Tile#"
+                          << src_tile->getId() << " @t=" << src_loc.time_step
+                          << " to Tile#" << dst_tile->getId()
+                          << " @t=" << exclusive_deadline_step << "\n");
 
   // Special case: source tile and destination tile are the same.
   if (src_tile == dst_tile) {
@@ -727,10 +737,11 @@ bool mlir::neura::tryRouteDataMove(Operation *mov_op, MappingLoc src_loc,
         state, src_tile, src_loc.time_step, exclusive_deadline_step,
         dyn_cast_or_null<neura::DataMovOp>(mov_op));
     if (!available_reg) {
-      llvm::outs()
-          << "[tryRouteDataMove] Cannot find available register on Tile#"
-          << src_tile->getId() << " for time range: t=" << src_loc.time_step
-          << " to t=" << exclusive_deadline_step << "\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[tryRouteDataMove] Cannot find available register on Tile#"
+                 << src_tile->getId()
+                 << " for time range: t=" << src_loc.time_step
+                 << " to t=" << exclusive_deadline_step << "\n");
       return false;
     }
 
@@ -739,9 +750,10 @@ bool mlir::neura::tryRouteDataMove(Operation *mov_op, MappingLoc src_loc,
       path_out.push_back({available_reg, t});
     }
 
-    llvm::outs() << "[tryRouteDataMove] Successfully routed on same tile using "
-                    "Register #"
-                 << available_reg->getId() << "\n";
+    LLVM_DEBUG(llvm::dbgs()
+               << "[tryRouteDataMove] Successfully routed on same tile using "
+                  "Register #"
+               << available_reg->getId() << "\n");
     return true;
   }
 
@@ -783,9 +795,10 @@ bool mlir::neura::tryRouteDataMove(Operation *mov_op, MappingLoc src_loc,
                                    exclusive_deadline_step,
                                    dyn_cast_or_null<neura::DataMovOp>(mov_op));
           if (!wait_reg) {
-            llvm::outs() << "[tryRouteDataMove] Cannot find available waiting"
-                            "register on destination Tile#"
-                         << dst_tile->getId() << "\n";
+            LLVM_DEBUG(llvm::dbgs()
+                       << "[tryRouteDataMove] Cannot find available waiting"
+                          "register on destination Tile#"
+                       << dst_tile->getId() << "\n");
             continue; // Tries other paths.
           }
 
@@ -852,10 +865,11 @@ bool mlir::neura::tryRouteDataMove(Operation *mov_op, MappingLoc src_loc,
   }
 
   // Search failed.
-  llvm::outs() << "[tryRouteDataMove] Cannot find routing path from Tile#"
-               << src_tile->getId() << " @t=" << src_loc.time_step
-               << " to Tile#" << dst_tile->getId()
-               << " @t=" << exclusive_deadline_step << "\n";
+  LLVM_DEBUG(
+      llvm::dbgs() << "[tryRouteDataMove] Cannot find routing path from Tile#"
+                   << src_tile->getId() << " @t=" << src_loc.time_step
+                   << " to Tile#" << dst_tile->getId()
+                   << " @t=" << exclusive_deadline_step << "\n");
   return false;
 }
 
@@ -1068,14 +1082,15 @@ mlir::neura::calculateAward(Operation *op, std::set<Operation *> &critical_ops,
     backward_users.push_back(materialized_backward_op);
   }
 
-  llvm::errs() << "[calculateAward] Operation: " << *op
-               << "; Producers: " << producers.size() << "\n";
+  LLVM_DEBUG(llvm::dbgs() << "[calculateAward] Operation: " << *op
+                          << "; Producers: " << producers.size() << "\n");
 
   for (Tile *tile : architecture.getAllTiles()) {
     if (!tile->canSupportOperation(getOperationKindFromMlirOp(op))) {
-      llvm::errs() << "[calculateAward] Tile<" << tile->getX() << ", "
-                   << tile->getY() << "> does not support operation: " << *op
-                   << "\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[calculateAward] Tile<" << tile->getX() << ", "
+                 << tile->getY() << "> does not support operation: " << *op
+                 << "\n");
       continue; // Skip tiles that cannot support the operation.
     }
     int earliest_start_time_step = target_level;
@@ -1270,21 +1285,21 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
     bind_success = mapping_state.bindMultiCycleOp(
         target_loc.resource, target_loc.time_step, latency, op);
     if (bind_success) {
-      llvm::errs() << "[DEBUG] Bound multi-cycle op (latency=" << latency
-                   << ") " << *op
-                   << " onto loc: " << target_loc.resource->getType() << "#"
-                   << target_loc.resource->getId()
-                   << " @t=" << target_loc.time_step
-                   << " to t=" << (target_loc.time_step + latency - 1) << "\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[DEBUG] Bound multi-cycle op (latency=" << latency << ") "
+                 << *op << " onto loc: " << target_loc.resource->getType()
+                 << "#" << target_loc.resource->getId()
+                 << " @t=" << target_loc.time_step
+                 << " to t=" << (target_loc.time_step + latency - 1) << "\n");
     }
   } else {
     // For single-cycle ops, use default SINGLE_OCCUPY binding
     bind_success = mapping_state.bindOp(target_loc, op);
     if (bind_success) {
-      llvm::errs() << "[DEBUG] Schedule op " << *op
-                   << " onto loc: " << target_loc.resource->getType() << "#"
-                   << target_loc.resource->getId()
-                   << " @t=" << target_loc.time_step << "\n";
+      LLVM_DEBUG(llvm::dbgs() << "[DEBUG] Schedule op " << *op
+                              << " onto loc: " << target_loc.resource->getType()
+                              << "#" << target_loc.resource->getId()
+                              << " @t=" << target_loc.time_step << "\n");
     }
   }
 
@@ -1298,7 +1313,7 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
       if (isConfiguredMemrefAddress(op, operand)) {
         continue;
       }
-      llvm::errs() << "Processing operand: " << operand << "\n";
+      LLVM_DEBUG(llvm::dbgs() << "Processing operand: " << operand << "\n");
       if (isa<neura::ReserveOp>(operand.getDefiningOp())) {
         // Skips Reserve ops (backward ctrl move) when routing.
         continue;
@@ -1308,7 +1323,8 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
       // ReserveOp is not wrapped by DataMovOp (see InsertDataMovPass).
       // Skip routing for ReserveOp as it represents loop-carried dependency.
       if (isa<neura::ReserveOp>(data_move)) {
-        llvm::errs() << "Skipping unwrapped operand: " << *data_move << "\n";
+        LLVM_DEBUG(llvm::dbgs()
+                   << "Skipping unwrapped operand: " << *data_move << "\n");
         continue;
       }
 
@@ -1325,8 +1341,8 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
             existing_route,
         });
 
-        llvm::errs() << "[DEBUG] Reusing pre-routed data move: " << *data_move
-                     << "\n";
+        LLVM_DEBUG(llvm::dbgs() << "[DEBUG] Reusing pre-routed data move: "
+                                << *data_move << "\n");
         continue;
       }
 
@@ -1367,20 +1383,22 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
         mapping_state.reserveRoute(data_move, route_path);
         pending_operand_routes.push_back({data_move, std::move(route_path)});
         routed_operands.push_back(data_move);
-        llvm::errs() << "[DEBUG] Successfully routed data move: " << *data_move
-                     << " from " << src_loc.resource->getType() << "#"
-                     << src_loc.resource->getId() << " @t=" << src_loc.time_step
-                     << " to " << target_loc.resource->getType() << "#"
-                     << target_loc.resource->getId()
-                     << " @t=" << target_loc.time_step << "\n";
-        continue;
-      }
-      llvm::errs() << "[DEBUG] Failed to route data move: " << *data_move
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[DEBUG] Successfully routed data move: " << *data_move
                    << " from " << src_loc.resource->getType() << "#"
                    << src_loc.resource->getId() << " @t=" << src_loc.time_step
                    << " to " << target_loc.resource->getType() << "#"
                    << target_loc.resource->getId()
-                   << " @t=" << target_loc.time_step << "; so unschedule op\n";
+                   << " @t=" << target_loc.time_step << "\n");
+        continue;
+      }
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[DEBUG] Failed to route data move: " << *data_move
+                 << " from " << src_loc.resource->getType() << "#"
+                 << src_loc.resource->getId() << " @t=" << src_loc.time_step
+                 << " to " << target_loc.resource->getType() << "#"
+                 << target_loc.resource->getId()
+                 << " @t=" << target_loc.time_step << "; so unschedule op\n");
       mapping_state.unbindOp(op);
       for (Operation *routed_op : routed_operands) {
         mapping_state.releaseRoute(routed_op);
@@ -1390,8 +1408,9 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
 
     if (!hasSafeOperandIterationAtConsume(op, pending_operand_routes,
                                           mapping_state.getII())) {
-      llvm::errs() << "[DEBUG] Operand iteration shift at consume time; "
-                      "unschedule op\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[DEBUG] Operand iteration shift at consume time; "
+                    "unschedule op\n");
       mapping_state.unbindOp(op);
       for (Operation *routed_op : routed_operands) {
         mapping_state.releaseRoute(routed_op);
@@ -1401,7 +1420,8 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
     // Checks whether the operation's user is a ctrl_mov.
     for (Operation *user : getCtrlMovUsers(op)) {
       neura::CtrlMovOp ctrl_mov = dyn_cast<neura::CtrlMovOp>(user);
-      llvm::errs() << "[DEBUG] Found ctrl_mov user: " << *ctrl_mov << "\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[DEBUG] Found ctrl_mov user: " << *ctrl_mov << "\n");
       assert(ctrl_mov && "Expected user to be a CtrlMovOp");
       mlir::Operation *materialized_backward_op =
           getMaterializedBackwardUser(ctrl_mov);
@@ -1417,30 +1437,33 @@ bool mlir::neura::placeAndRoute(Operation *op, const MappingLoc &target_loc,
                                mapping_state, route_path)) {
         mapping_state.reserveRoute(ctrl_mov, route_path);
         routed_ctrl_movs.push_back(ctrl_mov);
-        llvm::errs() << "[DEBUG] Successfully routed ctrl_mov: " << *ctrl_mov
-                     << " to " << backward_loc.resource->getType() << "#"
-                     << backward_loc.resource->getId()
-                     << " @t=" << backward_loc.time_step << "\n";
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[DEBUG] Successfully routed ctrl_mov: " << *ctrl_mov
+                   << " to " << backward_loc.resource->getType() << "#"
+                   << backward_loc.resource->getId()
+                   << " @t=" << backward_loc.time_step << "\n");
         continue;
       }
-      llvm::errs() << "[DEBUG] Failed to route ctrl_mov: " << *ctrl_mov
-                   << " from " << target_loc.resource->getType() << "#"
-                   << target_loc.resource->getId()
-                   << " @t=" << target_loc.time_step << " to "
-                   << backward_loc.resource->getType() << "#"
-                   << backward_loc.resource->getId()
-                   << " @t=" << backward_loc.time_step
-                   << "; so unschedule op\n";
+      LLVM_DEBUG(llvm::dbgs()
+                 << "[DEBUG] Failed to route ctrl_mov: " << *ctrl_mov
+                 << " from " << target_loc.resource->getType() << "#"
+                 << target_loc.resource->getId()
+                 << " @t=" << target_loc.time_step << " to "
+                 << backward_loc.resource->getType() << "#"
+                 << backward_loc.resource->getId()
+                 << " @t=" << backward_loc.time_step << "; so unschedule op\n");
       mapping_state.unbindOp(op);
       for (Operation *routed_ctrl_mov : routed_ctrl_movs) {
-        llvm::errs() << "[DEBUG] Releasing route for routed ctrl_mov: "
-                     << *routed_ctrl_mov << "\n";
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[DEBUG] Releasing route for routed ctrl_mov: "
+                   << *routed_ctrl_mov << "\n");
         mapping_state.releaseRoute(routed_ctrl_mov);
       }
 
       for (Operation *routed_op : routed_operands) {
-        llvm::errs() << "[DEBUG] Releasing route for routed operand: "
-                     << *routed_op << "\n";
+        LLVM_DEBUG(llvm::dbgs()
+                   << "[DEBUG] Releasing route for routed operand: "
+                   << *routed_op << "\n");
         mapping_state.releaseRoute(routed_op);
       }
       return false;
