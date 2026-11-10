@@ -95,7 +95,9 @@ enum OperationKind {
   ICounter = 41,
   IExtractPredicate = 42,
   // Configured MAC operation.
-  IMac = 43
+  IMac = 43,
+  // Cross-CGRA reduction operations.
+  VReduceAddGlobal = 44
 };
 
 // Maps hardware resource names to their supported operations.
@@ -127,6 +129,7 @@ static const std::map<std::string, std::vector<OperationKind>>
 
         // Vector operations.
         {"vfmul", {VFMul}},
+        {"vector_reduce", {VReduceAddGlobal}},
 
         // Fused operations.
         {"fadd_fadd", {FAddFAdd}},
@@ -454,7 +457,7 @@ public:
   Architecture(int multi_cgra_rows, int multi_cgra_columns,
                BaseTopology multi_cgra_base_topology = BaseTopology::MESH,
                int per_cgra_rows = 4, int per_cgra_columns = 4,
-               int max_ctrl_mem_items = 20,
+               int max_ctrl_mem_items = 20, int global_reduce_entries = 4,
                BaseTopology per_cgra_base_topology = BaseTopology::MESH,
                const TileDefaults &tile_defaults = TileDefaults(),
                const std::vector<TileOverride> &tile_overrides =
@@ -472,6 +475,7 @@ public:
   int getPerCgraRows() const { return per_cgra_rows_; }
   int getPerCgraColumns() const { return per_cgra_columns_; }
   int getMaxCtrlMemItems() const { return max_ctrl_mem_items_; }
+  int getGlobalReduceEntries() const { return global_reduce_entries_; }
 
   Link *getLink(int id);
   Link *getLink(int src_tile_x, int src_tile_y, int dst_tile_x, int dst_tile_y);
@@ -545,6 +549,7 @@ private:
   int per_cgra_rows_;
   int per_cgra_columns_;
   int max_ctrl_mem_items_;
+  int global_reduce_entries_;
 
   BaseTopology multi_cgra_base_topology_;
   BaseTopology per_cgra_base_topology_;

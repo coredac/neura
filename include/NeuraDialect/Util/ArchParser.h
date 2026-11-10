@@ -21,7 +21,8 @@ private:
       llvm::yaml::Document &doc, int &multi_cgra_rows, int &multi_cgra_columns,
       mlir::neura::BaseTopology &multi_cgra_base_topology, int &per_cgra_rows,
       int &per_cgra_columns, mlir::neura::BaseTopology &per_cgra_base_topology,
-      int &max_ctrl_mem_items, mlir::neura::TileDefaults &tile_defaults,
+      int &max_ctrl_mem_items, int &global_reduce_entries,
+      mlir::neura::TileDefaults &tile_defaults,
       std::vector<mlir::neura::TileOverride> &tile_overrides,
       mlir::neura::LinkDefaults &link_defaults,
       std::vector<mlir::neura::LinkOverride> &link_overrides);

@@ -631,6 +631,28 @@ def Neura_VectorReduceAddOp : Op<NeuraDialect, "vector.reduce.add"> {
   let results = (outs AnyType:$result);
 }
 
+// Defines a cross-CGRA vector reduction add operation.
+def Neura_VectorReduceAddGlobalOp
+    : Op<NeuraDialect, "vector.reduce.add.global"> {
+  let summary = "Vector reduction add across all participating CGRAs";
+  let description = [{
+    Reduces the vector to a scalar partial on this CGRA, then sums the partials
+    of every participating CGRA. Every CGRA receives the total as the result.
+
+    `reduce_id` selects the entry of the global reduce unit that accumulates
+    the partials. The same instruction uses the same id on every CGRA, and the
+    id must be smaller than the unit's entry count. The assign-reduce-id pass
+    fills in ids that are not given.
+
+    Example:
+      %sum = "neura.vector.reduce.add.global"(%vec) {reduce_id = 0 : i32}
+          : (vector<4xi32>) -> i32
+  }];
+  let opName = "vector.reduce.add.global";
+  let arguments = (ins AnyType:$input, OptionalAttr<I32Attr>:$reduce_id);
+  let results = (outs AnyType:$result);
+}
+
 // ----------------------------------------------------
 // Defines fused operations.
 // ----------------------------------------------------
