@@ -23,6 +23,7 @@ std::unique_ptr<mlir::Pass> createInsertCtrlMovPass();
 std::unique_ptr<mlir::Pass> createAssignAcceleratorPass();
 std::unique_ptr<mlir::Pass> createTransformCtrlToDataFlowPass();
 std::unique_ptr<mlir::Pass> createLeveragePredicatedValuePass();
+std::unique_ptr<mlir::Pass> createAssignReduceIdPass();
 // Creates the MapToAccelerator pass. Tile dimensions default to 0 (use
 // architecture singleton) when not specified via options.
 std::unique_ptr<mlir::Pass> createMapToAcceleratorPass(

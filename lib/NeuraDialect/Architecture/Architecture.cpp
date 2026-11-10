@@ -573,7 +573,7 @@ void Architecture::applyLinkOverrides(
 Architecture::Architecture(int multi_cgra_rows, int multi_cgra_columns,
                            BaseTopology multi_cgra_base_topology,
                            int per_cgra_rows, int per_cgra_columns,
-                           int max_ctrl_mem_items,
+                           int max_ctrl_mem_items, int global_reduce_entries,
                            BaseTopology per_cgra_base_topology,
                            const TileDefaults &tile_defaults,
                            const std::vector<TileOverride> &tile_overrides,
@@ -586,6 +586,7 @@ Architecture::Architecture(int multi_cgra_rows, int multi_cgra_columns,
   this->per_cgra_columns_ = per_cgra_columns;
   this->per_cgra_base_topology_ = per_cgra_base_topology;
   this->max_ctrl_mem_items_ = max_ctrl_mem_items;
+  this->global_reduce_entries_ = global_reduce_entries;
   this->tile_defaults_ = tile_defaults;
   this->tile_overrides_ = tile_overrides;
   this->link_defaults_ = link_defaults;
@@ -610,8 +611,8 @@ std::unique_ptr<Architecture> Architecture::cloneWithNewDimensions(
   return std::make_unique<Architecture>(
       multi_cgra_rows_, multi_cgra_columns_, multi_cgra_base_topology_,
       new_per_cgra_rows, new_per_cgra_columns, max_ctrl_mem_items_,
-      per_cgra_base_topology_, tile_defaults_, merged_overrides, link_defaults_,
-      link_overrides_);
+      global_reduce_entries_, per_cgra_base_topology_, tile_defaults_,
+      merged_overrides, link_defaults_, link_overrides_);
 }
 
 Tile *Architecture::getTile(int id) {

@@ -399,6 +399,58 @@ struct LlvmVectorReduceAddToNeuraVectorReduceAdd : public RewritePattern {
   }
 };
 
+// The kernel-facing call that sums a value across all participating CGRAs.
+constexpr llvm::StringLiteral kAllReduceAddCallee = "cgra_allreduce_add";
+
+// Lowers cgra_allreduce_add(partial) where partial comes from a local vector
+// reduction. The global op reduces the vector lanes itself, so it consumes
+// the vector directly.
+struct LlvmAllReduceAddCallToNeuraVectorReduceAddGlobal
+    : public OpRewritePattern<LLVM::CallOp> {
+  using OpRewritePattern::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(LLVM::CallOp op,
+                                PatternRewriter &rewriter) const override {
+    if (op.getCallee() != kAllReduceAddCallee ||
+        op.getArgOperands().size() != 1 || op.getNumResults() != 1) {
+      return failure();
+    }
+    auto local_reduce =
+        op.getArgOperands()[0].getDefiningOp<neura::VectorReduceAddOp>();
+    if (!local_reduce) {
+      return failure();
+    }
+
+    rewriter.replaceOpWithNewOp<neura::VectorReduceAddGlobalOp>(
+        op, op.getResult().getType(), local_reduce.getInput(),
+        /*reduce_id=*/nullptr);
+    // Neura ops are not trivially dead, so the greedy driver keeps an unused
+    // local reduction and it would still be mapped onto a tile.
+    if (local_reduce->use_empty()) {
+      rewriter.eraseOp(local_reduce);
+    }
+    return success();
+  }
+};
+
+// Reports cgra_allreduce_add calls the patterns could not lower. Their operand
+// is not a plain vector reduction: the loop was not vectorized, or it has a
+// scalar remainder (e.g. a runtime trip count) merged in through a phi.
+LogicalResult verifyAllReduceCallsLowered(Region &region) {
+  WalkResult result = region.walk([](LLVM::CallOp call) {
+    if (call.getCallee() != kAllReduceAddCallee) {
+      return WalkResult::advance();
+    }
+    call.emitError() << kAllReduceAddCallee
+                     << " expects its operand to be the direct result of a "
+                        "vector reduction (llvm.vector.reduce.add); a loop "
+                        "with a scalar remainder, such as one with a runtime "
+                        "trip count, is not supported";
+    return WalkResult::interrupt();
+  });
+  return failure(result.wasInterrupted());
+}
+
 struct LlvmICmpToNeuraICmp : public OpRewritePattern<LLVM::ICmpOp> {
   using OpRewritePattern::OpRewritePattern;
 
@@ -854,6 +906,12 @@ struct LlvmCallToFuncCall : public OpRewritePattern<LLVM::CallOp> {
       return failure();
     }
 
+    // cgra_allreduce_add becomes a global reduce even when the module defines
+    // it, e.g. as a host-side stub.
+    if (*callee == kAllReduceAddCallee) {
+      return failure();
+    }
+
     // Checks if the callee function exists as func.func in the module.
     ModuleOp module = op->getParentOfType<ModuleOp>();
     if (!module) {
@@ -911,6 +969,8 @@ struct LowerLlvmToNeuraPass
     patterns.add<LlvmVFMulToNeuraVFMul>(&getContext());
     patterns.add<LlvmVFAddToNeuraVFAdd>(&getContext());
     patterns.insert<LlvmVectorReduceAddToNeuraVectorReduceAdd>(&getContext());
+    patterns.add<LlvmAllReduceAddCallToNeuraVectorReduceAddGlobal>(
+        &getContext());
     // Scalar operations.
     patterns.add<LlvmAddToNeuraAdd>(&getContext());
     patterns.add<LlvmAndToNeuraAnd>(&getContext());
@@ -989,7 +1049,8 @@ struct LowerLlvmToNeuraPass
         if (target && target.getValue() == mlir::accel::kNeuraTarget) {
           for (Region &region : func->getRegions()) {
             RewritePatternSet patterns = populateLlvmToNeuraPatterns(context);
-            if (failed(applyPatternsGreedily(region, std::move(patterns)))) {
+            if (failed(applyPatternsGreedily(region, std::move(patterns))) ||
+                failed(verifyAllReduceCallsLowered(region))) {
               signalPassFailure();
             }
           }
@@ -1007,7 +1068,8 @@ struct LowerLlvmToNeuraPass
           Region &kernel_region = kernel_op.getBody();
           RewritePatternSet patterns = populateLlvmToNeuraPatterns(context);
           if (failed(
-                  applyPatternsGreedily(kernel_region, std::move(patterns)))) {
+                  applyPatternsGreedily(kernel_region, std::move(patterns))) ||
+              failed(verifyAllReduceCallsLowered(kernel_region))) {
             signalPassFailure();
           }
         }

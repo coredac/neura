@@ -49,6 +49,17 @@ def LeveragePredicatedValue : Pass<"leverage-predicated-value", "ModuleOp"> {
   let constructor = "neura::createLeveragePredicatedValuePass()";
 }
 
+def AssignReduceId : Pass<"assign-reduce-id", "ModuleOp"> {
+  let summary = "Assigns a global reduce table entry to every global reduce";
+  let description = [{
+    Sets `reduce_id` on every global reduce operation that does not have one,
+    giving each operation its own entry of the global reduce unit. Fails when a
+    kernel has more global reduce operations than the unit has entries
+    (`global_reduce_entries` in the architecture spec).
+  }];
+  let constructor = "neura::createAssignReduceIdPass()";
+}
+
 def MapToAccelerator : Pass<"map-to-accelerator", "ModuleOp"> {
   let summary = "Map Neura operations onto a given accelerator";
   let description = [{
