@@ -56,9 +56,9 @@
 // DATAFLOW-NEXT:     %29 = neura.grant_predicate %22, %24 : !neura.data<i64, i1>, !neura.data<i1, i1> -> !neura.data<i64, i1>
 // DATAFLOW-NEXT:     %30 = neura.grant_predicate %21, %24 : !neura.data<i32, i1>, !neura.data<i1, i1> -> !neura.data<i32, i1>
 // DATAFLOW-NEXT:     %31 = neura.reserve : !neura.data<i32, i1>
-// DATAFLOW-NEXT:     %32 = "neura.phi"(%31, %30) : (!neura.data<i32, i1>, !neura.data<i32, i1>) -> !neura.data<i32, i1>
+// DATAFLOW-NEXT:     %32 = neura.phi_start %30, %31 : !neura.data<i32, i1>, !neura.data<i32, i1> -> !neura.data<i32, i1>
 // DATAFLOW-NEXT:     %33 = neura.reserve : !neura.data<i64, i1>
-// DATAFLOW-NEXT:     %34 = "neura.phi"(%33, %29) : (!neura.data<i64, i1>, !neura.data<i64, i1>) -> !neura.data<i64, i1>
+// DATAFLOW-NEXT:     %34 = neura.phi_start %29, %33 : !neura.data<i64, i1>, !neura.data<i64, i1> -> !neura.data<i64, i1>
 // DATAFLOW-NEXT:     %35 = "neura.constant"() <{value = 0 : i32}> : () -> !neura.data<index, i1>
 // DATAFLOW-NEXT:     %36 = "neura.gep"(%35, %34) <{operandSegmentSizes = array<i32: 0, 2>}> {lhs_value = @run_gemv_relu_gemv.y} : (!neura.data<index, i1>, !neura.data<i64, i1>) -> !neura.data<!llvm.ptr, i1>
 // DATAFLOW-NEXT:     %37 = "neura.load"(%36) : (!neura.data<!llvm.ptr, i1>) -> !neura.data<i32, i1>
