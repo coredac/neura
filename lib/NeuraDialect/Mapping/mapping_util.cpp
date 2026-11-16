@@ -1017,9 +1017,6 @@ bool mlir::neura::isMaterializedReserveUser(Operation *user) {
   if (isa<neura::PhiStartOp>(user)) {
     return true;
   }
-  if (isa<neura::PhiOp>(user)) {
-    return true;
-  }
   return false;
 }
 

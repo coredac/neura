@@ -886,65 +886,73 @@ void transformControlFlowToDataFlow(Region &region, ControlFlowInfo &ctrl_info,
 }
 
 // Converts phi operations with reserve operands to phi_start operations.
-// Converts only canonical loop-init phi operations to phi_start.
-// Required pattern:
-//   one operand is produced by neura.grant_once
-//   the other operand is produced by neura.reserve
-// Operand order is not fixed. Phi ops that do not match this pattern are
-// left unchanged (they carry purely predicated values and must stay as phi).
+//
+// Any phi that merges a loop-carried value (i.e., one of its operands is
+// produced by neura.reserve) becomes phi_start(init, reserve). On its first
+// execution, phi_start forwards the init value without waiting for or
+// consuming the back-edge, which is what makes the loop able to start. The
+// shape of the init operand (grant_once, grant_predicate, ...) does not
+// matter: a plain phi would wait for the back-edge before the back-edge
+// producer could ever run.
+//
+// A block argument has exactly one reserve (every back-edge ctrl_movs into
+// it) plus one operand per forward edge. When there are several forward
+// edges, they are first merged by a plain phi, which then becomes the init
+// operand of phi_start.
 void convertPhiToPhiStart(Region &region, OpBuilder &builder) {
   llvm::errs() << "[ctrl2data] Converting phi operations to phi_start...\n";
 
   Block *entry_block = &region.front();
   SmallVector<neura::PhiOp> phi_ops_to_convert;
 
-  // Step 1: Collects only phi ops matching (grant_once, reserve), order-free.
+  // Step 1: Collects all phi operations that need conversion.
   entry_block->walk([&](neura::PhiOp phi_op) {
-    ValueRange inputs = phi_op.getInputs();
-    if (inputs.size() != 2) {
-      return;
-    }
-
-    Operation *op0_def = inputs[0].getDefiningOp();
-    Operation *op1_def = inputs[1].getDefiningOp();
-
-    if (!op0_def || !op1_def) {
-      return;
-    }
-
-    bool is_grant_reserve =
-        isa<neura::GrantOnceOp>(op0_def) && isa<neura::ReserveOp>(op1_def);
-    bool is_reserve_grant =
-        isa<neura::ReserveOp>(op0_def) && isa<neura::GrantOnceOp>(op1_def);
-
-    if (is_grant_reserve || is_reserve_grant) {
-      phi_ops_to_convert.push_back(phi_op);
+    // Checks if any operand is produced by a reserve operation.
+    for (Value operand : phi_op.getInputs()) {
+      if (operand.getDefiningOp<neura::ReserveOp>()) {
+        phi_ops_to_convert.push_back(phi_op);
+        break;
+      }
     }
   });
 
   // Step 2: Converts each collected phi operation to phi_start.
   for (neura::PhiOp phi_op : phi_ops_to_convert) {
-    Value op0 = phi_op.getInputs()[0];
-    Value op1 = phi_op.getInputs()[1];
-    Operation *op0_def = op0.getDefiningOp();
-    Operation *op1_def = op1.getDefiningOp();
-
-    Value init_operand;
     Value reserve_operand;
-    if (op0_def && op1_def && isa<neura::GrantOnceOp>(op0_def) &&
-        isa<neura::ReserveOp>(op1_def)) {
-      init_operand = op0;
-      reserve_operand = op1;
-    } else if (op0_def && op1_def && isa<neura::ReserveOp>(op0_def) &&
-               isa<neura::GrantOnceOp>(op1_def)) {
-      init_operand = op1;
-      reserve_operand = op0;
-    } else {
-      continue;
+    SmallVector<Value> init_operands;
+
+    // Separates the reserve operand from the initial (forward) operands.
+    for (Value operand : phi_op.getInputs()) {
+      if (operand.getDefiningOp<neura::ReserveOp>()) {
+        assert(!reserve_operand &&
+               "phi must have at most one reserve operand.");
+        reserve_operand = operand;
+        continue;
+      }
+      init_operands.push_back(operand);
+    }
+
+    if (!reserve_operand || init_operands.empty()) {
+      llvm::errs()
+          << "[ctrl2data] Error: Invalid phi operands for conversion.\n";
+      assert(false && "Invalid phi operands for conversion.");
+    }
+
+    builder.setInsertionPoint(phi_op);
+
+    // Merges multiple initial values from different forward edges first so
+    // that none of them is dropped.
+    Value init_operand = init_operands.front();
+    if (init_operands.size() > 1) {
+      init_operand =
+          builder
+              .create<neura::PhiOp>(phi_op.getLoc(),
+                                    phi_op.getResult().getType(),
+                                    init_operands)
+              .getResult();
     }
 
     // Creates phi_start operation.
-    builder.setInsertionPoint(phi_op);
     neura::PhiStartOp phi_start_op = builder.create<neura::PhiStartOp>(
         phi_op.getLoc(), phi_op.getResult().getType(), init_operand,
         reserve_operand);
