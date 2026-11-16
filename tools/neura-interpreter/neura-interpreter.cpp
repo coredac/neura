@@ -1473,6 +1473,9 @@ bool handleFuncReturnOp(
   }
 
   if (op.getNumOperands() == 0) {
+    // Nothing to wait on. In dataflow mode, run() ends execution when the
+    // current DFG pass is complete.
+    has_valid_result = true;
     llvm::outs() << "[neura-interpreter]  → Output: (void)\n";
     return true;
   }
@@ -3294,6 +3297,9 @@ bool handleNeuraReturnOp(
   auto return_values = op.getValues();
   // Handles void return (no values).
   if (return_values.empty()) {
+    // Nothing to wait on. In dataflow mode, run() ends execution when the
+    // current DFG pass is complete.
+    has_valid_result = true;
     llvm::outs() << "[neura-interpreter]  → Output: (void)\n";
     return true;
   }
@@ -3916,6 +3922,10 @@ int run(func::FuncOp func,
     }
 
     bool should_terminate = false;
+    // A return does not stop the other ops of the DFG pass in which it fires
+    // (like VectorCGRA's RET, which only reports completion to the CPU), so
+    // execution ends when that pass is complete.
+    bool return_fired = false;
     int topo_level = 0;
     int dfg_count = 0;
 
@@ -3957,15 +3967,8 @@ int run(func::FuncOp func,
         }
 
         if (should_terminate) {
-          if (isVerboseMode()) {
-            llvm::outs() << "[neura-interpreter]  "
-                            "========================================\n";
-            llvm::outs() << "[neura-interpreter]  Execution terminated due to "
-                            "valid return\n";
-            llvm::outs() << "[neura-interpreter]  "
-                            "========================================\n";
-          }
-          return EXIT_SUCCESS;
+          return_fired = true;
+          should_terminate = false;
         }
 
         dependency_graph.updateAfterExecution(op);
@@ -3994,6 +3997,19 @@ int run(func::FuncOp func,
       // next DFG iteration.
       if (ready_to_execute_ops.empty() &&
           !dependency_graph.hasUnexecutedOperations()) {
+        if (return_fired) {
+          if (isVerboseMode()) {
+            llvm::outs() << "[neura-interpreter]  "
+                            "========================================\n";
+            llvm::outs() << "[neura-interpreter]  Execution terminated after "
+                            "return at end of DFG iteration "
+                         << dfg_count << "\n";
+            llvm::outs() << "[neura-interpreter]  "
+                            "========================================\n";
+          }
+          return EXIT_SUCCESS;
+        }
+
         dfg_count++;
         topo_level = 0;
         if (isVerboseMode()) {
