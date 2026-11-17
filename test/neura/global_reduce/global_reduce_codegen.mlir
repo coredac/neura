@@ -11,7 +11,7 @@
 // RUN:   --transform-ctrl-to-data-flow \
 // RUN:   --fold-constant \
 // RUN:   --insert-data-mov \
-// RUN:   --assign-reduce-id \
+// RUN:   --promote-reduce-to-global \
 // RUN:   --map-to-accelerator="mapping-strategy=heuristic" \
 // RUN:   --architecture-spec=%S/../../arch_spec/architecture_with_global_reduce.yaml \
 // RUN:   --generate-code -o %t-mapping.mlir

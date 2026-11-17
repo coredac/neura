@@ -8,7 +8,7 @@ add_mlir_library(
     AssignAcceleratorPass.cpp
     TransformCtrlToDataFlowPass.cpp
     LeveragePredicatedValuePass.cpp
-    AssignReduceIdPass.cpp
+    PromoteReduceToGlobalPass.cpp
     MapToAcceleratorPass.cpp
     GenerateCodePass.cpp
     CanonicalizeReturnPass.cpp

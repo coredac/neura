@@ -9,10 +9,27 @@
 
 using namespace mlir;
 
-#define GEN_PASS_DEF_ASSIGNREDUCEID
+#define GEN_PASS_DEF_PROMOTEREDUCETOGLOBAL
 #include "NeuraDialect/NeuraPasses.h.inc"
 
 namespace {
+
+// Replaces every local vector reduction of the kernel with a global one.
+static void promoteLocalReduces(FunctionOpInterface func) {
+  SmallVector<neura::VectorReduceAddOp> local_ops;
+  func.walk([&](neura::VectorReduceAddOp reduce_op) {
+    local_ops.push_back(reduce_op);
+  });
+
+  for (neura::VectorReduceAddOp reduce_op : local_ops) {
+    OpBuilder builder(reduce_op);
+    auto global_op = builder.create<neura::VectorReduceAddGlobalOp>(
+        reduce_op.getLoc(), reduce_op.getResult().getType(),
+        reduce_op.getInput(), /*reduce_id=*/nullptr);
+    reduce_op.getResult().replaceAllUsesWith(global_op.getResult());
+    reduce_op.erase();
+  }
+}
 
 // Gives every global reduce instruction in the kernel its own reduce table
 // entry, so the kernel can hold at most num_entries such instructions.
@@ -64,20 +81,21 @@ static LogicalResult assignReduceIds(FunctionOpInterface func,
   return success();
 }
 
-struct AssignReduceIdPass
-    : public PassWrapper<AssignReduceIdPass, OperationPass<ModuleOp>> {
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AssignReduceIdPass)
+struct PromoteReduceToGlobalPass
+    : public PassWrapper<PromoteReduceToGlobalPass, OperationPass<ModuleOp>> {
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(PromoteReduceToGlobalPass)
 
-  StringRef getArgument() const override { return "assign-reduce-id"; }
+  StringRef getArgument() const override { return "promote-reduce-to-global"; }
   StringRef getDescription() const override {
-    return "Assigns a global reduce table entry to every global reduce "
-           "operation.";
+    return "Turns every vector reduction into a global reduce and assigns it "
+           "a global reduce table entry.";
   }
 
   void runOnOperation() override {
     unsigned num_entries =
         mlir::neura::getArchitecture().getGlobalReduceEntries();
     getOperation().walk([&](FunctionOpInterface func) {
+      promoteLocalReduces(func);
       if (failed(assignReduceIds(func, num_entries)))
         signalPassFailure();
     });
@@ -87,7 +105,7 @@ struct AssignReduceIdPass
 } // namespace
 
 namespace mlir::neura {
-std::unique_ptr<Pass> createAssignReduceIdPass() {
-  return std::make_unique<AssignReduceIdPass>();
+std::unique_ptr<Pass> createPromoteReduceToGlobalPass() {
+  return std::make_unique<PromoteReduceToGlobalPass>();
 }
 } // namespace mlir::neura

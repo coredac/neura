@@ -1,5 +1,18 @@
 // RUN: mlir-neura-opt %s --architecture-spec=%S/../../arch_spec/architecture_with_global_reduce.yaml \
-// RUN:   --assign-reduce-id --split-input-file --verify-diagnostics | FileCheck %s
+// RUN:   --promote-reduce-to-global --split-input-file --verify-diagnostics | FileCheck %s
+
+// Every local reduction becomes a global one with its own id.
+// CHECK-LABEL: func.func @promote_local_reductions
+// CHECK-NOT: "neura.vector.reduce.add"(
+// CHECK: "neura.vector.reduce.add.global"(%arg0) <{reduce_id = 0 : i32}>
+// CHECK: "neura.vector.reduce.add.global"(%arg1) <{reduce_id = 1 : i32}>
+func.func @promote_local_reductions(%a: vector<4xi32>, %b: vector<4xi32>) -> (i32, i32) {
+  %0 = "neura.vector.reduce.add"(%a) : (vector<4xi32>) -> i32
+  %1 = "neura.vector.reduce.add"(%b) : (vector<4xi32>) -> i32
+  return %0, %1 : i32, i32
+}
+
+// -----
 
 // Ids follow program order and skip ids that are already given.
 // CHECK-LABEL: func.func @assign_in_program_order

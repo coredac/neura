@@ -641,8 +641,8 @@ def Neura_VectorReduceAddGlobalOp
 
     `reduce_id` selects the entry of the global reduce unit that accumulates
     the partials. The same instruction uses the same id on every CGRA, and the
-    id must be smaller than the unit's entry count. The assign-reduce-id pass
-    fills in ids that are not given.
+    id must be smaller than the unit's entry count. The
+    promote-reduce-to-global pass fills in ids that are not given.
 
     Example:
       %sum = "neura.vector.reduce.add.global"(%vec) {reduce_id = 0 : i32}

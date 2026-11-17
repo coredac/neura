@@ -670,7 +670,8 @@ struct GenerateCodePass
         std::optional<uint32_t> reduce_id = reduce_op.getReduceId();
         if (!reduce_id) {
           reduce_op.emitError("global reduce has no reduce_id; run "
-                              "--assign-reduce-id before --generate-code");
+                              "--promote-reduce-to-global before "
+                              "--generate-code");
           timing_field_error = true;
           return;
         }
