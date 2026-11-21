@@ -96,8 +96,8 @@ enum OperationKind {
   IExtractPredicate = 42,
   // Configured MAC operation.
   IMac = 43,
-  // Cross-CGRA reduction operations.
-  VReduceAddGlobal = 44
+  // Vector reduction operations.
+  VReduceAdd = 44
 };
 
 // Maps hardware resource names to their supported operations.
@@ -129,7 +129,7 @@ static const std::map<std::string, std::vector<OperationKind>>
 
         // Vector operations.
         {"vfmul", {VFMul}},
-        {"vector_reduce", {VReduceAddGlobal}},
+        {"vector_reduce", {VReduceAdd}},
 
         // Fused operations.
         {"fadd_fadd", {FAddFAdd}},

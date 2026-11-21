@@ -1,5 +1,5 @@
-// A per-CGRA vector accumulation loop whose exit value is combined across
-// CGRAs by a global reduce.
+// A per-CGRA vector accumulation loop. The reduction of its exit value is
+// emitted as a global reduce, which combines it across CGRAs.
 // RUN: mlir-neura-opt %s \
 // RUN:   --assign-accelerator \
 // RUN:   --lower-llvm-to-neura \
@@ -11,7 +11,6 @@
 // RUN:   --transform-ctrl-to-data-flow \
 // RUN:   --fold-constant \
 // RUN:   --insert-data-mov \
-// RUN:   --promote-reduce-to-global \
 // RUN:   --map-to-accelerator="mapping-strategy=heuristic" \
 // RUN:   --architecture-spec=%S/../../arch_spec/architecture_with_global_reduce.yaml \
 // RUN:   --generate-code -o %t-mapping.mlir
@@ -34,11 +33,11 @@ func.func @kernel(%a: !llvm.ptr) -> i32 {
   llvm.cond_br %cmp, ^bb1(%i_next, %acc_next : i64, vector<4xi32>), ^exit(%acc_next : vector<4xi32>)
 
 ^exit(%r: vector<4xi32>):
-  %sum = "neura.vector.reduce.add.global"(%r) : (vector<4xi32>) -> i32
+  %sum = "neura.vector.reduce.add"(%r) : (vector<4xi32>) -> i32
   return %sum : i32
 }
 
-// MAPPING: "neura.vector.reduce.add.global"({{.*}}) <{reduce_id = 0 : i32}> {dfg_id = {{[0-9]+}} : i32, mapping_locs = [{{{.*}}resource = "tile"
+// MAPPING: "neura.vector.reduce.add"({{.*}}) {dfg_id = {{[0-9]+}} : i32, mapping_locs = [{{{.*}}resource = "tile"
 
 // YAML:      - opcode: "VECTOR.REDUCE.ADD.GLOBAL"
 // YAML-NEXT:   id: {{[0-9]+}}

@@ -49,21 +49,6 @@ def LeveragePredicatedValue : Pass<"leverage-predicated-value", "ModuleOp"> {
   let constructor = "neura::createLeveragePredicatedValuePass()";
 }
 
-def PromoteReduceToGlobal : Pass<"promote-reduce-to-global", "ModuleOp"> {
-  let summary = "Turns every vector reduction into a global reduce";
-  let description = [{
-    Replaces every `neura.vector.reduce.add` with
-    `neura.vector.reduce.add.global`, so the partials of all CGRAs that run the
-    kernel are summed into one total.
-
-    Then sets `reduce_id` on every global reduce operation that does not have
-    one, giving each operation its own entry of the global reduce unit. Fails
-    when a kernel has more global reduce operations than the unit has entries
-    (`global_reduce_entries` in the architecture spec).
-  }];
-  let constructor = "neura::createPromoteReduceToGlobalPass()";
-}
-
 def MapToAccelerator : Pass<"map-to-accelerator", "ModuleOp"> {
   let summary = "Map Neura operations onto a given accelerator";
   let description = [{
