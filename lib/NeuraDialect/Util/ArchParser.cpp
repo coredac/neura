@@ -22,12 +22,14 @@ mlir::FailureOr<Architecture> ArchParser::getArchitecture() {
   constexpr int kPerCgraDefaultRows = 4;
   constexpr int kPerCgraDefaultColumns = 4;
   constexpr int kDefaultMaxCtrlMemItems = 20;
+  constexpr int kDefaultGlobalReduceEntries = 4;
 
   int multi_cgra_rows = kMultiCgraDefaultRows;
   int multi_cgra_columns = kMultiCgraDefaultColumns;
   int per_cgra_rows = kPerCgraDefaultRows;
   int per_cgra_columns = kPerCgraDefaultColumns;
   int max_ctrl_mem_items = kDefaultMaxCtrlMemItems;
+  int global_reduce_entries = kDefaultGlobalReduceEntries;
   mlir::neura::TileDefaults tile_defaults;
   std::vector<mlir::neura::TileOverride> tile_overrides;
   mlir::neura::LinkDefaults link_defaults;
@@ -67,11 +69,11 @@ mlir::FailureOr<Architecture> ArchParser::getArchitecture() {
     }
 
     // Parse YAML configuration
-    if (!parseArchitectureYaml(yaml_doc, multi_cgra_rows, multi_cgra_columns,
-                               multi_cgra_base_topology, per_cgra_rows,
-                               per_cgra_columns, per_cgra_base_topology,
-                               max_ctrl_mem_items, tile_defaults,
-                               tile_overrides, link_defaults, link_overrides)) {
+    if (!parseArchitectureYaml(
+            yaml_doc, multi_cgra_rows, multi_cgra_columns,
+            multi_cgra_base_topology, per_cgra_rows, per_cgra_columns,
+            per_cgra_base_topology, max_ctrl_mem_items, global_reduce_entries,
+            tile_defaults, tile_overrides, link_defaults, link_overrides)) {
       return failure();
     }
   } else {
@@ -81,15 +83,17 @@ mlir::FailureOr<Architecture> ArchParser::getArchitecture() {
 
   return Architecture(multi_cgra_rows, multi_cgra_columns,
                       multi_cgra_base_topology, per_cgra_rows, per_cgra_columns,
-                      max_ctrl_mem_items, per_cgra_base_topology, tile_defaults,
-                      tile_overrides, link_defaults, link_overrides);
+                      max_ctrl_mem_items, global_reduce_entries,
+                      per_cgra_base_topology, tile_defaults, tile_overrides,
+                      link_defaults, link_overrides);
 }
 
 bool ArchParser::parseArchitectureYaml(
     llvm::yaml::Document &doc, int &multi_cgra_rows, int &multi_cgra_columns,
     mlir::neura::BaseTopology &multi_cgra_base_topology, int &per_cgra_rows,
     int &per_cgra_columns, mlir::neura::BaseTopology &per_cgra_base_topology,
-    int &max_ctrl_mem_items, mlir::neura::TileDefaults &tile_defaults,
+    int &max_ctrl_mem_items, int &global_reduce_entries,
+    mlir::neura::TileDefaults &tile_defaults,
     std::vector<mlir::neura::TileOverride> &tile_overrides,
     mlir::neura::LinkDefaults &link_defaults,
     std::vector<mlir::neura::LinkOverride> &link_overrides) {
@@ -173,6 +177,10 @@ bool ArchParser::parseArchitectureYaml(
           if (parseYamlScalarInt(per_cgra_map_key_value_pair.getValue(),
                                  temp_value))
             max_ctrl_mem_items = temp_value;
+        } else if (per_cgra_map_key_ref == kGlobalReduceEntries) {
+          if (parseYamlScalarInt(per_cgra_map_key_value_pair.getValue(),
+                                 temp_value))
+            global_reduce_entries = temp_value;
         }
       }
     } else if (key_ref == kTileDefaults) {

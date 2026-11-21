@@ -52,6 +52,7 @@ struct Instruction {
   int time_step = -1;    // original scheduling timestep.
   int index_per_ii = -1; // grouping key (typically time_step % compiled_ii).
   int invalid_iterations = 0; // prologue length before the op becomes valid.
+  int reduce_id = -1;         // global reduce table entry; -1 for other ops.
   Instruction(const std::string &op) : opcode(op) {}
 };
 
@@ -186,6 +187,11 @@ static std::optional<int> getMappedRegId(Operation *op) {
 static std::string getOpcode(Operation *op) {
   if (auto mac = dyn_cast<MacOp>(op)) {
     return mac.getInput1() ? "MUL_ADD" : "MUL";
+  }
+  // The hardware sums every vector reduction across the CGRAs that run the
+  // kernel, so the reduction is emitted as a global reduce.
+  if (isa<VectorReduceAddOp>(op)) {
+    return "VECTOR.REDUCE.ADD.GLOBAL";
   }
 
   std::string opcode = op->getName().getStringRef().str();
@@ -470,6 +476,7 @@ struct GenerateCodePass
   // Map (col,row,index_per_ii,local_idx_in_bucket) -> global instruction id.
   std::map<std::tuple<int, int, int, int>, int> instruction_id_map;
   int next_instruction_id = 0;
+  int next_reduce_id = 0;
   int current_compiled_ii = -1;
   bool timing_field_error = false;
   KernelOp current_kernel;
@@ -514,6 +521,7 @@ struct GenerateCodePass
     egress_signatures.clear();
     instruction_id_map.clear();
     next_instruction_id = 0;
+    next_reduce_id = 0;
     timing_field_error = false;
     current_kernel = nullptr;
     stationary_input_index = -1;
@@ -651,6 +659,21 @@ struct GenerateCodePass
       Instruction inst(opcode);
       inst.id = getDfgId(op);
       inst.time_step = placement.time_step;
+      if (isa<VectorReduceAddOp>(op)) {
+        // Each reduction of a kernel takes its own entry of the global reduce
+        // unit.
+        int num_entries =
+            mlir::neura::getArchitecture().getGlobalReduceEntries();
+        if (next_reduce_id >= num_entries) {
+          op->emitError() << "kernel has more vector reductions than the "
+                          << num_entries
+                          << " entries of the global reduce unit "
+                             "(global_reduce_entries in the architecture spec)";
+          timing_field_error = true;
+          return;
+        }
+        inst.reduce_id = next_reduce_id++;
+      }
 
       if (isConstant(op)) {
         inst.src_operands.emplace_back(getConstantLiteral(op), "RED");
@@ -2077,6 +2100,9 @@ struct GenerateCodePass
         yaml_out << "                - opcode: \"" << inst->opcode << "\"\n";
         if (inst->id >= 0)
           yaml_out << "                  id: " << inst->id << "\n";
+        if (inst->reduce_id >= 0)
+          yaml_out << "                  reduce_id: " << inst->reduce_id
+                   << "\n";
         yaml_out << "                  time_step: " << inst->time_step << "\n"
                  << "                  invalid_iterations: "
                  << inst->invalid_iterations << "\n";

@@ -22,6 +22,7 @@ constexpr llvm::StringLiteral kRows = "rows";
 constexpr llvm::StringLiteral kColumns = "columns";
 constexpr llvm::StringLiteral kBaseTopology = "base_topology";
 constexpr llvm::StringLiteral kCtrlMemItems = "ctrl_mem_items";
+constexpr llvm::StringLiteral kGlobalReduceEntries = "global_reduce_entries";
 constexpr llvm::StringLiteral kTileX = "tile_x";
 constexpr llvm::StringLiteral kTileY = "tile_y";
 constexpr llvm::StringLiteral kCgraX = "cgra_x";
