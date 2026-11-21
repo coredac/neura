@@ -321,63 +321,42 @@ DEFINE_BINARY_OP_PATTERN(And, AndOp)
 DEFINE_BINARY_OP_PATTERN(Or, OrOp)
 
 // Pattern for GEP operation (base + indices).
-struct FuseGEPConstantPattern : public GenericFuseConstantPattern<neura::GEP> {
-  using GenericFuseConstantPattern<neura::GEP>::GenericFuseConstantPattern;
-
-  // GEP always uses lhs_value for base (operand 0).
-  std::string getAttributeName(size_t operand_idx,
-                               size_t total_operands) const override {
-    if (operand_idx == 0) {
-      return neura::attr::kLhsValue.str();
-    } else {
-      return "operand_" + std::to_string(operand_idx) + "_value";
-    }
-  }
-
-  Operation *
-  createOpWithFoldedConstants(neura::GEP op, ArrayRef<Value> non_const_operands,
-                              PatternRewriter &rewriter) const override {
-    // GEP: operand 0 is base, rest are indices.
-    // Uses the provided non_const_operands which already determined what to
-    // keep.
-    Value orig_base = op.getBase();
-
-    // Determines which operands from non_const_operands are base vs indices.
-    // We need to check each operand in non_const_operands against the original.
-    SmallVector<Value> operands;
-    int32_t num_base = 0;
-    int32_t num_indices = 0;
-
-    for (Value val : non_const_operands) {
-      // Checks if this is the base operand.
-      if (val == orig_base) {
-        assert(num_base == 0);
-        operands.push_back(val);
-        num_base = 1;
-      } else {
-        // Must be one of the indices.
-        operands.push_back(val);
-        num_indices++;
-      }
+// Only folds the base, because the hardware GEP unit takes its constant
+// operand as the base.
+struct FuseGEPConstantPattern : public OpRewritePattern<neura::GEP> {
+  using OpRewritePattern<neura::GEP>::OpRewritePattern;
+  LogicalResult matchAndRewrite(neura::GEP op,
+                                PatternRewriter &rewriter) const override {
+    if (op->hasAttr(neura::attr::kLhsValue)) {
+      return failure();
     }
 
-    // Creates operation with proper operandSegmentSizes.
+    Value base = op.getBase();
+    if (!base || !isOriginConstantOp(base)) {
+      return failure();
+    }
+    auto constant_op = dyn_cast<neura::ConstantOp>(base.getDefiningOp());
+    SmallVector<Value> indices(op.getIndices().begin(), op.getIndices().end());
+
     OperationState state(op.getLoc(), op.getOperationName());
-    state.addOperands(operands);
+    state.addOperands(indices);
     state.addTypes(op->getResultTypes());
-
-    // Copies attributes except operandSegmentSizes.
     for (auto attr : op->getAttrs()) {
       if (attr.getName() != "operandSegmentSizes") {
         state.addAttribute(attr.getName(), attr.getValue());
       }
     }
-
-    // Sets the correct operandSegmentSizes.
+    state.addAttribute(neura::attr::kLhsValue, getOriginConstantValue(base));
     state.addAttribute("operandSegmentSizes",
-                       rewriter.getDenseI32ArrayAttr({num_base, num_indices}));
+                       rewriter.getDenseI32ArrayAttr(
+                           {0, static_cast<int32_t>(indices.size())}));
 
-    return rewriter.create(state);
+    Operation *new_op = rewriter.create(state);
+    rewriter.replaceOp(op, new_op->getResults());
+    if (constant_op->use_empty()) {
+      rewriter.eraseOp(constant_op);
+    }
+    return success();
   }
 };
 

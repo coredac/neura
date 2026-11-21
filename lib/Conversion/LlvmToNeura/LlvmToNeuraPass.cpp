@@ -5,6 +5,7 @@
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/LLVMIR/LLVMAttrs.h"
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -433,32 +434,101 @@ struct LlvmFCmpToNeuraFCmp : public OpRewritePattern<LLVM::FCmpOp> {
   }
 };
 
+// Returns how many scalar elements `type` occupies, or failure for types whose
+// layout is not a dense array of scalars (e.g. structs).
+static FailureOr<int64_t> getNumScalarElements(Type type) {
+  if (auto array_type = dyn_cast<LLVM::LLVMArrayType>(type)) {
+    FailureOr<int64_t> inner = getNumScalarElements(array_type.getElementType());
+    if (failed(inner))
+      return failure();
+    return static_cast<int64_t>(array_type.getNumElements()) * *inner;
+  }
+  if (auto vector_type = dyn_cast<VectorType>(type))
+    return vector_type.getNumElements();
+  if (type.isIntOrFloat())
+    return 1;
+  return failure();
+}
+
+// Lowers to the forms the hardware GEP unit supports: `base + i` or
+// `base + i * stride + j`. Outer dimensions fold into `i` with mul/add, and
+// constant-zero indices are dropped since they add nothing to the address.
 struct LlvmGEPToNeuraGEP : public OpRewritePattern<mlir::LLVM::GEPOp> {
   using OpRewritePattern::OpRewritePattern;
 
   LogicalResult matchAndRewrite(mlir::LLVM::GEPOp op,
                                 PatternRewriter &rewriter) const override {
+    Location loc = op.getLoc();
     Value base = op.getBase();
-    SmallVector<Value> index_values;
 
+    auto createConstant = [&](Type type, int64_t value) -> Value {
+      return rewriter.create<neura::ConstantOp>(
+          loc, type, rewriter.getIntegerAttr(type, value));
+    };
+
+    SmallVector<Value> indices;
+    SmallVector<int64_t> strides;
+    Type current_type = op.getElemType();
+    bool is_first_index = true;
     for (auto gep_index : op.getIndices()) {
-      if (auto val = gep_index.dyn_cast<Value>()) {
-        index_values.push_back(val);
-      } else if (auto int_attr = gep_index.dyn_cast<IntegerAttr>()) {
-        // Creates constant operation state manually.
-        OperationState state(op.getLoc(),
-                             neura::ConstantOp::getOperationName());
-        state.addAttribute("value", int_attr);
-        state.addTypes(rewriter.getIndexType());
-        Value cst = rewriter.create(state)->getResult(0);
-        index_values.push_back(cst);
-      } else {
-        return op.emitOpError("Unsupported GEP index kind");
+      if (!is_first_index) {
+        auto array_type = dyn_cast<LLVM::LLVMArrayType>(current_type);
+        if (!array_type)
+          return op.emitOpError("GEP into non-array type is not supported: ")
+                 << current_type;
+        current_type = array_type.getElementType();
       }
+      is_first_index = false;
+
+      FailureOr<int64_t> stride = getNumScalarElements(current_type);
+      if (failed(stride))
+        return op.emitOpError("GEP over unsupported element type: ")
+               << current_type;
+
+      if (auto value = gep_index.dyn_cast<Value>()) {
+        indices.push_back(value);
+      } else {
+        int64_t constant = cast<IntegerAttr>(gep_index).getInt();
+        if (constant == 0)
+          continue;
+        indices.push_back(createConstant(rewriter.getI64Type(), constant));
+      }
+      strides.push_back(*stride);
     }
 
-    rewriter.replaceOpWithNewOp<neura::GEP>(op, op.getType(), base,
-                                            index_values);
+    if (indices.empty()) {
+      rewriter.replaceOp(op, base);
+      return success();
+    }
+
+    auto scale = [&](Value index, int64_t factor) -> Value {
+      if (factor == 1)
+        return index;
+      Value factor_value = createConstant(index.getType(), factor);
+      return rewriter.create<neura::MulOp>(loc, index.getType(), index,
+                                           factor_value);
+    };
+
+    size_t num_indices = indices.size();
+    Value inner = scale(indices.back(), strides.back());
+    if (num_indices == 1) {
+      rewriter.replaceOpWithNewOp<neura::GEP>(op, op.getType(), base,
+                                              ValueRange{inner},
+                                              rewriter.getI64ArrayAttr({1}));
+      return success();
+    }
+
+    // Outer strides are multiples of the second-innermost one because each
+    // array dimension nests inside the previous.
+    int64_t row_stride = strides[num_indices - 2];
+    Value outer = indices[num_indices - 2];
+    for (size_t i = 0; i + 2 < num_indices; ++i) {
+      Value scaled = scale(indices[i], strides[i] / row_stride);
+      outer = rewriter.create<neura::AddOp>(loc, outer.getType(), outer, scaled);
+    }
+    rewriter.replaceOpWithNewOp<neura::GEP>(
+        op, op.getType(), base, ValueRange{outer, inner},
+        rewriter.getI64ArrayAttr({row_stride, 1}));
     return success();
   }
 };
@@ -885,6 +955,131 @@ struct LlvmCallToFuncCall : public OpRewritePattern<LLVM::CallOp> {
   }
 };
 
+// Returns the byte size of the scalar elements in `type`.
+static FailureOr<int64_t> getScalarBytes(Type type) {
+  while (auto array_type = dyn_cast<LLVM::LLVMArrayType>(type))
+    type = array_type.getElementType();
+  if (auto vector_type = dyn_cast<VectorType>(type))
+    type = vector_type.getElementType();
+  if (!type.isIntOrFloat() || type.getIntOrFloatBitWidth() % 8 != 0)
+    return failure();
+  return static_cast<int64_t>(type.getIntOrFloatBitWidth() / 8);
+}
+
+static bool isByteGEP(LLVM::GEPOp op) { return op.getElemType().isInteger(8); }
+
+// Returns the scalar size shared by every memory access made through `ptr`.
+static FailureOr<int64_t> getAccessedScalarBytes(Value ptr) {
+  std::optional<int64_t> bytes;
+  for (Operation *user : ptr.getUsers()) {
+    FailureOr<int64_t> user_bytes = failure();
+    if (auto load = dyn_cast<LLVM::LoadOp>(user)) {
+      user_bytes = getScalarBytes(load.getType());
+    } else if (auto store = dyn_cast<LLVM::StoreOp>(user);
+               store && store.getAddr() == ptr) {
+      user_bytes = getScalarBytes(store.getValue().getType());
+    } else if (auto gep = dyn_cast<LLVM::GEPOp>(user);
+               gep && gep.getBase() == ptr) {
+      user_bytes = isByteGEP(gep) ? getAccessedScalarBytes(gep.getResult())
+                                  : getScalarBytes(gep.getElemType());
+    }
+    if (failed(user_bytes) || (bytes && *bytes != *user_bytes))
+      return failure();
+    bytes = *user_bytes;
+  }
+  if (!bytes)
+    return failure();
+  return *bytes;
+}
+
+// Converts a byte offset into an element offset. Handles constants and
+// constant-scaled offsets, which is how clang emits array row steps.
+static FailureOr<Value> divideByteOffset(OpBuilder &builder, Value offset,
+                                         int64_t scalar_bytes) {
+  Location loc = offset.getLoc();
+  Type type = offset.getType();
+  auto createConstant = [&](int64_t value) -> Value {
+    return builder.create<LLVM::ConstantOp>(
+        loc, type, builder.getIntegerAttr(type, value));
+  };
+
+  APInt constant;
+  if (matchPattern(offset, m_ConstantInt(&constant))) {
+    int64_t bytes = constant.getSExtValue();
+    if (bytes % scalar_bytes != 0)
+      return failure();
+    return createConstant(bytes / scalar_bytes);
+  }
+
+  Operation *def = offset.getDefiningOp();
+  if (auto shl = dyn_cast_or_null<LLVM::ShlOp>(def)) {
+    if (!matchPattern(shl.getRhs(), m_ConstantInt(&constant)))
+      return failure();
+    int64_t shift = constant.getSExtValue() - llvm::Log2_64(scalar_bytes);
+    if (shift < 0)
+      return failure();
+    if (shift == 0)
+      return shl.getLhs();
+    return builder.create<LLVM::ShlOp>(loc, shl.getLhs(), createConstant(shift))
+        .getResult();
+  }
+  if (auto mul = dyn_cast_or_null<LLVM::MulOp>(def)) {
+    Value other = mul.getLhs();
+    if (!matchPattern(mul.getRhs(), m_ConstantInt(&constant))) {
+      other = mul.getRhs();
+      if (!matchPattern(mul.getLhs(), m_ConstantInt(&constant)))
+        return failure();
+    }
+    int64_t factor = constant.getSExtValue();
+    if (factor % scalar_bytes != 0)
+      return failure();
+    if (factor == scalar_bytes)
+      return other;
+    return builder
+        .create<LLVM::MulOp>(loc, other, createConstant(factor / scalar_bytes))
+        .getResult();
+  }
+  return failure();
+}
+
+// Rewrites byte-offset GEPs (`gep i8, %p, %offset`) to count elements, because
+// the CGRA data memory holds one element per word.
+static LogicalResult rewriteByteOffsetGEPs(Region &region) {
+  SmallVector<LLVM::GEPOp> byte_geps;
+  region.walk([&](LLVM::GEPOp op) {
+    if (isByteGEP(op))
+      byte_geps.push_back(op);
+  });
+  for (LLVM::GEPOp op : byte_geps) {
+    FailureOr<int64_t> scalar_bytes = getAccessedScalarBytes(op.getResult());
+    if (failed(scalar_bytes))
+      return op.emitOpError(
+          "cannot infer the element size accessed through a byte-offset GEP");
+    if (*scalar_bytes == 1)
+      continue;
+    if (op.getIndices().size() != 1)
+      return op.emitOpError("byte-offset GEP must have exactly one index");
+
+    OpBuilder builder(op);
+    auto index = *op.getIndices().begin();
+    if (auto value = index.dyn_cast<Value>()) {
+      FailureOr<Value> divided =
+          divideByteOffset(builder, value, *scalar_bytes);
+      if (failed(divided))
+        return op.emitOpError("cannot convert byte offset to element offset");
+      op.getDynamicIndicesMutable()[0].assign(*divided);
+    } else {
+      int64_t bytes = cast<IntegerAttr>(index).getInt();
+      if (bytes % *scalar_bytes != 0)
+        return op.emitOpError("byte offset is not a multiple of element size");
+      op.setRawConstantIndices(
+          {static_cast<int32_t>(bytes / *scalar_bytes)});
+    }
+    op.setElemType(builder.getIntegerType(*scalar_bytes * 8));
+  }
+  return success();
+}
+
 struct LowerLlvmToNeuraPass
     : public PassWrapper<LowerLlvmToNeuraPass, OperationPass<ModuleOp>> {
 
@@ -988,6 +1183,10 @@ struct LowerLlvmToNeuraPass
             func->getAttrOfType<StringAttr>(mlir::accel::kAcceleratorAttr);
         if (target && target.getValue() == mlir::accel::kNeuraTarget) {
           for (Region &region : func->getRegions()) {
+            if (failed(rewriteByteOffsetGEPs(region))) {
+              signalPassFailure();
+              continue;
+            }
             RewritePatternSet patterns = populateLlvmToNeuraPatterns(context);
             if (failed(applyPatternsGreedily(region, std::move(patterns)))) {
               signalPassFailure();
@@ -1005,6 +1204,10 @@ struct LowerLlvmToNeuraPass
         if (accel_target &&
             accel_target.getValue() == mlir::accel::kNeuraTarget) {
           Region &kernel_region = kernel_op.getBody();
+          if (failed(rewriteByteOffsetGEPs(kernel_region))) {
+            signalPassFailure();
+            return;
+          }
           RewritePatternSet patterns = populateLlvmToNeuraPatterns(context);
           if (failed(
                   applyPatternsGreedily(kernel_region, std::move(patterns)))) {
