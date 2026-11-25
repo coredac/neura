@@ -118,7 +118,7 @@
 // MAPPING-NEXT:     %92 = "neura.data_mov"(%87) {dfg_id = 151 : i32, mapping_locs = [{id = 36 : i32, index_per_ii = 9 : i32, invalid_iterations = 0 : i32, resource = "link", time_step = 9 : i32}]} : (!neura.data<i64, i1>) -> !neura.data<i64, i1>
 // MAPPING-NEXT:     %93 = "neura.add"(%91, %92) {dfg_id = 158 : i32, mapping_locs = [{id = 7 : i32, index_per_ii = 10 : i32, invalid_iterations = 0 : i32, resource = "tile", time_step = 10 : i32, x = 3 : i32, y = 1 : i32}]} : (!neura.data<i64, i1>, !neura.data<i64, i1>) -> !neura.data<i64, i1>
 // MAPPING-NEXT:     %94 = "neura.data_mov"(%93) {dfg_id = 173 : i32, mapping_locs = [{id = 22 : i32, index_per_ii = 10 : i32, invalid_iterations = 0 : i32, resource = "link", time_step = 10 : i32}]} : (!neura.data<i64, i1>) -> !neura.data<i64, i1>
-// MAPPING-NEXT:     %95 = "neura.gep"(%94) <{operandSegmentSizes = array<i32: 0, 1>}> {dfg_id = 178 : i32, lhs_value = "%arg2", mapping_locs = [{id = 3 : i32, index_per_ii = 11 : i32, invalid_iterations = 0 : i32, resource = "tile", time_step = 11 : i32, x = 3 : i32, y = 0 : i32}]} : (!neura.data<i64, i1>) -> !neura.data<!llvm.ptr, i1>
+// MAPPING-NEXT:     %95 = "neura.gep"(%94) <{operandSegmentSizes = array<i32: 0, 1>, strides = [1]}> {dfg_id = 178 : i32, lhs_value = "%arg2", mapping_locs = [{id = 3 : i32, index_per_ii = 11 : i32, invalid_iterations = 0 : i32, resource = "tile", time_step = 11 : i32, x = 3 : i32, y = 0 : i32}]} : (!neura.data<i64, i1>) -> !neura.data<!llvm.ptr, i1>
 
 // YAML:      array_config:
 // YAML-NEXT:   columns: 4

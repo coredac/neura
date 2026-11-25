@@ -52,6 +52,7 @@ struct Instruction {
   int time_step = -1;    // original scheduling timestep.
   int index_per_ii = -1; // grouping key (typically time_step % compiled_ii).
   int invalid_iterations = 0; // prologue length before the op becomes valid.
+  int64_t gep_stride = -1;    // row stride of a GEP_2D, in elements.
   Instruction(const std::string &op) : opcode(op) {}
 };
 
@@ -194,6 +195,9 @@ static std::string getOpcode(Operation *op) {
   }
   if (isConstant(op)) {
     return "CONSTANT";
+  }
+  if (auto gep = dyn_cast<GEP>(op); gep && gep.getIndices().size() == 2) {
+    return "GEP_2D";
   }
   std::transform(opcode.begin(), opcode.end(), opcode.begin(), ::toupper);
 
@@ -651,6 +655,9 @@ struct GenerateCodePass
       Instruction inst(opcode);
       inst.id = getDfgId(op);
       inst.time_step = placement.time_step;
+      if (auto gep = dyn_cast<GEP>(op); gep && gep.getIndices().size() == 2) {
+        inst.gep_stride = cast<IntegerAttr>(gep.getStrides()[0]).getInt();
+      }
 
       if (isConstant(op)) {
         inst.src_operands.emplace_back(getConstantLiteral(op), "RED");
@@ -2080,6 +2087,8 @@ struct GenerateCodePass
         yaml_out << "                  time_step: " << inst->time_step << "\n"
                  << "                  invalid_iterations: "
                  << inst->invalid_iterations << "\n";
+        if (inst->gep_stride >= 0)
+          yaml_out << "                  stride: " << inst->gep_stride << "\n";
         // sources.
         if (!inst->src_operands.empty()) {
           yaml_out << "                  src_operands:\n";

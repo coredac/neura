@@ -422,7 +422,19 @@ def Neura_GatherOp : Op<NeuraDialect, "gather"> {
 // Defines a pointer computation operation.
 def Neura_GEP : Op<NeuraDialect, "gep", [AttrSizedOperandSegments]> {
   let summary = "Pointer computation using offset indices";
-  let arguments = (ins Optional<AnyType>:$base, Variadic<AnyType>:$indices);
+  let description = [{
+    Computes `base + sum_i(indices[i] * strides[i])`. Strides count scalar
+    elements, not bytes, because the CGRA data memory holds one element per
+    word. The hardware GEP unit takes at most two indices with an innermost
+    stride of 1, so lowering emits only that form.
+
+    Example:
+      // A[i][j] where A is int[N][16]
+      %0 = "neura.gep"(%base, %i, %j) <{operandSegmentSizes = array<i32: 1, 2>,
+                                        strides = [16, 1]}> : ...
+  }];
+  let arguments = (ins Optional<AnyType>:$base, Variadic<AnyType>:$indices,
+                       I64ArrayAttr:$strides);
   let results = (outs AnyType:$result);
   // let assemblyFormat = "$base `[` $indices `]` `,` $predicate attr-dict";
 }

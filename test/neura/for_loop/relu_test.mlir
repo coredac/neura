@@ -48,12 +48,12 @@
 // CHECK-NEXT:   ^bb1:  // pred: ^bb4
 // CHECK-NEXT:     "neura.return"() : () -> ()
 // CHECK-NEXT:   ^bb2(%6: i64, %7: !llvm.ptr, %8: i32, %9: !llvm.ptr, %10: i64, %11: i64):  // 2 preds: ^bb0, ^bb4
-// CHECK-NEXT:     %12 = "neura.gep"(%7, %6) <{operandSegmentSizes = array<i32: 1, 1>}> : (!llvm.ptr, i64) -> !llvm.ptr
+// CHECK-NEXT:     %12 = "neura.gep"(%7, %6) <{operandSegmentSizes = array<i32: 1, 1>, strides = [1]}> : (!llvm.ptr, i64) -> !llvm.ptr
 // CHECK-NEXT:     %13 = "neura.load"(%12) : (!llvm.ptr) -> i32
 // CHECK-NEXT:     %14 = "neura.icmp"(%13, %8) <{cmpType = "sgt"}> : (i32, i32) -> i1
 // CHECK-NEXT:     neura.cond_br %14 : i1 then %9, %6, %13, %10, %11, %7, %8 : !llvm.ptr, i64, i32, i64, i64, !llvm.ptr, i32 to ^bb3 else %10, %11, %7, %8, %9 : i64, i64, !llvm.ptr, i32, !llvm.ptr to ^bb4
 // CHECK-NEXT:   ^bb3(%15: !llvm.ptr, %16: i64, %17: i32, %18: i64, %19: i64, %20: !llvm.ptr, %21: i32):  // pred: ^bb2
-// CHECK-NEXT:     %22 = "neura.gep"(%15, %16) <{operandSegmentSizes = array<i32: 1, 1>}> : (!llvm.ptr, i64) -> !llvm.ptr
+// CHECK-NEXT:     %22 = "neura.gep"(%15, %16) <{operandSegmentSizes = array<i32: 1, 1>, strides = [1]}> : (!llvm.ptr, i64) -> !llvm.ptr
 // CHECK-NEXT:     %23 = "neura.load"(%22) : (!llvm.ptr) -> i32
 // CHECK-NEXT:     %24 = "neura.add"(%23, %17) : (i32, i32) -> i32
 // CHECK-NEXT:     "neura.store"(%24, %22) : (i32, !llvm.ptr) -> ()
@@ -92,7 +92,7 @@
 // CTRL2DATA-NEXT:     %21 = neura.phi_start %1, %20 : !neura.data<!llvm.ptr, i1>, !neura.data<!llvm.ptr, i1> -> !neura.data<!llvm.ptr, i1>
 // CTRL2DATA-NEXT:     %22 = neura.reserve : !neura.data<i64, i1>
 // CTRL2DATA-NEXT:     %23 = neura.phi_start %5, %22 : !neura.data<i64, i1>, !neura.data<i64, i1> -> !neura.data<i64, i1>
-// CTRL2DATA-NEXT:     %24 = "neura.gep"(%21, %23) <{operandSegmentSizes = array<i32: 1, 1>}> : (!neura.data<!llvm.ptr, i1>, !neura.data<i64, i1>) -> !neura.data<!llvm.ptr, i1>
+// CTRL2DATA-NEXT:     %24 = "neura.gep"(%21, %23) <{operandSegmentSizes = array<i32: 1, 1>, strides = [1]}> : (!neura.data<!llvm.ptr, i1>, !neura.data<i64, i1>) -> !neura.data<!llvm.ptr, i1>
 // CTRL2DATA-NEXT:     %25 = "neura.load"(%24) : (!neura.data<!llvm.ptr, i1>) -> !neura.data<i32, i1>
 // CTRL2DATA-NEXT:     %26 = "neura.icmp"(%25, %19) <{cmpType = "sgt"}> : (!neura.data<i32, i1>, !neura.data<i32, i1>) -> !neura.data<i1, i1>
 // CTRL2DATA-NEXT:     %27 = neura.grant_predicate %17, %26 : !neura.data<!llvm.ptr, i1>, !neura.data<i1, i1> -> !neura.data<!llvm.ptr, i1>
@@ -108,7 +108,7 @@
 // CTRL2DATA-NEXT:     %37 = neura.grant_predicate %21, %34 : !neura.data<!llvm.ptr, i1>, !neura.data<i1, i1> -> !neura.data<!llvm.ptr, i1>
 // CTRL2DATA-NEXT:     %38 = neura.grant_predicate %19, %34 : !neura.data<i32, i1>, !neura.data<i1, i1> -> !neura.data<i32, i1>
 // CTRL2DATA-NEXT:     %39 = neura.grant_predicate %17, %34 : !neura.data<!llvm.ptr, i1>, !neura.data<i1, i1> -> !neura.data<!llvm.ptr, i1>
-// CTRL2DATA-NEXT:     %40 = "neura.gep"(%27, %28) <{operandSegmentSizes = array<i32: 1, 1>}> : (!neura.data<!llvm.ptr, i1>, !neura.data<i64, i1>) -> !neura.data<!llvm.ptr, i1>
+// CTRL2DATA-NEXT:     %40 = "neura.gep"(%27, %28) <{operandSegmentSizes = array<i32: 1, 1>, strides = [1]}> : (!neura.data<!llvm.ptr, i1>, !neura.data<i64, i1>) -> !neura.data<!llvm.ptr, i1>
 // CTRL2DATA-NEXT:     %41 = "neura.load"(%40) : (!neura.data<!llvm.ptr, i1>) -> !neura.data<i32, i1>
 // CTRL2DATA-NEXT:     %42 = "neura.add"(%41, %29) : (!neura.data<i32, i1>, !neura.data<i32, i1>) -> !neura.data<i32, i1>
 // CTRL2DATA-NEXT:     "neura.store"(%42, %40) : (!neura.data<i32, i1>, !neura.data<!llvm.ptr, i1>) -> ()
