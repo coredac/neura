@@ -111,6 +111,8 @@ OperationKind getOperationKindFromMlirOp(Operation *op) {
   // Vector operations
   if (isa<neura::VFMulOp>(op))
     return VFMul;
+  if (isa<neura::VectorReduceAddOp>(op))
+    return VReduceAdd;
 
   // Fused operations
   if (isa<neura::FAddFAddOp>(op))
